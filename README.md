@@ -1,2 +1,2 @@
 # padlock
-Padlock analyzes Go struct memory layout to find padding waste, cache-line false sharing, and data locality problems. Auto-fixes field ordering, flags concurrent access risks, and ranks findings by real impact. CLI-first, CI-ready, multi-arch aware.
+Struct memory layout analyzer for C, C++, Rust, Go, and more. Finds padding waste, false sharing, and locality problems — ranks by impact, auto-fixes field ordering, flags concurrency risks. CLI-first, CI-ready, multi-arch.

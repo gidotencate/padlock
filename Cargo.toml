@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/padlock",
     "crates/padlock-cli",
     "crates/padlock-core",
     "crates/padlock-dwarf",

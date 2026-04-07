@@ -75,10 +75,15 @@ cargo publish -p padlock-dwarf
 cargo publish -p padlock-source
 cargo publish -p padlock-output
 cargo publish -p padlock-macros   # proc-macro crate; no runtime deps on other crates
-cargo publish -p padlock-cli      # the binary, named "padlock"
+cargo publish -p padlock           # facade crate re-exporting padlock-macros
+cargo publish -p padlock-cli      # the binary, named "padlock" (as binary, not lib)
 ```
 
 Wait ~30 seconds between each to let the registry index propagate. The `cargo-padlock` binary is part of `padlock-cli` and is published alongside it automatically.
+
+> **Note**: The `padlock` facade crate and `padlock-cli` both claim the name "padlock" in different senses (one is a lib, one provides a binary). On crates.io, only one crate can occupy a given name. You have two options:
+> - Publish only `padlock-cli` as "padlock" (users get the binary via `cargo install padlock`) and rename the facade to `padlock-lib` or `padlock-macros-prelude`
+> - Publish the facade as "padlock" and rename the CLI crate to "padlock-cli" on crates.io (users install via `cargo install padlock-cli`)
 
 ### After Publishing
 
@@ -184,11 +189,15 @@ Before you publish to crates.io or announce the tool, consider addressing:
 | Watch mode (`padlock watch`) | High | Medium | Done |
 | `#[assert_no_padding]` proc macro | High | Medium | Done |
 | GitHub Actions `action.yml` | High | Low | Done |
-| Remove `libsource.a` from the repo (binary artifact, should not be committed) | Recommended | Low | Pending |
-| `padlock` facade crate re-exporting `padlock-macros` (for `use padlock::assert_no_padding` syntax) | Medium | Low | Pending |
-| In-place `fix` for bit-field and union structs | Low | Medium | Pending |
-| Nested struct size resolution (field type = another struct in same file) | Medium | High | Pending |
-| C++ inheritance / vtable padding | Medium | High | Pending |
-| Configuration file (`.padlock.toml`) for per-project thresholds | Low | Medium | Pending |
+| `padlock` facade crate re-exporting `padlock-macros` | Medium | Low | Done |
+| In-place `fix` for all source languages | Medium | Medium | Done |
+| Nested struct size resolution | Medium | High | Done |
+| C++ inheritance / vtable padding | Medium | High | Done |
+| Configuration file (`.padlock.toml`) | Low | Medium | Done |
+| Remove `libsource.a` from the repo (binary artifact) | Recommended | Low | Check before publish |
+| Resolve crate name conflict (`padlock` facade vs `padlock-cli` binary) | Required for publish | Low | Pending decision |
 
-The tool is fully functional for its stated scope today. Start with publishing to GitHub, then crates.io once `libsource.a` is removed from the repo and the facade crate question is resolved.
+The tool is feature-complete for its stated scope. Remaining pre-publish steps:
+1. Check whether any binary artifact (`libsource.a`, `*.o`) is tracked in git and remove it
+2. Decide on the crate name strategy (see note above about "padlock" name conflict)
+3. Run `cargo publish --dry-run -p padlock-core` through all crates to catch metadata issues

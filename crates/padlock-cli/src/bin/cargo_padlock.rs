@@ -19,6 +19,11 @@ use std::process::Command;
 use anyhow::{bail, Context};
 use clap::Parser;
 
+// Re-use config from the library part of the crate.
+#[path = "../config.rs"]
+mod config;
+use config::Config;
+
 #[derive(Parser)]
 #[command(
     name = "cargo-padlock",
@@ -129,7 +134,22 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Load config from current directory (project root where cargo padlock is run).
+    let cfg = Config::load_from(&std::env::current_dir().unwrap_or_default());
+
+    // Filter ignored structs
+    let layouts: Vec<_> = layouts
+        .into_iter()
+        .filter(|l| !cfg.is_ignored(&l.name))
+        .collect();
+
     let report = padlock_core::findings::Report::from_layouts(&layouts);
+
+    // Apply severity filter
+    let mut report = report;
+    for sr in &mut report.structs {
+        sr.findings.retain(|f| cfg.should_report(f.severity()));
+    }
 
     if args.sarif {
         let sarif = padlock_output::to_sarif(&report).context("SARIF serialisation failed")?;
@@ -141,13 +161,15 @@ fn main() -> anyhow::Result<()> {
         print!("{}", padlock_output::render_report(&report));
     }
 
-    // Exit non-zero when high-severity findings exist (useful for CI gates).
+    // Exit non-zero when fail_below threshold is breached or any high-severity finding exists.
+    let failed_score = cfg.fail_below > 0
+        && report.structs.iter().any(|s| s.score < cfg.fail_below as f64);
     let has_high = report.structs.iter().any(|sr| {
         sr.findings
             .iter()
             .any(|f| *f.severity() == padlock_core::findings::Severity::High)
     });
-    if has_high {
+    if failed_score || has_high {
         std::process::exit(1);
     }
 

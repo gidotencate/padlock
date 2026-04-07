@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+pub mod config;
 mod commands {
     pub mod analyze;
     pub mod diff;

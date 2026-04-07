@@ -2,7 +2,7 @@
 
 ## Overview
 
-padlock is a Cargo workspace of six crates. The data flows in one direction:
+padlock is a Cargo workspace of seven crates. The data flows in one direction:
 
 ```
   Source / Binary input
@@ -44,6 +44,11 @@ padlock is a Cargo workspace of six crates. The data flows in one direction:
   │padlock-macros  │  proc-macro crate — no runtime dependency
   │ #[assert_no_padding]              │
   │ #[assert_size(N)]                 │
+  └────────────────┘
+         ▲
+  ┌────────────────┐
+  │padlock         │  facade crate — re-exports padlock-macros
+  │ use padlock::assert_no_padding    │
   └────────────────┘
 ```
 

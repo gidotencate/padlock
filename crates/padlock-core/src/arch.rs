@@ -52,3 +52,17 @@ pub const RISCV64: ArchConfig = ArchConfig {
     max_align: 16,
     endianness: Endianness::Little,
 };
+
+/// Resolve an architecture name string to a static `ArchConfig` reference.
+///
+/// Accepted values: `x86_64`, `aarch64`, `aarch64_apple`, `wasm32`, `riscv64`.
+pub fn arch_by_name(name: &str) -> Option<&'static ArchConfig> {
+    match name {
+        "x86_64" => Some(&X86_64_SYSV),
+        "aarch64" => Some(&AARCH64),
+        "aarch64_apple" => Some(&AARCH64_APPLE),
+        "wasm32" => Some(&WASM32),
+        "riscv64" => Some(&RISCV64),
+        _ => None,
+    }
+}

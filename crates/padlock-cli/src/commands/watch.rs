@@ -16,7 +16,7 @@
 // FSEvents on macOS, ReadDirectoryChangesW on Windows). Directories are
 // watched recursively; files are watched directly.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -144,6 +144,7 @@ fn run_analysis(path: &Path) -> anyhow::Result<Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use notify::event::{AccessKind, CreateKind, ModifyKind};
     use notify::{Event, EventKind};
 

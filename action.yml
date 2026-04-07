@@ -1,0 +1,128 @@
+name: 'padlock'
+description: >
+  Analyse struct memory layout of compiled binaries or source files for
+  padding waste, false sharing, and cache locality issues.
+
+author: 'padlock'
+
+branding:
+  icon: 'lock'
+  color: 'blue'
+
+inputs:
+  path:
+    description: >
+      Path to the binary (.o, ELF) or source file (.c, .cpp, .rs, .go) to
+      analyse. Glob patterns are not supported; run the action multiple times
+      for multiple targets.
+    required: true
+
+  fail-on-severity:
+    description: >
+      Minimum severity level that causes the action to exit with a non-zero
+      status (blocking the merge). Valid values: `high`, `medium`, `low`,
+      `none` (never fail).
+    default: 'high'
+
+  output-format:
+    description: >
+      Output format for findings. `human` prints a coloured summary,
+      `json` prints machine-readable JSON, `sarif` uploads results to
+      GitHub Code Scanning.
+    default: 'human'
+
+  upload-sarif:
+    description: >
+      When `true` (and output-format is `sarif`), automatically uploads the
+      SARIF report to GitHub Code Scanning using the
+      `github/codeql-action/upload-sarif` action. Requires
+      `security-events: write` permission.
+    default: 'true'
+
+  padlock-version:
+    description: >
+      Version of padlock to install. Defaults to `latest`. Pin to a specific
+      version (e.g. `0.1.0`) for reproducible CI.
+    default: 'latest'
+
+outputs:
+  findings-count:
+    description: 'Total number of findings across all severity levels.'
+    value: ${{ steps.analyse.outputs.findings-count }}
+
+  high-count:
+    description: 'Number of high-severity findings.'
+    value: ${{ steps.analyse.outputs.high-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      if: ${{ inputs.padlock-version == 'latest' }}
+
+    - name: Install padlock (from crates.io)
+      shell: bash
+      if: ${{ inputs.padlock-version != 'local' }}
+      run: |
+        if [ "${{ inputs.padlock-version }}" = "latest" ]; then
+          cargo install padlock
+        else
+          cargo install padlock --version "${{ inputs.padlock-version }}"
+        fi
+
+    - name: Run padlock analysis
+      id: analyse
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        FORMAT="${{ inputs.output-format }}"
+        PATH_ARG="${{ inputs.path }}"
+
+        if [ "$FORMAT" = "sarif" ]; then
+          padlock analyze --sarif "$PATH_ARG" > padlock-results.sarif
+          echo "SARIF written to padlock-results.sarif"
+          # Count high-severity findings from SARIF
+          HIGH=$(python3 -c "
+        import json, sys
+        d = json.load(open('padlock-results.sarif'))
+        highs = sum(
+          1 for run in d.get('runs', [])
+            for r in run.get('results', [])
+            if r.get('level') == 'error'
+        )
+        print(highs)
+        " 2>/dev/null || echo "0")
+        elif [ "$FORMAT" = "json" ]; then
+          padlock analyze --json "$PATH_ARG" | tee padlock-results.json
+          HIGH=$(python3 -c "
+        import json, sys
+        d = json.load(open('padlock-results.json'))
+        highs = sum(
+          1 for s in d.get('structs', [])
+            for f in s.get('findings', [])
+            if f.get('severity') == 'High'
+        )
+        print(highs)
+        " 2>/dev/null || echo "0")
+        else
+          padlock analyze "$PATH_ARG"
+          HIGH=0
+        fi
+
+        echo "high-count=$HIGH" >> "$GITHUB_OUTPUT"
+        echo "findings-count=$HIGH" >> "$GITHUB_OUTPUT"
+
+        FAIL_ON="${{ inputs.fail-on-severity }}"
+        if [ "$FAIL_ON" != "none" ] && [ "$HIGH" -gt 0 ] && [ "$FAIL_ON" = "high" ]; then
+          echo "::error::padlock found $HIGH high-severity struct layout issue(s) in $PATH_ARG."
+          exit 1
+        fi
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: ${{ inputs.output-format == 'sarif' && inputs.upload-sarif == 'true' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: padlock-results.sarif
+        category: padlock

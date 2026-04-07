@@ -34,20 +34,20 @@ pub fn render_struct(sr: &StructReport) -> String {
 
     let score_label = match sr.score as u32 {
         90..=100 => "✓",
-        60..=89  => "~",
-        _        => "✗",
+        60..=89 => "~",
+        _ => "✗",
     };
 
     let location = match (&sr.source_file, sr.source_line) {
         (Some(f), Some(l)) => format!(" ({}:{})", f, l),
-        (Some(f), None)    => format!(" ({})", f),
-        _                  => String::new(),
+        (Some(f), None) => format!(" ({})", f),
+        _ => String::new(),
     };
 
     out.push_str(&format!(
         "[{score_label}] {name}{location}  {size}B  score={score:.0}\n",
-        name  = sr.struct_name,
-        size  = sr.total_size,
+        name = sr.struct_name,
+        size = sr.total_size,
         score = sr.score,
     ));
 
@@ -64,16 +64,26 @@ pub fn render_struct(sr: &StructReport) -> String {
 
 fn render_finding(f: &Finding) -> String {
     let sev = match f.severity() {
-        Severity::High   => "HIGH",
+        Severity::High => "HIGH",
         Severity::Medium => "MEDIUM",
-        Severity::Low    => "LOW",
+        Severity::Low => "LOW",
     };
     match f {
-        Finding::PaddingWaste { wasted_bytes, waste_pct, gaps, .. } => format!(
+        Finding::PaddingWaste {
+            wasted_bytes,
+            waste_pct,
+            gaps,
+            ..
+        } => format!(
             "[{sev}] Padding waste: {wasted_bytes}B ({waste_pct:.0}%) across {} gap(s)",
             gaps.len()
         ),
-        Finding::ReorderSuggestion { savings, optimized_size, suggested_order, .. } => format!(
+        Finding::ReorderSuggestion {
+            savings,
+            optimized_size,
+            suggested_order,
+            ..
+        } => format!(
             "[{sev}] Reorder fields to save {savings}B → {optimized_size}B: {}",
             suggested_order.join(", ")
         ),
@@ -81,7 +91,11 @@ fn render_finding(f: &Finding) -> String {
             "[{sev}] False sharing: {} cache-line conflict(s)",
             conflicts.len()
         ),
-        Finding::LocalityIssue { hot_fields, cold_fields, .. } => format!(
+        Finding::LocalityIssue {
+            hot_fields,
+            cold_fields,
+            ..
+        } => format!(
             "[{sev}] Locality: hot [{}] interleaved with cold [{}]",
             hot_fields.join(", "),
             cold_fields.join(", ")

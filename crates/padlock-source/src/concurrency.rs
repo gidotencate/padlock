@@ -41,24 +41,34 @@ pub fn annotate_concurrency(layout: &mut StructLayout, language: &SourceLanguage
 
 /// Returns `true` if any field has a `Concurrent` access pattern.
 pub fn has_concurrent_fields(layout: &StructLayout) -> bool {
-    layout.fields.iter().any(|f| matches!(f.access, AccessPattern::Concurrent { .. }))
+    layout
+        .fields
+        .iter()
+        .any(|f| matches!(f.access, AccessPattern::Concurrent { .. }))
 }
 
 fn is_concurrent_type(name: &str, lang: &SourceLanguage) -> bool {
     match lang {
         SourceLanguage::Rust => {
-            name.starts_with("Mutex") || name.starts_with("RwLock")
-                || name.starts_with("Arc") || name.contains("Atomic")
-                || name.starts_with("Condvar") || name.starts_with("Once")
+            name.starts_with("Mutex")
+                || name.starts_with("RwLock")
+                || name.starts_with("Arc")
+                || name.contains("Atomic")
+                || name.starts_with("Condvar")
+                || name.starts_with("Once")
         }
         SourceLanguage::C | SourceLanguage::Cpp => {
-            name.contains("mutex") || name.contains("atomic")
-                || name.contains("spinlock") || name.contains("critical_section")
+            name.contains("mutex")
+                || name.contains("atomic")
+                || name.contains("spinlock")
+                || name.contains("critical_section")
                 || name.contains("pthread_mutex")
         }
         SourceLanguage::Go => {
-            name == "sync.Mutex" || name == "sync.RWMutex"
-                || name == "Mutex" || name == "RWMutex"
+            name == "sync.Mutex"
+                || name == "sync.RWMutex"
+                || name == "Mutex"
+                || name == "RWMutex"
                 || name.contains("atomic")
         }
     }
@@ -75,7 +85,9 @@ fn is_atomic_type(name: &str, lang: &SourceLanguage) -> bool {
 fn is_read_mostly_type(name: &str, lang: &SourceLanguage) -> bool {
     match lang {
         SourceLanguage::Rust => name.starts_with("RwLock"),
-        SourceLanguage::C | SourceLanguage::Cpp => name.contains("rwlock") || name.contains("shared_mutex"),
+        SourceLanguage::C | SourceLanguage::Cpp => {
+            name.contains("rwlock") || name.contains("shared_mutex")
+        }
         SourceLanguage::Go => name == "sync.RWMutex" || name == "RWMutex",
     }
 }
@@ -91,35 +103,47 @@ mod tests {
     fn field_with_type(name: &str, ty_name: &str) -> Field {
         Field {
             name: name.into(),
-            ty: TypeInfo::Primitive { name: ty_name.into(), size: 8, align: 8 },
-            offset: 0, size: 8, align: 8,
-            source_file: None, source_line: None,
+            ty: TypeInfo::Primitive {
+                name: ty_name.into(),
+                size: 8,
+                align: 8,
+            },
+            offset: 0,
+            size: 8,
+            align: 8,
+            source_file: None,
+            source_line: None,
             access: AccessPattern::Unknown,
         }
     }
 
     fn layout_with_fields(fields: Vec<Field>) -> StructLayout {
         StructLayout {
-            name: "T".into(), total_size: 64, align: 8,
-            fields, source_file: None, source_line: None,
-            arch: &X86_64_SYSV, is_packed: false, is_union: false,
+            name: "T".into(),
+            total_size: 64,
+            align: 8,
+            fields,
+            source_file: None,
+            source_line: None,
+            arch: &X86_64_SYSV,
+            is_packed: false,
+            is_union: false,
         }
     }
 
     #[test]
     fn rust_mutex_field_is_annotated() {
-        let mut layout = layout_with_fields(vec![
-            field_with_type("counter", "Mutex"),
-        ]);
+        let mut layout = layout_with_fields(vec![field_with_type("counter", "Mutex")]);
         annotate_concurrency(&mut layout, &SourceLanguage::Rust);
-        assert!(matches!(layout.fields[0].access, AccessPattern::Concurrent { .. }));
+        assert!(matches!(
+            layout.fields[0].access,
+            AccessPattern::Concurrent { .. }
+        ));
     }
 
     #[test]
     fn rust_atomic_is_atomic() {
-        let mut layout = layout_with_fields(vec![
-            field_with_type("count", "AtomicU64"),
-        ]);
+        let mut layout = layout_with_fields(vec![field_with_type("count", "AtomicU64")]);
         annotate_concurrency(&mut layout, &SourceLanguage::Rust);
         if let AccessPattern::Concurrent { is_atomic, .. } = &layout.fields[0].access {
             assert!(is_atomic);
@@ -130,18 +154,14 @@ mod tests {
 
     #[test]
     fn cpp_mutex_annotated() {
-        let mut layout = layout_with_fields(vec![
-            field_with_type("mu", "std::mutex"),
-        ]);
+        let mut layout = layout_with_fields(vec![field_with_type("mu", "std::mutex")]);
         annotate_concurrency(&mut layout, &SourceLanguage::Cpp);
         assert!(has_concurrent_fields(&layout));
     }
 
     #[test]
     fn unknown_field_stays_unknown() {
-        let mut layout = layout_with_fields(vec![
-            field_with_type("x", "int"),
-        ]);
+        let mut layout = layout_with_fields(vec![field_with_type("x", "int")]);
         annotate_concurrency(&mut layout, &SourceLanguage::C);
         assert!(matches!(layout.fields[0].access, AccessPattern::Unknown));
     }

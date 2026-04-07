@@ -28,11 +28,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
         Ok(layouts)
     }
 
-    fn extract_from_unit(
-        &self,
-        unit: &Unit<R>,
-        out: &mut Vec<StructLayout>,
-    ) -> anyhow::Result<()> {
+    fn extract_from_unit(&self, unit: &Unit<R>, out: &mut Vec<StructLayout>) -> anyhow::Result<()> {
         // First pass: build a map from struct offset → typedef name.
         // Handles `typedef struct { ... } Foo` where the struct has no tag name.
         let typedef_names = self.collect_typedef_names(unit)?;
@@ -97,15 +93,13 @@ impl<'a, R: Reader> Extractor<'a, R> {
         };
 
         let source_file = self.attr_string(unit, entry, gimli::DW_AT_decl_file)?;
-        let source_line = entry
-            .attr_value(gimli::DW_AT_decl_line)?
-            .and_then(|v| {
-                if let gimli::AttributeValue::Udata(n) = v {
-                    Some(n as u32)
-                } else {
-                    None
-                }
-            });
+        let source_line = entry.attr_value(gimli::DW_AT_decl_line)?.and_then(|v| {
+            if let gimli::AttributeValue::Udata(n) = v {
+                Some(n as u32)
+            } else {
+                None
+            }
+        });
 
         let mut fields = Vec::new();
         let mut children = unit.entries_tree(Some(entry.offset()))?;
@@ -165,15 +159,13 @@ impl<'a, R: Reader> Extractor<'a, R> {
             size,
             align,
             source_file: None,
-            source_line: entry
-                .attr_value(gimli::DW_AT_decl_line)?
-                .and_then(|v| {
-                    if let gimli::AttributeValue::Udata(n) = v {
-                        Some(n as u32)
-                    } else {
-                        None
-                    }
-                }),
+            source_line: entry.attr_value(gimli::DW_AT_decl_line)?.and_then(|v| {
+                if let gimli::AttributeValue::Udata(n) = v {
+                    Some(n as u32)
+                } else {
+                    None
+                }
+            }),
             access: AccessPattern::Unknown,
         }))
     }

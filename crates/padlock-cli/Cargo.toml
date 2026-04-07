@@ -12,6 +12,10 @@ categories.workspace  = true
 name = "padlock"
 path = "src/main.rs"
 
+[[bin]]
+name = "cargo-padlock"
+path = "src/bin/cargo_padlock.rs"
+
 [dependencies]
 padlock-core   = { path = "../padlock-core" }
 padlock-dwarf  = { path = "../padlock-dwarf" }
@@ -22,3 +26,5 @@ anyhow         = "1"
 clap           = { version = "4", features = ["derive"] }
 owo-colors     = "4"
 comfy-table    = "7"
+toml           = "0.8"
+notify         = { version = "6", features = ["macos_fsevent"] }

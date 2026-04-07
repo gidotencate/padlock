@@ -52,16 +52,20 @@ pub fn unified_diff(original: &str, fixed: &str, context_lines: usize) -> String
     let diff = TextDiff::from_lines(original, fixed);
     let mut out = String::new();
     for (idx, group) in diff.grouped_ops(context_lines).iter().enumerate() {
-        if idx > 0 { out.push_str("...\n"); }
+        if idx > 0 {
+            out.push_str("...\n");
+        }
         for op in group {
             for change in diff.iter_changes(op) {
                 let prefix = match change.tag() {
                     ChangeTag::Delete => "-",
                     ChangeTag::Insert => "+",
-                    ChangeTag::Equal  => " ",
+                    ChangeTag::Equal => " ",
                 };
                 out.push_str(&format!("{prefix} {}", change.value()));
-                if !change.value().ends_with('\n') { out.push('\n'); }
+                if !change.value().ends_with('\n') {
+                    out.push('\n');
+                }
             }
         }
     }
@@ -92,9 +96,16 @@ fn match_braces(s: &str) -> Option<usize> {
 /// Consume an optional trailing semicolon (after optional whitespace) at `pos`.
 fn consume_semicolon(source: &str, pos: usize) -> usize {
     let rest = &source[pos..];
-    let ws = rest.len() - rest.trim_start_matches(|c: char| c.is_whitespace() && c != '\n').len();
+    let ws = rest.len()
+        - rest
+            .trim_start_matches(|c: char| c.is_whitespace() && c != '\n')
+            .len();
     let after_ws = &rest[ws..];
-    if after_ws.starts_with(';') { pos + ws + 1 } else { pos }
+    if after_ws.starts_with(';') {
+        pos + ws + 1
+    } else {
+        pos
+    }
 }
 
 /// Find the byte range of a named struct/union in C/C++ source.
@@ -108,12 +119,18 @@ pub fn find_c_struct_span(source: &str, struct_name: &str) -> Option<std::ops::R
             let after_name = start + needle.len();
             // Ensure the character after the name is a boundary (space, `{`, newline)
             let boundary = source[after_name..].chars().next();
-            if matches!(boundary, Some('{') | Some('\n') | Some('\r') | Some(' ') | Some('\t') | None) {
+            if matches!(
+                boundary,
+                Some('{') | Some('\n') | Some('\r') | Some(' ') | Some('\t') | None
+            ) {
                 // Find the opening brace (may have whitespace between name and `{`)
                 if let Some(brace_rel) = source[after_name..].find('{') {
                     let brace_start = after_name + brace_rel;
                     // Verify no word characters between name end and brace
-                    if source[after_name..brace_start].chars().all(|c| c.is_whitespace()) {
+                    if source[after_name..brace_start]
+                        .chars()
+                        .all(|c| c.is_whitespace())
+                    {
                         if let Some(body_len) = match_braces(&source[brace_start..]) {
                             let end = consume_semicolon(source, brace_start + body_len);
                             return Some(start..end);
@@ -135,10 +152,16 @@ pub fn find_rust_struct_span(source: &str, struct_name: &str) -> Option<std::ops
         let start = search_from + rel;
         let after_name = start + needle.len();
         let boundary = source[after_name..].chars().next();
-        if matches!(boundary, Some('{') | Some('\n') | Some('\r') | Some(' ') | Some('\t') | None) {
+        if matches!(
+            boundary,
+            Some('{') | Some('\n') | Some('\r') | Some(' ') | Some('\t') | None
+        ) {
             if let Some(brace_rel) = source[after_name..].find('{') {
                 let brace_start = after_name + brace_rel;
-                if source[after_name..brace_start].chars().all(|c| c.is_whitespace()) {
+                if source[after_name..brace_start]
+                    .chars()
+                    .all(|c| c.is_whitespace())
+                {
                     if let Some(body_len) = match_braces(&source[brace_start..]) {
                         // Rust structs have no trailing `;` (unit structs do, but we skip those)
                         return Some(start..brace_start + body_len);
@@ -160,7 +183,10 @@ pub fn find_go_struct_span(source: &str, struct_name: &str) -> Option<std::ops::
         let after_kw = start + needle.len();
         if let Some(brace_rel) = source[after_kw..].find('{') {
             let brace_start = after_kw + brace_rel;
-            if source[after_kw..brace_start].chars().all(|c| c.is_whitespace()) {
+            if source[after_kw..brace_start]
+                .chars()
+                .all(|c| c.is_whitespace())
+            {
                 if let Some(body_len) = match_braces(&source[brace_start..]) {
                     return Some(start..brace_start + body_len);
                 }
@@ -220,10 +246,10 @@ fn apply_fixes(
 fn field_type_name(field: &padlock_core::ir::Field) -> &str {
     match &field.ty {
         padlock_core::ir::TypeInfo::Primitive { name, .. }
-        | padlock_core::ir::TypeInfo::Opaque  { name, .. } => name.as_str(),
-        padlock_core::ir::TypeInfo::Pointer { .. }         => "void*",
-        padlock_core::ir::TypeInfo::Array { .. }           => "/* array */",
-        padlock_core::ir::TypeInfo::Struct(l)              => l.name.as_str(),
+        | padlock_core::ir::TypeInfo::Opaque { name, .. } => name.as_str(),
+        padlock_core::ir::TypeInfo::Pointer { .. } => "void*",
+        padlock_core::ir::TypeInfo::Array { .. } => "/* array */",
+        padlock_core::ir::TypeInfo::Struct(l) => l.name.as_str(),
     }
 }
 
@@ -252,7 +278,7 @@ mod tests {
     #[test]
     fn c_fix_puts_largest_align_first() {
         let out = generate_c_fix(&connection_layout());
-        let timeout_pos  = out.find("timeout").unwrap();
+        let timeout_pos = out.find("timeout").unwrap();
         let is_active_pos = out.find("is_active").unwrap();
         assert!(timeout_pos < is_active_pos);
     }
@@ -315,9 +341,12 @@ mod tests {
         let src = "struct Connection { bool is_active; double timeout; bool is_tls; int port; };\n";
         let layout = connection_layout();
         let fixed = apply_fixes_c(src, &[&layout]);
-        let timeout_pos   = fixed.find("timeout").unwrap();
+        let timeout_pos = fixed.find("timeout").unwrap();
         let is_active_pos = fixed.find("is_active").unwrap();
-        assert!(timeout_pos < is_active_pos, "double should appear before bool after reorder");
+        assert!(
+            timeout_pos < is_active_pos,
+            "double should appear before bool after reorder"
+        );
     }
 
     #[test]
@@ -325,7 +354,7 @@ mod tests {
         let src = "struct Connection {\n    is_active: bool,\n    timeout: f64,\n    is_tls: bool,\n    port: i32,\n}\n";
         let layout = connection_layout();
         let fixed = apply_fixes_rust(src, &[&layout]);
-        let timeout_pos   = fixed.find("timeout").unwrap();
+        let timeout_pos = fixed.find("timeout").unwrap();
         let is_active_pos = fixed.find("is_active").unwrap();
         assert!(timeout_pos < is_active_pos);
     }

@@ -9,6 +9,45 @@ use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
 use quote::ToTokens;
 use syn::{visit::Visit, Fields, ItemStruct, Type};
 
+// ── attribute guard extraction ────────────────────────────────────────────────
+
+/// Extract a lock guard name from field attributes.
+///
+/// Recognised forms:
+/// - `#[lock_protected_by = "mu"]`
+/// - `#[protected_by = "mu"]`
+/// - `#[guarded_by("mu")]` or `#[guarded_by(mu)]`
+/// - `#[pt_guarded_by("mu")]` or `#[pt_guarded_by(mu)]` (pointer variant)
+pub fn extract_guard_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        let path = attr.path();
+        // Name-value form: #[lock_protected_by = "mu"] / #[protected_by = "mu"]
+        if path.is_ident("lock_protected_by") || path.is_ident("protected_by") {
+            if let syn::Meta::NameValue(nv) = &attr.meta {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+                {
+                    return Some(s.value());
+                }
+            }
+        }
+        // List form: #[guarded_by("mu")] / #[guarded_by(mu)] / #[pt_guarded_by(...)]
+        if path.is_ident("guarded_by") || path.is_ident("pt_guarded_by") {
+            // Try string literal first
+            if let Ok(s) = attr.parse_args::<syn::LitStr>() {
+                return Some(s.value());
+            }
+            // Fall back to bare identifier
+            if let Ok(id) = attr.parse_args::<syn::Ident>() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
 // ── type resolution ───────────────────────────────────────────────────────────
 
 fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, TypeInfo) {
@@ -31,46 +70,62 @@ fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, 
             let (elem_size, elem_align, elem_ty) = rust_type_size_align(&arr.elem, arch);
             let count = array_len_from_expr(&arr.len);
             let size = elem_size * count;
-            (size, elem_align, TypeInfo::Array {
-                element: Box::new(elem_ty),
-                count,
+            (
                 size,
-                align: elem_align,
-            })
+                elem_align,
+                TypeInfo::Array {
+                    element: Box::new(elem_ty),
+                    count,
+                    size,
+                    align: elem_align,
+                },
+            )
         }
         _ => {
             let s = arch.pointer_size;
-            (s, s, TypeInfo::Opaque { name: "(unknown)".into(), size: s, align: s })
+            (
+                s,
+                s,
+                TypeInfo::Opaque {
+                    name: "(unknown)".into(),
+                    size: s,
+                    align: s,
+                },
+            )
         }
     }
 }
 
 fn primitive_size_align(name: &str, arch: &'static ArchConfig) -> (usize, usize) {
     match name {
-        "bool" | "u8"  | "i8"  => (1, 1),
-        "u16"  | "i16"          => (2, 2),
-        "u32"  | "i32"  | "f32" => (4, 4),
-        "u64"  | "i64"  | "f64" => (8, 8),
-        "u128" | "i128"         => (16, 16),
-        "usize" | "isize"        => (arch.pointer_size, arch.pointer_size),
-        "char"                   => (4, 4), // Rust char is a Unicode scalar (4 bytes)
+        "bool" | "u8" | "i8" => (1, 1),
+        "u16" | "i16" => (2, 2),
+        "u32" | "i32" | "f32" => (4, 4),
+        "u64" | "i64" | "f64" => (8, 8),
+        "u128" | "i128" => (16, 16),
+        "usize" | "isize" => (arch.pointer_size, arch.pointer_size),
+        "char" => (4, 4), // Rust char is a Unicode scalar (4 bytes)
         // x86 SSE / AVX / AVX-512 SIMD types (via std::arch or target_feature)
-        "__m64"                          => (8,  8),
+        "__m64" => (8, 8),
         "__m128" | "__m128d" | "__m128i" => (16, 16),
         "__m256" | "__m256d" | "__m256i" => (32, 32),
         "__m512" | "__m512d" | "__m512i" => (64, 64),
         // Rust portable SIMD / packed types (std::simd, packed_simd)
-        "f32x4"  | "i32x4"  | "u32x4"  => (16, 16),
-        "f64x2"  | "i64x2"  | "u64x2"  => (16, 16),
-        "f32x8"  | "i32x8"  | "u32x8"  => (32, 32),
-        "f64x4"  | "i64x4"  | "u64x4"  => (32, 32),
+        "f32x4" | "i32x4" | "u32x4" => (16, 16),
+        "f64x2" | "i64x2" | "u64x2" => (16, 16),
+        "f32x8" | "i32x8" | "u32x8" => (32, 32),
+        "f64x4" | "i64x4" | "u64x4" => (32, 32),
         "f32x16" | "i32x16" | "u32x16" => (64, 64),
-        _                        => (arch.pointer_size, arch.pointer_size),
+        _ => (arch.pointer_size, arch.pointer_size),
     }
 }
 
 fn array_len_from_expr(expr: &syn::Expr) -> usize {
-    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(n), .. }) = expr {
+    if let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Int(n),
+        ..
+    }) = expr
+    {
         n.base10_parse::<usize>().unwrap_or(0)
     } else {
         0
@@ -80,10 +135,9 @@ fn array_len_from_expr(expr: &syn::Expr) -> usize {
 // ── struct repr detection ─────────────────────────────────────────────────────
 
 fn is_packed(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        a.path().is_ident("repr")
-            && a.to_token_stream().to_string().contains("packed")
-    })
+    attrs
+        .iter()
+        .any(|a| a.path().is_ident("repr") && a.to_token_stream().to_string().contains("packed"))
 }
 
 fn simulate_rust_layout(
@@ -149,22 +203,46 @@ impl<'ast> Visit<'ast> for StructVisitor {
         let name = node.ident.to_string();
         let packed = is_packed(&node.attrs);
 
-        let fields: Vec<(String, Type)> = match &node.fields {
+        // Collect (field_name, type, optional_guard)
+        let fields: Vec<(String, Type, Option<String>)> = match &node.fields {
             Fields::Named(nf) => nf
                 .named
                 .iter()
-                .map(|f| (f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default(), f.ty.clone()))
+                .map(|f| {
+                    let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    let guard = extract_guard_from_attrs(&f.attrs);
+                    (fname, f.ty.clone(), guard)
+                })
                 .collect(),
             Fields::Unnamed(uf) => uf
                 .unnamed
                 .iter()
                 .enumerate()
-                .map(|(i, f)| (format!("_{i}"), f.ty.clone()))
+                .map(|(i, f)| {
+                    let guard = extract_guard_from_attrs(&f.attrs);
+                    (format!("_{i}"), f.ty.clone(), guard)
+                })
                 .collect(),
             Fields::Unit => vec![],
         };
 
-        let layout = simulate_rust_layout(name, &fields, packed, self.arch);
+        let name_ty: Vec<(String, Type)> = fields
+            .iter()
+            .map(|(n, t, _)| (n.clone(), t.clone()))
+            .collect();
+        let mut layout = simulate_rust_layout(name, &name_ty, packed, self.arch);
+
+        // Apply explicit guard annotations; these take precedence over the
+        // heuristic type-name pass in concurrency.rs (which skips non-Unknown fields).
+        for (i, (_, _, guard)) in fields.iter().enumerate() {
+            if let Some(g) = guard {
+                layout.fields[i].access = AccessPattern::Concurrent {
+                    guard: Some(g.clone()),
+                    is_atomic: false,
+                };
+            }
+        }
+
         self.layouts.push(layout);
     }
 }
@@ -173,7 +251,10 @@ impl<'ast> Visit<'ast> for StructVisitor {
 
 pub fn parse_rust(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let file: syn::File = syn::parse_str(source)?;
-    let mut visitor = StructVisitor { arch, layouts: Vec::new() };
+    let mut visitor = StructVisitor {
+        arch,
+        layouts: Vec::new(),
+    };
     visitor.visit_file(&file);
     Ok(visitor.layouts)
 }
@@ -234,5 +315,118 @@ mod tests {
         let src = "struct S { p: *const u8 }";
         let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
         assert_eq!(layouts[0].fields[0].size, 8); // 64-bit pointer
+    }
+
+    // ── attribute guard extraction ─────────────────────────────────────────────
+
+    #[test]
+    fn lock_protected_by_attr_sets_guard() {
+        let src = r#"
+struct Cache {
+    #[lock_protected_by = "mu"]
+    readers: u64,
+    mu: u64,
+}
+"#;
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let readers = &layouts[0].fields[0];
+        assert_eq!(readers.name, "readers");
+        if let AccessPattern::Concurrent { guard, .. } = &readers.access {
+            assert_eq!(guard.as_deref(), Some("mu"));
+        } else {
+            panic!("expected Concurrent, got {:?}", readers.access);
+        }
+    }
+
+    #[test]
+    fn guarded_by_string_attr_sets_guard() {
+        let src = r#"
+struct S {
+    #[guarded_by("lock")]
+    value: u32,
+}
+"#;
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        if let AccessPattern::Concurrent { guard, .. } = &layouts[0].fields[0].access {
+            assert_eq!(guard.as_deref(), Some("lock"));
+        } else {
+            panic!("expected Concurrent");
+        }
+    }
+
+    #[test]
+    fn guarded_by_ident_attr_sets_guard() {
+        let src = r#"
+struct S {
+    #[guarded_by(mu)]
+    count: u64,
+}
+"#;
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        if let AccessPattern::Concurrent { guard, .. } = &layouts[0].fields[0].access {
+            assert_eq!(guard.as_deref(), Some("mu"));
+        } else {
+            panic!("expected Concurrent");
+        }
+    }
+
+    #[test]
+    fn protected_by_attr_sets_guard() {
+        let src = r#"
+struct S {
+    #[protected_by = "lock_a"]
+    x: u64,
+}
+"#;
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        if let AccessPattern::Concurrent { guard, .. } = &layouts[0].fields[0].access {
+            assert_eq!(guard.as_deref(), Some("lock_a"));
+        } else {
+            panic!("expected Concurrent");
+        }
+    }
+
+    #[test]
+    fn different_guards_on_same_cache_line_is_false_sharing() {
+        // readers and writers are at offsets 0 and 8 — same cache line (line 0).
+        // They have different explicit guards → confirmed false sharing.
+        let src = r#"
+struct HotPath {
+    #[lock_protected_by = "mu_a"]
+    readers: u64,
+    #[lock_protected_by = "mu_b"]
+    writers: u64,
+}
+"#;
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(padlock_core::analysis::false_sharing::has_false_sharing(
+            &layouts[0]
+        ));
+    }
+
+    #[test]
+    fn same_guard_on_same_cache_line_is_not_false_sharing() {
+        let src = r#"
+struct Safe {
+    #[lock_protected_by = "mu"]
+    a: u64,
+    #[lock_protected_by = "mu"]
+    b: u64,
+}
+"#;
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(!padlock_core::analysis::false_sharing::has_false_sharing(
+            &layouts[0]
+        ));
+    }
+
+    #[test]
+    fn unannotated_field_stays_unknown() {
+        let src = "struct S { x: u64 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(matches!(
+            layouts[0].fields[0].access,
+            AccessPattern::Unknown
+        ));
     }
 }

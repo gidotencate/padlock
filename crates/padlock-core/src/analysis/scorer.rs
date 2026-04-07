@@ -47,7 +47,11 @@ pub fn score_with_breakdown(layout: &StructLayout) -> ScoreBreakdown {
     deductions += false_sharing_deduction;
 
     // Locality: up to 15 points
-    let locality_deduction = if locality::has_locality_issue(layout) { 15.0 } else { 0.0 };
+    let locality_deduction = if locality::has_locality_issue(layout) {
+        15.0
+    } else {
+        0.0
+    };
     deductions += locality_deduction;
 
     // Reorder potential: up to 15 points
@@ -98,13 +102,23 @@ mod tests {
             align: 8,
             fields: vec![Field {
                 name: "x".into(),
-                ty: TypeInfo::Primitive { name: "u64".into(), size: 8, align: 8 },
-                offset: 0, size: 8, align: 8,
-                source_file: None, source_line: None,
+                ty: TypeInfo::Primitive {
+                    name: "u64".into(),
+                    size: 8,
+                    align: 8,
+                },
+                offset: 0,
+                size: 8,
+                align: 8,
+                source_file: None,
+                source_line: None,
                 access: AccessPattern::Unknown,
             }],
-            source_file: None, source_line: None,
-            arch: &X86_64_SYSV, is_packed: false, is_union: false,
+            source_file: None,
+            source_line: None,
+            arch: &X86_64_SYSV,
+            is_packed: false,
+            is_union: false,
         };
         assert!((score(&layout) - 100.0).abs() < 1e-9);
     }

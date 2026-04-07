@@ -5,6 +5,7 @@ members = [
     "crates/padlock-dwarf",
     "crates/padlock-source",
     "crates/padlock-output",
+    "crates/padlock-macros",
 ]
 resolver = "2"
 

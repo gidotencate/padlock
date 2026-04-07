@@ -26,11 +26,15 @@ Analyzed 2 structs
 | **Padding waste** | Finds gaps from poor field ordering; shows exact bytes wasted |
 | **Reorder suggestions** | Computes optimal declaration order; shows byte savings |
 | **False sharing** | Detects concurrent fields with different guards on the same cache line |
+| **Explicit guard annotation** | `#[lock_protected_by]`, `GUARDED_BY()`, `// padlock:guard=` — no more type-name guessing |
 | **Locality** | Flags hot/cold field interleaving that hurts cache utilisation |
 | **Scoring** | Each struct gets a 0–100 score (100 = no issues) |
 | **Multi-language** | C, C++, Rust, Go source; compiled binaries via DWARF/PDB |
 | **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64 |
-| **CI-ready** | JSON and SARIF output for GitHub/GitLab code-scanning annotations |
+| **CI-ready** | SARIF output, `action.yml`, exit-code gating on high-severity findings |
+| **`cargo padlock`** | Cargo subcommand — builds your project then analyses the binary |
+| **Compile-time assertions** | `#[padlock::assert_no_padding]` / `#[padlock::assert_size(N)]` proc macros |
+| **Watch mode** | `padlock watch <path>` re-analyses on every file change |
 
 ---
 
@@ -59,6 +63,13 @@ export PATH="$PWD/target/release:$PATH"
 # Analyze a source file
 padlock analyze myfile.c
 
+# Analyze a compiled binary (DWARF)
+padlock analyze target/debug/myapp
+
+# Cargo subcommand — build + analyze in one step
+cargo padlock
+cargo padlock --bin myapp --sarif
+
 # Analyze and output JSON
 padlock analyze myfile.rs --json
 
@@ -73,6 +84,9 @@ padlock fix myfile.c --dry-run
 
 # List all structs with sizes
 padlock list myfile.rs
+
+# Live feedback — re-analyse on every save
+padlock watch src/models.rs
 ```
 
 ---
@@ -146,6 +160,36 @@ Alias for `analyze`. Intended for future extended report formats.
 
 ---
 
+### `padlock watch <path> [--json]`
+
+Watches a file or directory and re-runs analysis on every change. Clears the terminal between runs for a live feedback loop. Works for both source files and compiled binaries.
+
+```bash
+# Watch a Rust source file while editing
+padlock watch src/pool.rs
+
+# Watch a binary — pair with cargo watch for a full rebuild loop
+padlock watch target/debug/myapp
+# In another terminal: cargo watch -x build
+```
+
+---
+
+### `cargo padlock [--bin NAME] [--release] [--json] [--sarif]`
+
+Installed as a cargo subcommand when padlock is on `PATH`. Reads `Cargo.toml` to determine the default binary name, runs `cargo build`, locates the built binary, and analyses it — all in one command.
+
+```bash
+cargo padlock                       # analyze default binary (debug)
+cargo padlock --bin myapp           # specific binary target
+cargo padlock --release             # build with --release profile
+cargo padlock --sarif               # SARIF output for CI
+```
+
+Exits non-zero when high-severity findings exist, so it can gate CI directly.
+
+---
+
 ## Understanding Findings
 
 ### PaddingWaste
@@ -199,6 +243,52 @@ struct Stats {
 Fix: pad each independently-locked group to its own cache line.
 
 Severity: always **High**
+
+#### Explicit guard annotation
+
+By default padlock infers concurrency from type names (`Mutex`, `std::atomic`, `sync.Mutex`, …). For fields whose types don't reveal their guard, annotate them explicitly — this is the most accurate path to false-sharing detection.
+
+**Rust** — field attributes:
+
+```rust
+struct HotPath {
+    #[lock_protected_by = "mu_a"]
+    readers: u64,          // guarded by mu_a
+    #[lock_protected_by = "mu_b"]
+    writers: u64,          // guarded by mu_b — different guard, same cache line → High
+    mu_a: Mutex<()>,
+    mu_b: Mutex<()>,
+}
+```
+
+Also accepted: `#[guarded_by("mu")]`, `#[guarded_by(mu)]`, `#[protected_by = "mu"]`, `#[pt_guarded_by("mu")]`.
+
+**C/C++** — Clang thread-safety analysis macros:
+
+```cpp
+#include <mutex>
+struct Cache {
+    int64_t readers GUARDED_BY(lock_a);   // or __attribute__((guarded_by(lock_a)))
+    int64_t writers GUARDED_BY(lock_b);   // different guard → false sharing detected
+    std::mutex lock_a;
+    std::mutex lock_b;
+};
+```
+
+Also accepted: `PT_GUARDED_BY(mu)` (pointer targets), `__attribute__((pt_guarded_by(mu)))`.
+
+**Go** — trailing line comments:
+
+```go
+type Cache struct {
+    Readers int64      // padlock:guard=mu_a
+    Writers int64      // padlock:guard=mu_b  ← different guard → false sharing
+    MuA     sync.Mutex
+    MuB     sync.Mutex
+}
+```
+
+Also accepted: `// guarded_by: mu`, `// +checklocksprotects:mu` (gVisor-style).
 
 ---
 
@@ -263,19 +353,88 @@ The architecture is auto-detected from the host when analyzing source files. For
 
 ---
 
+## Compile-Time Assertions
+
+`padlock-macros` provides proc-attribute macros that turn layout violations into **compile errors**. Add it to `Cargo.toml`:
+
+```toml
+[dependencies]
+padlock-macros = "0.1"
+```
+
+### `#[padlock::assert_no_padding]`
+
+Fails to compile if the struct has any padding bytes. The check is: `size_of::<Struct>() == sum(size_of::<FieldType>())`.
+
+```rust
+use padlock_macros::assert_no_padding;
+
+#[assert_no_padding]        // ✓ compiles: 8 + 4 + 4 = 16 = size_of
+struct WellOrdered {
+    a: u64,
+    b: u32,
+    c: u32,
+}
+
+#[assert_no_padding]        // ✗ compile error: 1 + 8 = 9 ≠ 16 = size_of
+struct Padded {
+    a: u8,
+    b: u64,
+}
+```
+
+### `#[padlock::assert_size(N)]`
+
+Fails to compile if the struct's size is not exactly `N` bytes. Useful for locking down hot-path structs against accidental growth.
+
+```rust
+use padlock_macros::assert_size;
+
+#[assert_size(64)]          // ✓ exactly one cache line
+struct CacheLine {
+    data: [u8; 64],
+}
+```
+
+---
+
 ## CI Integration
 
-### GitHub Actions
+### GitHub Actions (recommended)
+
+Use the bundled `action.yml` to analyse binaries or source files on every PR. Findings appear as inline annotations on the diff when SARIF is enabled.
 
 ```yaml
-- name: Analyze struct layouts
-  run: |
-    padlock analyze --sarif src/models.rs > padlock.sarif
+# .github/workflows/padlock.yml
+name: Struct Layout Analysis
+on: [push, pull_request]
 
-- name: Upload SARIF
-  uses: github/codeql-action/upload-sarif@v3
-  with:
-    sarif_file: padlock.sarif
+permissions:
+  contents: read
+  security-events: write   # required for SARIF upload
+
+jobs:
+  padlock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build
+      - uses: gidotencate/padlock@v1
+        with:
+          path: target/debug/myapp
+          output-format: sarif
+          fail-on-severity: high
+```
+
+See `.github/workflows/padlock-example.yml` for a full reference workflow including all options.
+
+### `cargo padlock` in CI
+
+```yaml
+- uses: dtolnay/rust-toolchain@stable
+- run: cargo install padlock
+- run: cargo padlock --sarif   # exits non-zero on high-severity findings
 ```
 
 ### JSON output for scripting
@@ -331,10 +490,12 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 ## Crate Architecture
 
 ```
-padlock-cli       — binary; CLI parsing (clap), subcommand dispatch
+padlock-cli       — padlock binary + cargo-padlock subcommand; watch mode
 ├── padlock-source  — source frontend: tree-sitter (C/C++/Go), syn (Rust)
+│                     explicit guard annotation: #[lock_protected_by], GUARDED_BY(), // padlock:guard=
 ├── padlock-dwarf   — binary frontend: DWARF via gimli+object, PDB via pdb
 ├── padlock-output  — formatters: terminal, JSON, SARIF, diff
+├── padlock-macros  — proc macros: #[assert_no_padding], #[assert_size(N)]
 └── padlock-core    — IR types, analysis passes, findings, scoring
 ```
 

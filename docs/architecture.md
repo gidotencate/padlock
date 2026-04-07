@@ -2,7 +2,7 @@
 
 ## Overview
 
-padlock is a Cargo workspace of five crates. The data flows in one direction:
+padlock is a Cargo workspace of six crates. The data flows in one direction:
 
 ```
   Source / Binary input
@@ -36,7 +36,15 @@ padlock is a Cargo workspace of five crates. The data flows in one direction:
                   │
                   ▼
          padlock-cli
-         (user-facing binary)
+         (padlock binary + cargo-padlock subcommand)
+
+
+  Compile-time path (separate):
+  ┌────────────────┐
+  │padlock-macros  │  proc-macro crate — no runtime dependency
+  │ #[assert_no_padding]              │
+  │ #[assert_size(N)]                 │
+  └────────────────┘
 ```
 
 ---
@@ -74,11 +82,11 @@ Source analysis backend. No compiler invoked — sizes are approximated from a b
 - **`lib.rs`** — public API: `parse_source(path, arch)`, `detect_language(path)`, `SourceLanguage` enum
 
 - **`frontends/`**:
-  - `c_cpp.rs` — tree-sitter-c / tree-sitter-cpp parser. Walks the AST, extracts `struct_specifier` and `type_definition` nodes, simulates layout with `simulate_layout`. Handles C primitive types, C++ qualified types (`std::mutex`), and template types (`std::atomic<T>`).
-  - `rust.rs` — syn-based parser. Detects `#[repr(C)]` and `#[repr(packed)]`; uses `syn::visit` to walk item structs. Handles pointer/reference/array type inference.
-  - `go.rs` — tree-sitter-go parser. Maps Go built-in types; handles `sync.Mutex`, `sync.RWMutex`, and imported type names.
+  - `c_cpp.rs` — tree-sitter-c / tree-sitter-cpp parser. Walks the AST, extracts `struct_specifier` and `type_definition` nodes, simulates layout with `simulate_layout`. Handles C primitive types, C++ qualified types (`std::mutex`), template types (`std::atomic<T>`), unions, and bit-fields. Extracts `GUARDED_BY(mu)` / `__attribute__((guarded_by(mu)))` / `PT_GUARDED_BY(mu)` from field source text and sets `AccessPattern::Concurrent { guard }` directly.
+  - `rust.rs` — syn-based parser. Detects `#[repr(C)]` and `#[repr(packed)]`; uses `syn::visit` to walk item structs. Handles pointer/reference/array type inference. Reads explicit guard attributes per field: `#[lock_protected_by = "mu"]`, `#[protected_by = "mu"]`, `#[guarded_by("mu")]`, `#[guarded_by(mu)]`, `#[pt_guarded_by(...)]` — sets `AccessPattern::Concurrent { guard }` before the heuristic pass runs.
+  - `go.rs` — tree-sitter-go parser. Maps Go built-in types; handles `sync.Mutex`, `sync.RWMutex`, and imported type names. Reads trailing line comments for guard annotation: `// padlock:guard=mu`, `// guarded_by: mu`, `// +checklocksprotects:mu` (gVisor-style).
 
-- **`concurrency.rs`** — Heuristic pass: annotates `Field.access` to `Concurrent` for known synchronisation types (`Mutex<T>`, `std::mutex`, `sync.Mutex`, `AtomicU64`, etc.). Uses field name as guard proxy so fields with different names generate different guard identifiers for false-sharing detection.
+- **`concurrency.rs`** — Heuristic pass: annotates `Field.access` to `Concurrent` for known synchronisation types (`Mutex<T>`, `std::mutex`, `sync.Mutex`, `AtomicU64`, etc.). Runs after the frontend; skips fields already set to non-`Unknown` (i.e. those with explicit guard annotations). Uses field name as guard proxy so type-name-detected fields with different names get different guard identifiers for false-sharing detection.
 
 - **`fixgen.rs`** — Generates reorder patches: produces a `Vec<(usize, Vec<String>)>` of (struct-start-line, optimal-field-names) for the `diff` subcommand.
 
@@ -109,14 +117,27 @@ Output formatters. All functions take `padlock-core` types as input.
 
 ### `padlock-cli`
 
-The `padlock` binary. Wires all other crates together.
+Two binaries. Wires all other crates together.
 
-- **`main.rs`** — `clap` derive API; subcommand dispatch.
+- **`main.rs`** — `clap` derive API; subcommand dispatch for `padlock`.
 - **`commands/analyze.rs`** — Detects source vs binary, calls the right frontend, runs `Report::from_layouts`, dispatches to the right formatter.
 - **`commands/list.rs`** — Prints a summary table of all structs (size, fields, score).
 - **`commands/diff.rs`** — Calls `padlock_output::render_diff` per layout and prints the unified diff.
 - **`commands/fix.rs`** — Shows the reorder diff and (non-dry-run) writes a `.bak` backup.
 - **`commands/report.rs`** — Alias for analyze; intended for extended report formats.
+- **`commands/watch.rs`** — File/directory watcher using `notify`. Debounces change events (250 ms) and re-runs analysis on each change. Clears the terminal between runs.
+- **`bin/cargo_padlock.rs`** — The `cargo-padlock` binary, installed as a cargo subcommand. Reads `Cargo.toml` for the default binary name, runs `cargo build`, locates the built binary in `target/{profile}/`, and runs DWARF analysis. Exits non-zero on high-severity findings.
+
+---
+
+### `padlock-macros`
+
+Proc-macro crate (`proc-macro = true`). No runtime dependency on any padlock crate.
+
+- **`#[assert_no_padding]`** — Attribute macro applied to a struct. Emits a `const` block that asserts `size_of::<Struct>() == sum(size_of::<FieldType>())`. The assertion fails at compile time if any padding bytes are present.
+- **`#[assert_size(N)]`** — Attribute macro that asserts `size_of::<Struct>() == N`. Fails at compile time if the struct grows (e.g. from a field addition) or shrinks unexpectedly.
+
+Both macros pass through the struct definition unchanged — they only append a hidden `const` item.
 
 ---
 
@@ -128,7 +149,14 @@ The `padlock` binary. Wires all other crates together.
 
 ### `AccessPattern::Concurrent { guard }`
 
-Each concurrently-accessed field carries an optional `guard` string identifying which lock protects it. Two fields with **different** guards on the same cache line are a confirmed false-sharing hazard. For source analysis, the guard is set to the field's own name (treating each `Mutex`/`sync.Mutex`/`std::mutex` field as independently guarded). For DWARF analysis, explicit annotations can override this.
+Each concurrently-accessed field carries an optional `guard` string identifying which lock protects it. Two fields with **different** guards on the same cache line are a confirmed false-sharing hazard.
+
+Guard assignment has two layers, applied in order:
+
+1. **Explicit annotation** (highest priority) — the source frontend reads language-specific guard attributes (`#[lock_protected_by = "mu"]`, `GUARDED_BY(mu)`, `// padlock:guard=mu`) and sets `Concurrent { guard: Some("mu") }` directly on the field.
+2. **Heuristic type-name inference** — `concurrency.rs::annotate_concurrency` matches well-known synchronisation type names. It only runs on fields still `Unknown` after the frontend pass, so explicit annotations always win.
+
+For fields where neither applies, `guard` is `None` and the field is not considered a false-sharing candidate.
 
 ### `Report::from_layouts` as the single analysis entry point
 

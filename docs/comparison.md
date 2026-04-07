@@ -11,7 +11,7 @@ Several tools address struct layout and memory performance, but they have differ
 | Tool | Languages | Scope | Source? | Binary? | CI output | False sharing | Auto-fix |
 |---|---|---|---|---|---|---|---|
 | **padlock** | C, C++, Rust, Go | Layout waste, false sharing, locality | ✓ | ✓ (DWARF/PDB) | JSON, SARIF | ✓ | ✓ (diff) |
-| `pahole` | C, C++ | Struct holes, DWARF only | — | ✓ | Text only | — | — |
+| `pahole` | Any (DWARF) | Struct holes, reorder | — | ✓ | Text only | — | Text only (`--reorganize`) |
 | `offsetof` / `sizeof` | Any | Size inspection | — | — | — | — | — |
 | Clang `-Wpadded` | C, C++ | Padding warning | ✓ | — | Compiler diag | — | — |
 | `cargo-geiger` | Rust | Unsafe usage | ✓ | — | — | — | — |
@@ -26,21 +26,37 @@ Several tools address struct layout and memory performance, but they have differ
 
 [`pahole`](https://git.kernel.org/pub/scm/devel/pahole/pahole.git) ("poke-a-hole") is the closest comparable tool. It reads DWARF from compiled binaries and shows struct layouts with hole annotations.
 
-**pahole strengths:**
-- Battle-tested on the Linux kernel
-- Reads exact compiler output (no approximation)
-- Generates optimized struct declarations
+**A note on language support:** pahole reads DWARF debug info, so it technically works on any language that emits DWARF — that includes Rust, Go, C, C++, and others. However, it is designed and optimised around C/C++ and the Linux kernel. Its `--reorganize` output is a C struct declaration. It has no understanding of Rust's ownership model, Go's runtime type headers, or language-specific layout rules. Passing it a Rust binary gives you a raw DWARF view with C-style output, not a Rust-native analysis.
 
-**padlock strengths:**
-- Works on **source files without compilation** — useful in editors, pre-commit hooks, and fast CI checks
-- Supports **Rust and Go** (pahole is C/C++ only)
-- Detects **false sharing** from concurrency annotations
-- Emits **SARIF** for GitHub code-scanning annotations
-- Generates **unified diffs** and applies **in-place reordering**
-- Scores structs 0–100 for at-a-glance prioritisation
+**Where the tools genuinely overlap:**
 
-**When to use pahole:** You need exact compiler-verified layout for C/C++ binaries, or you're working on kernel/driver code where accuracy is critical.  
-**When to use padlock:** You want fast feedback during development, across multiple languages, with SARIF output for CI.
+Both tools, given a compiled binary with DWARF:
+- Show field offsets, sizes, and padding gaps
+- Can suggest reordered layouts (`pahole --reorganize` / `padlock diff`)
+- Work across any language that produced DWARF
+
+So for the binary-analysis path on C/C++ programs, the capabilities are substantially similar.
+
+**Where padlock differentiates:**
+
+| | pahole | padlock |
+|---|---|---|
+| Source analysis (no compilation) | — | ✓ |
+| Language-native output (Rust/Go syntax) | — | ✓ |
+| False sharing detection | — | ✓ |
+| Explicit guard annotation | — | ✓ (`#[lock_protected_by]`, `GUARDED_BY()`, `// padlock:guard=`) |
+| In-place source rewriting | — | ✓ |
+| SARIF / CI integration | — | ✓ |
+| Impact scoring (0–100) | — | ✓ |
+| Compile-time assertions | — | ✓ (`#[assert_no_padding]`) |
+| Watch mode | — | ✓ |
+| Cargo subcommand | — | ✓ (`cargo padlock`) |
+| Exact compiler-verified layout | ✓ | Binary only |
+| Linux kernel / driver use | ✓ | — |
+
+**When to use pahole:** forensic investigation of compiled C/C++ or kernel binaries where you need exact, compiler-verified layout and are already in a DWARF-centric workflow.
+
+**When to use padlock:** development-time feedback, multi-language codebases, CI layout gates, false-sharing detection, or any workflow where source analysis (no build required) or actionable output (diffs, patches, SARIF) matters.
 
 ---
 
@@ -93,7 +109,7 @@ padlock is most valuable at the **earliest stages** (editor/pre-commit) and in *
 - Want layout quality enforced in CI without running the full compiler
 - Have concurrent data structures and want automatic false-sharing detection
 
-**No**, if you:
-- Only write C/C++ and are already using `pahole` + `-Wpadded` extensively
+**No** (or low priority), if you:
+- Only write C/C++, work exclusively with compiled binaries, and are already satisfied with `pahole` + `-Wpadded`
 - Have very few structs and performance is not a concern
-- Need exact compiler-verified layout (use pahole + compiler instead)
+- Need exact compiler-verified layout for kernel/driver work (use pahole + compiler for that path; padlock's binary analysis is supplementary)

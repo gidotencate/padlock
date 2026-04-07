@@ -43,25 +43,21 @@ pub fn run(path: &Path, dry_run: bool) -> anyhow::Result<()> {
 
     // Show per-struct diff (old struct text → new struct text)
     for layout in &layouts_to_fix {
-        let old_text = match lang {
-            SourceLanguage::C | SourceLanguage::Cpp => {
-                fixgen::find_c_struct_span(&source, &layout.name)
-                    .map(|r| source[r].to_string())
-            }
-            SourceLanguage::Rust => {
-                fixgen::find_rust_struct_span(&source, &layout.name)
-                    .map(|r| source[r].to_string())
-            }
-            SourceLanguage::Go => {
-                fixgen::find_go_struct_span(&source, &layout.name)
-                    .map(|r| source[r].to_string())
-            }
-        };
+        let old_text =
+            match lang {
+                SourceLanguage::C | SourceLanguage::Cpp => {
+                    fixgen::find_c_struct_span(&source, &layout.name).map(|r| source[r].to_string())
+                }
+                SourceLanguage::Rust => fixgen::find_rust_struct_span(&source, &layout.name)
+                    .map(|r| source[r].to_string()),
+                SourceLanguage::Go => fixgen::find_go_struct_span(&source, &layout.name)
+                    .map(|r| source[r].to_string()),
+            };
 
         let new_text = match lang {
             SourceLanguage::C | SourceLanguage::Cpp => fixgen::generate_c_fix(layout),
-            SourceLanguage::Rust                    => fixgen::generate_rust_fix(layout),
-            SourceLanguage::Go                      => fixgen::generate_go_fix(layout),
+            SourceLanguage::Rust => fixgen::generate_rust_fix(layout),
+            SourceLanguage::Go => fixgen::generate_go_fix(layout),
         };
 
         let diff_base = old_text.as_deref().unwrap_or(&source);
@@ -84,8 +80,8 @@ pub fn run(path: &Path, dry_run: bool) -> anyhow::Result<()> {
 
     let fixed_source = match lang {
         SourceLanguage::C | SourceLanguage::Cpp => fixgen::apply_fixes_c(&source, &layouts_to_fix),
-        SourceLanguage::Rust                    => fixgen::apply_fixes_rust(&source, &layouts_to_fix),
-        SourceLanguage::Go                      => fixgen::apply_fixes_go(&source, &layouts_to_fix),
+        SourceLanguage::Rust => fixgen::apply_fixes_rust(&source, &layouts_to_fix),
+        SourceLanguage::Go => fixgen::apply_fixes_go(&source, &layouts_to_fix),
     };
 
     std::fs::write(path, &fixed_source)?;

@@ -20,12 +20,11 @@ pub enum SourceLanguage {
 /// Detect language from file extension.
 pub fn detect_language(path: &Path) -> Option<SourceLanguage> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("c") | Some("h")            => Some(SourceLanguage::C),
-        Some("cpp") | Some("cc")
-        | Some("cxx") | Some("hpp")      => Some(SourceLanguage::Cpp),
-        Some("rs")                        => Some(SourceLanguage::Rust),
-        Some("go")                        => Some(SourceLanguage::Go),
-        _                                 => None,
+        Some("c") | Some("h") => Some(SourceLanguage::C),
+        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") => Some(SourceLanguage::Cpp),
+        Some("rs") => Some(SourceLanguage::Rust),
+        Some("go") => Some(SourceLanguage::Go),
+        _ => None,
     }
 }
 
@@ -44,10 +43,10 @@ pub fn parse_source_str(
     arch: &'static ArchConfig,
 ) -> anyhow::Result<Vec<StructLayout>> {
     let mut layouts = match lang {
-        SourceLanguage::C    => frontends::c_cpp::parse_c(source, arch)?,
-        SourceLanguage::Cpp  => frontends::c_cpp::parse_cpp(source, arch)?,
+        SourceLanguage::C => frontends::c_cpp::parse_c(source, arch)?,
+        SourceLanguage::Cpp => frontends::c_cpp::parse_cpp(source, arch)?,
         SourceLanguage::Rust => frontends::rust::parse_rust(source, arch)?,
-        SourceLanguage::Go   => frontends::go::parse_go(source, arch)?,
+        SourceLanguage::Go => frontends::go::parse_go(source, arch)?,
     };
 
     // Annotate concurrency patterns
@@ -86,7 +85,10 @@ fn is_padlock_ignored(source: &str, struct_name: &str) -> bool {
             if is_boundary {
                 let line_start = source[..abs].rfind('\n').map(|i| i + 1).unwrap_or(0);
                 // Check the line containing the struct keyword for an inline annotation
-                let line_end = source[abs..].find('\n').map(|i| abs + i).unwrap_or(source.len());
+                let line_end = source[abs..]
+                    .find('\n')
+                    .map(|i| abs + i)
+                    .unwrap_or(source.len());
                 if source[line_start..line_end].contains("padlock:ignore") {
                     return true;
                 }
@@ -95,7 +97,7 @@ fn is_padlock_ignored(source: &str, struct_name: &str) -> bool {
                 // after trimming), so that an inline annotation on a prior struct's closing
                 // line doesn't accidentally suppress the following struct.
                 if line_start > 0 {
-                    let prev_end   = line_start - 1;
+                    let prev_end = line_start - 1;
                     let prev_start = source[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
                     let prev_trimmed = source[prev_start..prev_end].trim();
                     if prev_trimmed.starts_with("//") && prev_trimmed.contains("padlock:ignore") {
@@ -117,31 +119,46 @@ mod tests {
 
     #[test]
     fn detect_c_extensions() {
-        assert_eq!(detect_language(Path::new("foo.c")),   Some(SourceLanguage::C));
-        assert_eq!(detect_language(Path::new("foo.h")),   Some(SourceLanguage::C));
+        assert_eq!(detect_language(Path::new("foo.c")), Some(SourceLanguage::C));
+        assert_eq!(detect_language(Path::new("foo.h")), Some(SourceLanguage::C));
     }
 
     #[test]
     fn detect_cpp_extensions() {
-        assert_eq!(detect_language(Path::new("foo.cpp")), Some(SourceLanguage::Cpp));
-        assert_eq!(detect_language(Path::new("foo.cc")),  Some(SourceLanguage::Cpp));
-        assert_eq!(detect_language(Path::new("foo.hpp")), Some(SourceLanguage::Cpp));
+        assert_eq!(
+            detect_language(Path::new("foo.cpp")),
+            Some(SourceLanguage::Cpp)
+        );
+        assert_eq!(
+            detect_language(Path::new("foo.cc")),
+            Some(SourceLanguage::Cpp)
+        );
+        assert_eq!(
+            detect_language(Path::new("foo.hpp")),
+            Some(SourceLanguage::Cpp)
+        );
     }
 
     #[test]
     fn detect_rust_extension() {
-        assert_eq!(detect_language(Path::new("foo.rs")),  Some(SourceLanguage::Rust));
+        assert_eq!(
+            detect_language(Path::new("foo.rs")),
+            Some(SourceLanguage::Rust)
+        );
     }
 
     #[test]
     fn detect_go_extension() {
-        assert_eq!(detect_language(Path::new("foo.go")),  Some(SourceLanguage::Go));
+        assert_eq!(
+            detect_language(Path::new("foo.go")),
+            Some(SourceLanguage::Go)
+        );
     }
 
     #[test]
     fn detect_unknown_is_none() {
-        assert_eq!(detect_language(Path::new("foo.py")),  None);
-        assert_eq!(detect_language(Path::new("foo")),     None);
+        assert_eq!(detect_language(Path::new("foo.py")), None);
+        assert_eq!(detect_language(Path::new("foo")), None);
     }
 
     #[test]

@@ -12,7 +12,7 @@ pub fn run(path: &Path, json: bool, sarif: bool) -> anyhow::Result<()> {
     } else {
         let data = std::fs::read(path)?;
         let dwarf = padlock_dwarf::reader::load(&data)?;
-        let arch  = padlock_dwarf::reader::detect_arch(&data)?;
+        let arch = padlock_dwarf::reader::detect_arch(&data)?;
         padlock_dwarf::extractor::Extractor::new(&dwarf, arch).extract_all()?
     };
 

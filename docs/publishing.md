@@ -2,13 +2,12 @@
 
 ## License Choice
 
-padlock uses the **MIT License** (see [LICENSE](../LICENSE)).
+padlock is dual-licensed under **MIT OR Apache-2.0** (user's choice). This is the standard for Rust tooling and matches the Rust compiler itself.
 
-### Why MIT?
+- **MIT** — permissive, short, widely understood.
+- **Apache-2.0** — includes an explicit patent grant, which matters for enterprise users.
 
-- **Maximum adoption**: MIT is the standard for Rust CLI tools and libraries. Anyone can use, fork, package, or embed padlock without restrictions.
-- **Ecosystem fit**: The Rust ecosystem defaults to MIT or dual MIT/Apache-2.0. Deviating requires explicit justification.
-- **Corporate-friendly**: Companies can use padlock in internal tooling without legal concerns.
+The dual license means users pick whichever suits their project. Both are corporate-friendly and allow unrestricted use, modification, and redistribution.
 
 ### If You Want Copyleft
 
@@ -75,10 +74,11 @@ cargo publish -p padlock-core
 cargo publish -p padlock-dwarf
 cargo publish -p padlock-source
 cargo publish -p padlock-output
-cargo publish -p padlock-cli   # the binary, named "padlock"
+cargo publish -p padlock-macros   # proc-macro crate; no runtime deps on other crates
+cargo publish -p padlock-cli      # the binary, named "padlock"
 ```
 
-Wait a minute between each to let the registry index update.
+Wait ~30 seconds between each to let the registry index propagate. The `cargo-padlock` binary is part of `padlock-cli` and is published alongside it automatically.
 
 ### After Publishing
 
@@ -174,14 +174,21 @@ jobs:
 
 Before you publish to crates.io or announce the tool, consider addressing:
 
-| Item | Priority | Effort |
-|---|---|---|
-| Inherit `[workspace.package]` in each crate's `Cargo.toml` | Required for publish | Low |
-| Remove `libsource.a` from the repo (binary artifact, should not be committed) | Recommended | Low |
-| In-place `fix` for bit-field and union structs | Low | Medium |
-| Nested struct size resolution (field type = another struct in same file) | Medium | High |
-| C++ inheritance / vtable padding | Medium | High |
-| Configuration file (`.padlock.toml`) for per-project thresholds | Low | Medium |
-| Ignore annotation (`// padlock:ignore`) | Medium | Low |
+| Item | Priority | Effort | Status |
+|---|---|---|---|
+| Inherit `[workspace.package]` in each crate's `Cargo.toml` | Required for publish | Low | Done |
+| `padlock-macros` in workspace and publish order | Required for publish | Low | Done |
+| `// padlock:ignore` suppression annotation | Medium | Low | Done |
+| `cargo padlock` subcommand | High | Medium | Done |
+| Explicit guard annotation (`#[lock_protected_by]`, `GUARDED_BY()`, etc.) | High | Medium | Done |
+| Watch mode (`padlock watch`) | High | Medium | Done |
+| `#[assert_no_padding]` proc macro | High | Medium | Done |
+| GitHub Actions `action.yml` | High | Low | Done |
+| Remove `libsource.a` from the repo (binary artifact, should not be committed) | Recommended | Low | Pending |
+| `padlock` facade crate re-exporting `padlock-macros` (for `use padlock::assert_no_padding` syntax) | Medium | Low | Pending |
+| In-place `fix` for bit-field and union structs | Low | Medium | Pending |
+| Nested struct size resolution (field type = another struct in same file) | Medium | High | Pending |
+| C++ inheritance / vtable padding | Medium | High | Pending |
+| Configuration file (`.padlock.toml`) for per-project thresholds | Low | Medium | Pending |
 
-The tool is fully functional for its stated scope today. Start with publishing to GitHub (free), then crates.io once the package metadata is cleaned up.
+The tool is fully functional for its stated scope today. Start with publishing to GitHub, then crates.io once `libsource.a` is removed from the repo and the facade crate question is resolved.

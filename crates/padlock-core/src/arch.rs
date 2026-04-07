@@ -1,9 +1,11 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Endianness { Little, Big }
+pub enum Endianness {
+    Little,
+    Big,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ArchConfig
-{
+pub struct ArchConfig {
     pub name: &'static str,
     pub pointer_size: usize,
     pub cache_line_size: usize,
@@ -11,8 +13,7 @@ pub struct ArchConfig
     pub endianness: Endianness,
 }
 
-pub const X86_64_SYSV: ArchConfig = ArchConfig
-{
+pub const X86_64_SYSV: ArchConfig = ArchConfig {
     name: "x86_64",
     pointer_size: 8,
     cache_line_size: 64,
@@ -20,8 +21,7 @@ pub const X86_64_SYSV: ArchConfig = ArchConfig
     endianness: Endianness::Little,
 };
 
-pub const AARCH64: ArchConfig = ArchConfig
-{
+pub const AARCH64: ArchConfig = ArchConfig {
     name: "aarch64",
     pointer_size: 8,
     cache_line_size: 64,
@@ -29,8 +29,7 @@ pub const AARCH64: ArchConfig = ArchConfig
     endianness: Endianness::Little,
 };
 
-pub const AARCH64_APPLE: ArchConfig = ArchConfig
-{
+pub const AARCH64_APPLE: ArchConfig = ArchConfig {
     name: "aarch64-apple",
     pointer_size: 8,
     cache_line_size: 128,

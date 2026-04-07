@@ -8,6 +8,7 @@ mod commands {
     pub mod fix;
     pub mod list;
     pub mod report;
+    pub mod watch;
 }
 mod output {
     pub mod terminal;
@@ -34,13 +35,9 @@ enum Commands {
         sarif: bool,
     },
     /// List all structs found in a file with basic stats
-    List {
-        path: PathBuf,
-    },
+    List { path: PathBuf },
     /// Show a diff of original vs optimal field ordering
-    Diff {
-        path: PathBuf,
-    },
+    Diff { path: PathBuf },
     /// Apply automatic field reordering to a source file
     Fix {
         path: PathBuf,
@@ -54,19 +51,24 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Watch a file or directory and re-analyse on every change
+    Watch {
+        /// Path to watch (source file, binary, or directory)
+        path: PathBuf,
+        /// Output results as JSON on each refresh
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Analyze { path, json, sarif } => {
-            commands::analyze::run(&path, json, sarif)
-        }
+        Commands::Analyze { path, json, sarif } => commands::analyze::run(&path, json, sarif),
         Commands::List { path } => commands::list::run(&path),
         Commands::Diff { path } => commands::diff::run(&path),
         Commands::Fix { path, dry_run } => commands::fix::run(&path, dry_run),
-        Commands::Report { path, json } => {
-            commands::analyze::run(&path, json, false)
-        }
+        Commands::Report { path, json } => commands::analyze::run(&path, json, false),
+        Commands::Watch { path, json } => commands::watch::run(&path, json),
     }
 }

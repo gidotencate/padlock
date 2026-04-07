@@ -45,19 +45,19 @@ pub enum Finding {
 impl Finding {
     pub fn severity(&self) -> &Severity {
         match self {
-            Finding::PaddingWaste     { severity, .. } => severity,
-            Finding::FalseSharing     { severity, .. } => severity,
+            Finding::PaddingWaste { severity, .. } => severity,
+            Finding::FalseSharing { severity, .. } => severity,
             Finding::ReorderSuggestion { severity, .. } => severity,
-            Finding::LocalityIssue    { severity, .. } => severity,
+            Finding::LocalityIssue { severity, .. } => severity,
         }
     }
 
     pub fn struct_name(&self) -> &str {
         match self {
-            Finding::PaddingWaste     { struct_name, .. } => struct_name,
-            Finding::FalseSharing     { struct_name, .. } => struct_name,
+            Finding::PaddingWaste { struct_name, .. } => struct_name,
+            Finding::FalseSharing { struct_name, .. } => struct_name,
             Finding::ReorderSuggestion { struct_name, .. } => struct_name,
-            Finding::LocalityIssue    { struct_name, .. } => struct_name,
+            Finding::LocalityIssue { struct_name, .. } => struct_name,
         }
     }
 }
@@ -133,7 +133,11 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
             optimized_size,
             savings,
             suggested_order,
-            severity: if savings >= 8 { Severity::High } else { Severity::Medium },
+            severity: if savings >= 8 {
+                Severity::High
+            } else {
+                Severity::Medium
+            },
         });
     }
 
@@ -185,7 +189,10 @@ mod tests {
         assert_eq!(report.total_structs, 1);
         let sr = &report.structs[0];
         assert!(sr.wasted_bytes > 0);
-        assert!(sr.findings.iter().any(|f| matches!(f, Finding::PaddingWaste { .. })));
+        assert!(sr
+            .findings
+            .iter()
+            .any(|f| matches!(f, Finding::PaddingWaste { .. })));
     }
 
     #[test]
@@ -193,14 +200,20 @@ mod tests {
         let report = Report::from_layouts(&[packed_layout()]);
         let sr = &report.structs[0];
         assert_eq!(sr.wasted_bytes, 0);
-        assert!(!sr.findings.iter().any(|f| matches!(f, Finding::PaddingWaste { .. })));
+        assert!(!sr
+            .findings
+            .iter()
+            .any(|f| matches!(f, Finding::PaddingWaste { .. })));
     }
 
     #[test]
     fn report_from_misaligned_has_reorder_suggestion() {
         let report = Report::from_layouts(&[connection_layout()]);
         let sr = &report.structs[0];
-        assert!(sr.findings.iter().any(|f| matches!(f, Finding::ReorderSuggestion { .. })));
+        assert!(sr
+            .findings
+            .iter()
+            .any(|f| matches!(f, Finding::ReorderSuggestion { .. })));
     }
 
     #[test]
@@ -208,7 +221,9 @@ mod tests {
         let report = Report::from_layouts(&[connection_layout()]);
         let sr = &report.structs[0];
         // Connection wastes 10/24 = 41% → High
-        let padding_finding = sr.findings.iter()
+        let padding_finding = sr
+            .findings
+            .iter()
             .find(|f| matches!(f, Finding::PaddingWaste { .. }))
             .unwrap();
         assert_eq!(padding_finding.severity(), &Severity::High);

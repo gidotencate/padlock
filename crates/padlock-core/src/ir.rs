@@ -5,31 +5,47 @@ pub use crate::arch::{ArchConfig, X86_64_SYSV};
 /// The type of a single field. Recursive for nested structs.
 #[derive(Debug, Clone)]
 pub enum TypeInfo {
-    Primitive { name: String, size: usize, align: usize },
-    Pointer  { size: usize, align: usize },
-    Array    { element: Box<TypeInfo>, count: usize, size: usize, align: usize },
+    Primitive {
+        name: String,
+        size: usize,
+        align: usize,
+    },
+    Pointer {
+        size: usize,
+        align: usize,
+    },
+    Array {
+        element: Box<TypeInfo>,
+        count: usize,
+        size: usize,
+        align: usize,
+    },
     Struct(Box<StructLayout>),
-    Opaque   { name: String, size: usize, align: usize },
+    Opaque {
+        name: String,
+        size: usize,
+        align: usize,
+    },
 }
 
 impl TypeInfo {
     pub fn size(&self) -> usize {
         match self {
             TypeInfo::Primitive { size, .. } => *size,
-            TypeInfo::Pointer   { size, .. } => *size,
-            TypeInfo::Array     { size, .. } => *size,
-            TypeInfo::Struct(l)              => l.total_size,
-            TypeInfo::Opaque    { size, .. } => *size,
+            TypeInfo::Pointer { size, .. } => *size,
+            TypeInfo::Array { size, .. } => *size,
+            TypeInfo::Struct(l) => l.total_size,
+            TypeInfo::Opaque { size, .. } => *size,
         }
     }
 
     pub fn align(&self) -> usize {
         match self {
             TypeInfo::Primitive { align, .. } => *align,
-            TypeInfo::Pointer   { align, .. } => *align,
-            TypeInfo::Array     { align, .. } => *align,
-            TypeInfo::Struct(l)              => l.align,
-            TypeInfo::Opaque    { align, .. } => *align,
+            TypeInfo::Pointer { align, .. } => *align,
+            TypeInfo::Array { align, .. } => *align,
+            TypeInfo::Struct(l) => l.align,
+            TypeInfo::Opaque { align, .. } => *align,
         }
     }
 }
@@ -37,7 +53,10 @@ impl TypeInfo {
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum AccessPattern {
     Unknown,
-    Concurrent { guard: Option<String>, is_atomic: bool },
+    Concurrent {
+        guard: Option<String>,
+        is_atomic: bool,
+    },
     ReadMostly,
     Padding,
 }
@@ -95,13 +114,13 @@ pub fn find_padding(layout: &StructLayout) -> Vec<PaddingGap> {
     let mut gaps = Vec::new();
     for window in layout.fields.windows(2) {
         let current = &window[0];
-        let next    = &window[1];
-        let end     = current.offset + current.size;
+        let next = &window[1];
+        let end = current.offset + current.size;
         if next.offset > end {
             gaps.push(PaddingGap {
                 after_field: current.name.clone(),
-                bytes:       next.offset - end,
-                at_offset:   end,
+                bytes: next.offset - end,
+                at_offset: end,
             });
         }
     }
@@ -111,8 +130,8 @@ pub fn find_padding(layout: &StructLayout) -> Vec<PaddingGap> {
         if layout.total_size > end {
             gaps.push(PaddingGap {
                 after_field: last.name.clone(),
-                bytes:       layout.total_size - end,
-                at_offset:   end,
+                bytes: layout.total_size - end,
+                at_offset: end,
             });
         }
     }
@@ -123,7 +142,8 @@ pub fn find_padding(layout: &StructLayout) -> Vec<PaddingGap> {
 pub fn optimal_order(layout: &StructLayout) -> Vec<&Field> {
     let mut sorted: Vec<&Field> = layout.fields.iter().collect();
     sorted.sort_by(|a, b| {
-        b.align.cmp(&a.align)
+        b.align
+            .cmp(&a.align)
             .then(b.size.cmp(&a.size))
             .then(a.name.cmp(&b.name))
     });
@@ -151,10 +171,62 @@ pub mod test_fixtures {
             total_size: 24,
             align: 8,
             fields: vec![
-                Field { name: "is_active".into(), ty: TypeInfo::Primitive { name: "bool".into(), size: 1, align: 1 }, offset: 0,  size: 1, align: 1, source_file: None, source_line: None, access: AccessPattern::Unknown },
-                Field { name: "timeout".into(),   ty: TypeInfo::Primitive { name: "f64".into(),  size: 8, align: 8 }, offset: 8,  size: 8, align: 8, source_file: None, source_line: None, access: AccessPattern::Unknown },
-                Field { name: "is_tls".into(),    ty: TypeInfo::Primitive { name: "bool".into(), size: 1, align: 1 }, offset: 16, size: 1, align: 1, source_file: None, source_line: None, access: AccessPattern::Unknown },
-                Field { name: "port".into(),      ty: TypeInfo::Primitive { name: "i32".into(),  size: 4, align: 4 }, offset: 20, size: 4, align: 4, source_file: None, source_line: None, access: AccessPattern::Unknown },
+                Field {
+                    name: "is_active".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "bool".into(),
+                        size: 1,
+                        align: 1,
+                    },
+                    offset: 0,
+                    size: 1,
+                    align: 1,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "timeout".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "f64".into(),
+                        size: 8,
+                        align: 8,
+                    },
+                    offset: 8,
+                    size: 8,
+                    align: 8,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "is_tls".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "bool".into(),
+                        size: 1,
+                        align: 1,
+                    },
+                    offset: 16,
+                    size: 1,
+                    align: 1,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "port".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "i32".into(),
+                        size: 4,
+                        align: 4,
+                    },
+                    offset: 20,
+                    size: 4,
+                    align: 4,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
             ],
             source_file: None,
             source_line: None,
@@ -171,9 +243,48 @@ pub mod test_fixtures {
             total_size: 8,
             align: 4,
             fields: vec![
-                Field { name: "a".into(), ty: TypeInfo::Primitive { name: "i32".into(), size: 4, align: 4 }, offset: 0, size: 4, align: 4, source_file: None, source_line: None, access: AccessPattern::Unknown },
-                Field { name: "b".into(), ty: TypeInfo::Primitive { name: "i16".into(), size: 2, align: 2 }, offset: 4, size: 2, align: 2, source_file: None, source_line: None, access: AccessPattern::Unknown },
-                Field { name: "c".into(), ty: TypeInfo::Primitive { name: "i16".into(), size: 2, align: 2 }, offset: 6, size: 2, align: 2, source_file: None, source_line: None, access: AccessPattern::Unknown },
+                Field {
+                    name: "a".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "i32".into(),
+                        size: 4,
+                        align: 4,
+                    },
+                    offset: 0,
+                    size: 4,
+                    align: 4,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "b".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "i16".into(),
+                        size: 2,
+                        align: 2,
+                    },
+                    offset: 4,
+                    size: 2,
+                    align: 2,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "c".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "i16".into(),
+                        size: 2,
+                        align: 2,
+                    },
+                    offset: 6,
+                    size: 2,
+                    align: 2,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
             ],
             source_file: None,
             source_line: None,
@@ -187,10 +298,21 @@ pub mod test_fixtures {
     fn test_find_padding_connection() {
         let layout = connection_layout();
         let gaps = find_padding(&layout);
-        assert_eq!(gaps, vec![
-            PaddingGap { after_field: "is_active".into(), bytes: 7, at_offset: 1 },
-            PaddingGap { after_field: "is_tls".into(),    bytes: 3, at_offset: 17 },
-        ]);
+        assert_eq!(
+            gaps,
+            vec![
+                PaddingGap {
+                    after_field: "is_active".into(),
+                    bytes: 7,
+                    at_offset: 1
+                },
+                PaddingGap {
+                    after_field: "is_tls".into(),
+                    bytes: 3,
+                    at_offset: 17
+                },
+            ]
+        );
     }
 
     #[test]
@@ -202,7 +324,10 @@ pub mod test_fixtures {
     #[test]
     fn test_optimal_order() {
         let layout = connection_layout();
-        let order: Vec<&str> = optimal_order(&layout).iter().map(|f| f.name.as_str()).collect();
+        let order: Vec<&str> = optimal_order(&layout)
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         // timeout (align 8) first, then port (align 4), then bools (align 1)
         assert_eq!(order[0], "timeout");
         assert_eq!(order[1], "port");

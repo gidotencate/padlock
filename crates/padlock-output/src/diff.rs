@@ -6,7 +6,7 @@ use similar::{ChangeTag, TextDiff};
 /// Render a unified diff of a struct's current field order vs the optimal order.
 pub fn render_diff(layout: &StructLayout) -> String {
     let original = fields_to_text(layout.fields.iter().map(|f| f.name.as_str()));
-    let optimal  = optimal_order(layout);
+    let optimal = optimal_order(layout);
     let optimized = fields_to_text(optimal.iter().map(|f| f.name.as_str()));
     text_diff(&original, &optimized)
 }
@@ -24,7 +24,7 @@ pub fn text_diff(original: &str, updated: &str) -> String {
         let prefix = match change.tag() {
             ChangeTag::Delete => "-",
             ChangeTag::Insert => "+",
-            ChangeTag::Equal  => " ",
+            ChangeTag::Equal => " ",
         };
         out.push_str(&format!("{prefix} {}", change.value()));
         if !change.value().ends_with('\n') {

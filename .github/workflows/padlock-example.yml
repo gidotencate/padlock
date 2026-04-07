@@ -1,0 +1,60 @@
+# Example workflow: run padlock on every PR to block merges on high-severity
+# struct layout regressions.
+#
+# Copy this to .github/workflows/padlock.yml in your own repository and
+# adjust the `path` input to point at your compiled binary.
+#
+# Required repository settings:
+#   Settings → Code security → Code scanning → enabled
+#   (Only needed when output-format: sarif is used)
+
+name: Struct Layout Analysis
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write   # required for SARIF upload
+
+jobs:
+  padlock:
+    name: padlock
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build with debug info
+        run: cargo build
+
+      # ── Option A: SARIF (recommended — shows inline annotations on PR diffs) ──
+      - name: Analyse struct layouts (SARIF)
+        uses: ./  # use `gidotencate/padlock@v1` in your own repo
+        with:
+          path: target/debug/your-binary-name
+          output-format: sarif
+          upload-sarif: 'true'
+          fail-on-severity: high
+
+      # ── Option B: human-readable summary only ────────────────────────────────
+      # - name: Analyse struct layouts (human)
+      #   uses: ./
+      #   with:
+      #     path: target/debug/your-binary-name
+      #     output-format: human
+      #     fail-on-severity: high
+
+      # ── Option C: source file analysis (no build needed) ─────────────────────
+      # - name: Analyse Rust source
+      #   uses: ./
+      #   with:
+      #     path: src/hot_path.rs
+      #     output-format: human
+      #     fail-on-severity: medium

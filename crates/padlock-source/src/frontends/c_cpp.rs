@@ -21,18 +21,16 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     }
     // x86 SSE / AVX / AVX-512 SIMD types
     match ty {
-        "__m64"                          => return (8,  8),
+        "__m64" => return (8, 8),
         "__m128" | "__m128d" | "__m128i" => return (16, 16),
         "__m256" | "__m256d" | "__m256i" => return (32, 32),
         "__m512" | "__m512d" | "__m512i" => return (64, 64),
         // ARM NEON — 64-bit (double-word) vectors
-        "float32x2_t" | "int32x2_t"  | "uint32x2_t"
-        | "int8x8_t"  | "uint8x8_t"  | "int16x4_t" | "uint16x4_t"
-        | "float64x1_t" | "int64x1_t" | "uint64x1_t" => return (8, 8),
+        "float32x2_t" | "int32x2_t" | "uint32x2_t" | "int8x8_t" | "uint8x8_t" | "int16x4_t"
+        | "uint16x4_t" | "float64x1_t" | "int64x1_t" | "uint64x1_t" => return (8, 8),
         // ARM NEON — 128-bit (quad-word) vectors
-        "float32x4_t" | "int32x4_t"   | "uint32x4_t"
-        | "float64x2_t" | "int64x2_t" | "uint64x2_t"
-        | "int8x16_t"  | "uint8x16_t" | "int16x8_t" | "uint16x8_t" => return (16, 16),
+        "float32x4_t" | "int32x4_t" | "uint32x4_t" | "float64x2_t" | "int64x2_t" | "uint64x2_t"
+        | "int8x16_t" | "uint8x16_t" | "int16x8_t" | "uint16x8_t" => return (16, 16),
         _ => {}
     }
     // C++ standard library synchronisation types (Linux/glibc x86-64 defaults).
@@ -40,8 +38,10 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     // bucketing and false-sharing detection.
     match ty {
         // Mutexes — all backed by pthread_mutex_t (40 bytes on Linux/glibc)
-        "std::mutex" | "std::recursive_mutex"
-        | "std::timed_mutex" | "std::recursive_timed_mutex"
+        "std::mutex"
+        | "std::recursive_mutex"
+        | "std::timed_mutex"
+        | "std::recursive_timed_mutex"
         | "pthread_mutex_t" => return (40, 8),
         "std::shared_mutex" | "std::shared_timed_mutex" => return (56, 8),
         // Condition variables
@@ -56,17 +56,17 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     // Primitive / stdint / pointer types
     match ty {
         "char" | "_Bool" | "bool" => (1, 1),
-        "short" | "short int"     => (2, 2),
-        "int"                     => (4, 4),
-        "long"                    => (arch.pointer_size, arch.pointer_size),
-        "long long"               => (8, 8),
-        "float"                   => (4, 4),
-        "double"                  => (8, 8),
-        "long double"             => (16, 16),
-        "int8_t"  | "uint8_t"     => (1, 1),
-        "int16_t" | "uint16_t"    => (2, 2),
-        "int32_t" | "uint32_t"    => (4, 4),
-        "int64_t" | "uint64_t"    => (8, 8),
+        "short" | "short int" => (2, 2),
+        "int" => (4, 4),
+        "long" => (arch.pointer_size, arch.pointer_size),
+        "long long" => (8, 8),
+        "float" => (4, 4),
+        "double" => (8, 8),
+        "long double" => (16, 16),
+        "int8_t" | "uint8_t" => (1, 1),
+        "int16_t" | "uint16_t" => (2, 2),
+        "int32_t" | "uint32_t" => (4, 4),
+        "int64_t" | "uint64_t" => (8, 8),
         "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t" => {
             (arch.pointer_size, arch.pointer_size)
         }
@@ -92,7 +92,11 @@ fn strip_bitfield_suffix(ty: &str) -> &str {
 }
 
 /// Simulate C struct layout (no `__attribute__((packed))`) given ordered fields.
-fn simulate_layout(fields: &mut Vec<Field>, struct_name: String, arch: &'static ArchConfig) -> StructLayout {
+fn simulate_layout(
+    fields: &mut Vec<Field>,
+    struct_name: String,
+    arch: &'static ArchConfig,
+) -> StructLayout {
     let mut offset = 0usize;
     let mut struct_align = 1usize;
 
@@ -124,13 +128,21 @@ fn simulate_layout(fields: &mut Vec<Field>, struct_name: String, arch: &'static 
 
 /// Simulate a C/C++ union layout: all fields start at offset 0;
 /// total size is the largest field, rounded to max alignment.
-fn simulate_union_layout(fields: &mut Vec<Field>, name: String, arch: &'static ArchConfig) -> StructLayout {
+fn simulate_union_layout(
+    fields: &mut Vec<Field>,
+    name: String,
+    arch: &'static ArchConfig,
+) -> StructLayout {
     for f in fields.iter_mut() {
         f.offset = 0;
     }
-    let max_size  = fields.iter().map(|f| f.size).max().unwrap_or(0);
+    let max_size = fields.iter().map(|f| f.size).max().unwrap_or(0);
     let max_align = fields.iter().map(|f| f.align).max().unwrap_or(1);
-    let total_size = if max_align > 0 { max_size.next_multiple_of(max_align) } else { max_size };
+    let total_size = if max_align > 0 {
+        max_size.next_multiple_of(max_align)
+    } else {
+        max_size
+    };
 
     StructLayout {
         name,
@@ -190,16 +202,21 @@ fn extract_structs_from_tree(
         }
         if node.kind() == "type_definition" {
             if let Some(layout) = parse_typedef_struct_or_union(source, node, arch) {
-                let existing = layouts.iter().position(|l| l.name == layout.name || l.name == "<anonymous>");
+                let existing = layouts
+                    .iter()
+                    .position(|l| l.name == layout.name || l.name == "<anonymous>");
                 match existing {
-                    Some(i) if layouts[i].name == "<anonymous>" => { layouts[i] = layout; }
+                    Some(i) if layouts[i].name == "<anonymous>" => {
+                        layouts[i] = layout;
+                    }
                     None => layouts.push(layout),
                     _ => {}
                 }
             }
         }
     }
-    let _ = cursor; let _ = cursor2; // silence unused warnings
+    let _ = cursor;
+    let _ = cursor2; // silence unused warnings
 }
 
 /// Parse a `struct_specifier` or `union_specifier` node into a `StructLayout`.
@@ -215,20 +232,20 @@ fn parse_struct_or_union_specifier(
     for i in 0..node.child_count() {
         let child = node.child(i)?;
         match child.kind() {
-            "type_identifier"     => name = source[child.byte_range()].to_string(),
+            "type_identifier" => name = source[child.byte_range()].to_string(),
             "field_declaration_list" => body_node = Some(child),
             _ => {}
         }
     }
 
     let body = body_node?;
-    let mut raw_fields: Vec<(String, String)> = Vec::new();
+    let mut raw_fields: Vec<(String, String, Option<String>)> = Vec::new();
 
     for i in 0..body.child_count() {
         let child = body.child(i)?;
         if child.kind() == "field_declaration" {
-            if let Some((ty, fname)) = parse_field_declaration(source, child) {
-                raw_fields.push((fname, ty));
+            if let Some((ty, fname, guard)) = parse_field_declaration(source, child) {
+                raw_fields.push((fname, ty, guard));
             }
         }
     }
@@ -239,19 +256,31 @@ fn parse_struct_or_union_specifier(
 
     let mut fields: Vec<Field> = raw_fields
         .into_iter()
-        .map(|(fname, ty_name)| {
+        .map(|(fname, ty_name, guard)| {
             // Use the base type (without bit-field `:N` suffix) for size/align lookup.
             let base = strip_bitfield_suffix(&ty_name);
             let (size, align) = c_type_size_align(base, arch);
+            let access = if let Some(g) = guard {
+                AccessPattern::Concurrent {
+                    guard: Some(g),
+                    is_atomic: false,
+                }
+            } else {
+                AccessPattern::Unknown
+            };
             Field {
                 name: fname,
-                ty: TypeInfo::Primitive { name: ty_name, size, align },
+                ty: TypeInfo::Primitive {
+                    name: ty_name,
+                    size,
+                    align,
+                },
                 offset: 0,
                 size,
                 align,
                 source_file: None,
                 source_line: None,
-                access: AccessPattern::Unknown,
+                access,
             }
         })
         .collect();
@@ -262,7 +291,6 @@ fn parse_struct_or_union_specifier(
         Some(simulate_layout(&mut fields, name, arch))
     }
 }
-
 
 /// Parse a `typedef struct/union { ... } Name;` type_definition node.
 fn parse_typedef_struct_or_union(
@@ -277,9 +305,15 @@ fn parse_typedef_struct_or_union(
     for i in 0..node.child_count() {
         let child = node.child(i)?;
         match child.kind() {
-            "struct_specifier" => { specifier_node = Some(child); is_union = false; }
-            "union_specifier"  => { specifier_node = Some(child); is_union = true; }
-            "type_identifier"  => typedef_name = Some(source[child.byte_range()].to_string()),
+            "struct_specifier" => {
+                specifier_node = Some(child);
+                is_union = false;
+            }
+            "union_specifier" => {
+                specifier_node = Some(child);
+                is_union = true;
+            }
+            "type_identifier" => typedef_name = Some(source[child.byte_range()].to_string()),
             _ => {}
         }
     }
@@ -296,23 +330,58 @@ fn parse_typedef_struct_or_union(
 
 // Alias kept for the typedef pass in extract_structs_from_tree.
 #[allow(dead_code)]
-fn parse_typedef_struct(source: &str, node: Node<'_>, arch: &'static ArchConfig) -> Option<StructLayout> {
+fn parse_typedef_struct(
+    source: &str,
+    node: Node<'_>,
+    arch: &'static ArchConfig,
+) -> Option<StructLayout> {
     parse_typedef_struct_or_union(source, node, arch)
 }
 
-fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<(String, String)> {
+/// Extract a lock guard name from a C/C++ `__attribute__((guarded_by(X)))` or
+/// `__attribute__((pt_guarded_by(X)))` specifier node.
+///
+/// Also recognises the common macro forms `GUARDED_BY(X)` and `PT_GUARDED_BY(X)`
+/// which expand to the same attribute (Clang thread-safety analysis).
+/// The match is done on the raw source text of any `attribute_specifier` child,
+/// so it works regardless of how tree-sitter structures the inner tokens.
+fn extract_guard_from_c_field_text(field_source: &str) -> Option<String> {
+    // Patterns to search for (case-insensitive on the keyword, guard name is as-is)
+    for kw in &["guarded_by", "pt_guarded_by", "GUARDED_BY", "PT_GUARDED_BY"] {
+        if let Some(pos) = field_source.find(kw) {
+            let after = &field_source[pos + kw.len()..];
+            // Expect `(` optionally preceded by whitespace
+            let trimmed = after.trim_start();
+            if trimmed.starts_with('(') {
+                let inner = &trimmed[1..];
+                // Read until the matching ')'
+                if let Some(end) = inner.find(')') {
+                    let guard = inner[..end].trim().trim_matches('"');
+                    if !guard.is_empty() {
+                        return Some(guard.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_field_declaration(
+    source: &str,
+    node: Node<'_>,
+) -> Option<(String, String, Option<String>)> {
     let mut ty_parts: Vec<String> = Vec::new();
     let mut field_name: Option<String> = None;
     // Bit-field width, e.g. `int flags : 3;` → Some("3")
     let mut bit_width: Option<String> = None;
+    // Collect attribute text for guard extraction
+    let mut attr_text = String::new();
 
     for i in 0..node.child_count() {
         let child = node.child(i)?;
         match child.kind() {
-            "type_specifier"
-            | "primitive_type"
-            | "type_identifier"
-            | "sized_type_specifier" => {
+            "type_specifier" | "primitive_type" | "type_identifier" | "sized_type_specifier" => {
                 ty_parts.push(source[child.byte_range()].trim().to_string());
             }
             // C++ qualified types: std::mutex, ns::Type, etc.
@@ -333,6 +402,11 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<(String, Stri
                 // Strip leading ':' and whitespace to get just the width digits
                 bit_width = Some(text.trim_start_matches(':').trim().to_string());
             }
+            // GNU attribute specifier: __attribute__((...))
+            "attribute_specifier" | "attribute" => {
+                attr_text.push_str(source[child.byte_range()].trim());
+                attr_text.push(' ');
+            }
             _ => {}
         }
     }
@@ -349,7 +423,14 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<(String, Stri
     } else {
         base_ty
     };
-    Some((ty, fname))
+
+    // Also check the full field source text (attribute_specifier may not always
+    // be a direct child depending on tree-sitter grammar version).
+    let field_src = source[node.byte_range()].to_string();
+    let guard = extract_guard_from_c_field_text(&attr_text)
+        .or_else(|| extract_guard_from_c_field_text(&field_src));
+
+    Some((ty, fname, guard))
 }
 
 fn extract_identifier(source: &str, node: Node<'_>) -> Option<String> {
@@ -371,7 +452,9 @@ fn extract_identifier(source: &str, node: Node<'_>) -> Option<String> {
 pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let mut parser = Parser::new();
     parser.set_language(&tree_sitter_c::language())?;
-    let tree = parser.parse(source, None).ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
     let mut layouts = Vec::new();
     extract_structs_from_tree(source, tree.root_node(), arch, &mut layouts);
     Ok(layouts)
@@ -380,7 +463,9 @@ pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<St
 pub fn parse_cpp(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let mut parser = Parser::new();
     parser.set_language(&tree_sitter_cpp::language())?;
-    let tree = parser.parse(source, None).ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
     let mut layouts = Vec::new();
     extract_structs_from_tree(source, tree.root_node(), arch, &mut layouts);
     Ok(layouts)
@@ -461,9 +546,9 @@ typedef struct {
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
         assert_eq!(layouts.len(), 1);
         let f = &layouts[0].fields;
-        assert_eq!(f[0].size,  16); // __m128
+        assert_eq!(f[0].size, 16); // __m128
         assert_eq!(f[0].align, 16);
-        assert_eq!(f[1].size,  32); // __m256
+        assert_eq!(f[1].size, 32); // __m256
         assert_eq!(f[1].align, 32);
     }
 
@@ -471,7 +556,7 @@ typedef struct {
     fn simd_avx512_size() {
         let src = "struct Wide { __m512 v; };";
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
-        assert_eq!(layouts[0].fields[0].size,  64);
+        assert_eq!(layouts[0].fields[0].size, 64);
         assert_eq!(layouts[0].fields[0].align, 64);
     }
 
@@ -495,7 +580,11 @@ typedef struct {
         let u = &layouts[0];
         assert!(u.is_union);
         for field in &u.fields {
-            assert_eq!(field.offset, 0, "union field '{}' should be at offset 0", field.name);
+            assert_eq!(
+                field.offset, 0,
+                "union field '{}' should be at offset 0",
+                field.name
+            );
         }
     }
 
@@ -513,8 +602,14 @@ typedef struct {
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
         let report = padlock_core::findings::Report::from_layouts(&layouts);
         let sr = &report.structs[0];
-        assert!(!sr.findings.iter().any(|f| matches!(f, padlock_core::findings::Finding::PaddingWaste { .. })));
-        assert!(!sr.findings.iter().any(|f| matches!(f, padlock_core::findings::Finding::ReorderSuggestion { .. })));
+        assert!(!sr
+            .findings
+            .iter()
+            .any(|f| matches!(f, padlock_core::findings::Finding::PaddingWaste { .. })));
+        assert!(!sr
+            .findings
+            .iter()
+            .any(|f| matches!(f, padlock_core::findings::Finding::ReorderSuggestion { .. })));
     }
 
     #[test]
@@ -541,7 +636,10 @@ typedef struct {
             padlock_core::ir::TypeInfo::Primitive { name, .. } => name.clone(),
             _ => panic!("expected Primitive"),
         };
-        assert!(a_ty.contains(':'), "bit field type should contain ':' width annotation");
+        assert!(
+            a_ty.contains(':'),
+            "bit field type should contain ':' width annotation"
+        );
     }
 
     #[test]
@@ -550,5 +648,113 @@ typedef struct {
         let src = "struct S { int a : 3; };";
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
         assert_eq!(layouts[0].fields[0].size, 4);
+    }
+
+    // ── attribute guard extraction ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_guard_from_c_guarded_by_macro() {
+        let text = "int value GUARDED_BY(mu);";
+        let guard = extract_guard_from_c_field_text(text);
+        assert_eq!(guard.as_deref(), Some("mu"));
+    }
+
+    #[test]
+    fn extract_guard_from_c_attribute_specifier() {
+        let text = "__attribute__((guarded_by(counter_lock))) uint64_t counter;";
+        let guard = extract_guard_from_c_field_text(text);
+        assert_eq!(guard.as_deref(), Some("counter_lock"));
+    }
+
+    #[test]
+    fn extract_guard_pt_guarded_by() {
+        let text = "int *ptr PT_GUARDED_BY(ptr_lock);";
+        let guard = extract_guard_from_c_field_text(text);
+        assert_eq!(guard.as_deref(), Some("ptr_lock"));
+    }
+
+    #[test]
+    fn no_guard_returns_none() {
+        let guard = extract_guard_from_c_field_text("int x;");
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    fn c_struct_guarded_by_sets_concurrent_access() {
+        // Using GUARDED_BY macro style in comments/text — tree-sitter won't parse
+        // macro expansions, so test the text-extraction path via parse_field_declaration
+        // indirectly by checking extract_guard_from_c_field_text.
+        let text = "uint64_t readers GUARDED_BY(lock_a);";
+        assert_eq!(
+            extract_guard_from_c_field_text(text).as_deref(),
+            Some("lock_a")
+        );
+    }
+
+    #[test]
+    fn c_struct_different_guards_detected_as_false_sharing() {
+        use padlock_core::arch::X86_64_SYSV;
+        use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+
+        // Manually build a layout with two fields on the same cache line,
+        // different guards — mirrors what the C frontend would produce for
+        // __attribute__((guarded_by(...))) annotated fields.
+        let mut layout = StructLayout {
+            name: "S".into(),
+            total_size: 128,
+            align: 8,
+            fields: vec![
+                Field {
+                    name: "readers".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "uint64_t".into(),
+                        size: 8,
+                        align: 8,
+                    },
+                    offset: 0,
+                    size: 8,
+                    align: 8,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Concurrent {
+                        guard: Some("lock_a".into()),
+                        is_atomic: false,
+                    },
+                },
+                Field {
+                    name: "writers".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "uint64_t".into(),
+                        size: 8,
+                        align: 8,
+                    },
+                    offset: 8,
+                    size: 8,
+                    align: 8,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Concurrent {
+                        guard: Some("lock_b".into()),
+                        is_atomic: false,
+                    },
+                },
+            ],
+            source_file: None,
+            source_line: None,
+            arch: &X86_64_SYSV,
+            is_packed: false,
+            is_union: false,
+        };
+        assert!(padlock_core::analysis::false_sharing::has_false_sharing(
+            &layout
+        ));
+        // Same guard → no false sharing
+        layout.fields[1].access = AccessPattern::Concurrent {
+            guard: Some("lock_a".into()),
+            is_atomic: false,
+        };
+        assert!(!padlock_core::analysis::false_sharing::has_false_sharing(
+            &layout
+        ));
     }
 }

@@ -84,20 +84,31 @@ mod tests {
     fn concurrent(name: &str, offset: usize, guard: &str) -> Field {
         Field {
             name: name.into(),
-            ty: TypeInfo::Primitive { name: "u64".into(), size: 8, align: 8 },
+            ty: TypeInfo::Primitive {
+                name: "u64".into(),
+                size: 8,
+                align: 8,
+            },
             offset,
             size: 8,
             align: 8,
             source_file: None,
             source_line: None,
-            access: AccessPattern::Concurrent { guard: Some(guard.into()), is_atomic: false },
+            access: AccessPattern::Concurrent {
+                guard: Some(guard.into()),
+                is_atomic: false,
+            },
         }
     }
 
     fn plain(name: &str, offset: usize) -> Field {
         Field {
             name: name.into(),
-            ty: TypeInfo::Primitive { name: "u64".into(), size: 8, align: 8 },
+            ty: TypeInfo::Primitive {
+                name: "u64".into(),
+                size: 8,
+                align: 8,
+            },
             offset,
             size: 8,
             align: 8,
@@ -124,18 +135,15 @@ mod tests {
     #[test]
     fn has_false_sharing_when_different_guards_same_line() {
         let layout = make_layout(vec![
-            concurrent("readers", 0,  "lock_a"),
-            concurrent("writers", 8,  "lock_b"),
+            concurrent("readers", 0, "lock_a"),
+            concurrent("writers", 8, "lock_b"),
         ]);
         assert!(has_false_sharing(&layout));
     }
 
     #[test]
     fn no_false_sharing_when_same_guard() {
-        let layout = make_layout(vec![
-            concurrent("a", 0, "mu"),
-            concurrent("b", 8, "mu"),
-        ]);
+        let layout = make_layout(vec![concurrent("a", 0, "mu"), concurrent("b", 8, "mu")]);
         assert!(!has_false_sharing(&layout));
     }
 
@@ -148,7 +156,7 @@ mod tests {
     #[test]
     fn no_false_sharing_when_different_lines() {
         let layout = make_layout(vec![
-            concurrent("a", 0,  "lock_a"),
+            concurrent("a", 0, "lock_a"),
             concurrent("b", 64, "lock_b"),
         ]);
         assert!(!has_false_sharing(&layout));

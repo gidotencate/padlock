@@ -82,11 +82,43 @@ False sharing occurs when two or more fields that are accessed **independently**
 
 For each struct padlock:
 
-1. Identifies fields with a `Concurrent` access pattern (i.e. their type is a known synchronisation primitive: `Mutex<T>`, `std::mutex`, `sync.Mutex`, `AtomicU64`, `std::atomic<T>`, etc.).
-2. Groups those fields by cache-line bucket (`field.offset / cache_line_size`).
+1. Identifies fields with a `Concurrent` access pattern. A field becomes `Concurrent` in one of two ways:
+   - **Explicit annotation** — the developer annotates the field with a guard name (see below). This is the most reliable path.
+   - **Heuristic type-name inference** — `concurrency.rs` recognises known synchronisation types (`Mutex<T>`, `std::mutex`, `sync.Mutex`, `AtomicU64`, `std::atomic<T>`, etc.) and assigns `Concurrent` with the field's own name as the guard.
+2. Groups `Concurrent` fields by cache-line bucket (`field.offset / cache_line_size`).
 3. If a bucket contains two or more concurrent fields with **different guard identifiers**, a `FalseSharing` finding is emitted.
 
-The guard identifier is derived from the field name for source analysis (each mutex/atomic field is treated as independently guarded). For DWARF analysis, explicit `padlock::concurrent(guard = "lock_name")` annotations can be added.
+**Explicit guard annotation**
+
+When the field type does not reveal its synchronisation role, annotate it directly:
+
+*Rust:*
+```rust
+struct Cache {
+    #[lock_protected_by = "mu_a"]   // or: #[guarded_by("mu_a")]
+    readers: u64,
+    #[lock_protected_by = "mu_b"]
+    writers: u64,
+}
+```
+
+*C/C++ (Clang thread-safety analysis):*
+```cpp
+struct Cache {
+    int64_t readers GUARDED_BY(mu_a);   // or __attribute__((guarded_by(mu_a)))
+    int64_t writers GUARDED_BY(mu_b);
+};
+```
+
+*Go:*
+```go
+type Cache struct {
+    Readers int64 // padlock:guard=mu_a
+    Writers int64 // padlock:guard=mu_b
+}
+```
+
+Explicit annotations take precedence over type-name inference.
 
 **Example (C++)**
 

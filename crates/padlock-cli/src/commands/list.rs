@@ -11,7 +11,7 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     } else {
         let data = std::fs::read(path)?;
         let dwarf = padlock_dwarf::reader::load(&data)?;
-        let arch  = padlock_dwarf::reader::detect_arch(&data)?;
+        let arch = padlock_dwarf::reader::detect_arch(&data)?;
         padlock_dwarf::extractor::Extractor::new(&dwarf, arch).extract_all()?
     };
 
@@ -21,7 +21,14 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     }
 
     let mut table = Table::new();
-    table.set_header(vec!["Struct", "Size (B)", "Fields", "Wasted (B)", "Score", "Location"]);
+    table.set_header(vec![
+        "Struct",
+        "Size (B)",
+        "Fields",
+        "Wasted (B)",
+        "Score",
+        "Location",
+    ]);
 
     for layout in &layouts {
         let gaps = padlock_core::ir::find_padding(layout);
@@ -30,8 +37,8 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
 
         let location = match (&layout.source_file, layout.source_line) {
             (Some(f), Some(l)) => format!("{}:{}", f, l),
-            (Some(f), None)    => f.clone(),
-            _                  => "-".to_string(),
+            (Some(f), None) => f.clone(),
+            _ => "-".to_string(),
         };
 
         table.add_row(vec![

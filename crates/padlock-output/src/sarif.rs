@@ -82,41 +82,72 @@ struct SarifRegion {
 
 fn rules() -> Vec<SarifRule> {
     vec![
-        SarifRule { id: "PAD001".into(), short_description: SarifMessage { text: "Struct padding waste".into() } },
-        SarifRule { id: "PAD002".into(), short_description: SarifMessage { text: "False sharing risk".into() } },
-        SarifRule { id: "PAD003".into(), short_description: SarifMessage { text: "Field reorder suggestion".into() } },
-        SarifRule { id: "PAD004".into(), short_description: SarifMessage { text: "Cache locality issue".into() } },
+        SarifRule {
+            id: "PAD001".into(),
+            short_description: SarifMessage {
+                text: "Struct padding waste".into(),
+            },
+        },
+        SarifRule {
+            id: "PAD002".into(),
+            short_description: SarifMessage {
+                text: "False sharing risk".into(),
+            },
+        },
+        SarifRule {
+            id: "PAD003".into(),
+            short_description: SarifMessage {
+                text: "Field reorder suggestion".into(),
+            },
+        },
+        SarifRule {
+            id: "PAD004".into(),
+            short_description: SarifMessage {
+                text: "Cache locality issue".into(),
+            },
+        },
     ]
 }
 
 fn level_for(finding: &Finding) -> &'static str {
     use padlock_core::findings::Severity;
     match finding.severity() {
-        Severity::High   => "error",
+        Severity::High => "error",
         Severity::Medium => "warning",
-        Severity::Low    => "note",
+        Severity::Low => "note",
     }
 }
 
 fn rule_id_for(finding: &Finding) -> &'static str {
     match finding {
-        Finding::PaddingWaste      { .. } => "PAD001",
-        Finding::FalseSharing      { .. } => "PAD002",
+        Finding::PaddingWaste { .. } => "PAD001",
+        Finding::FalseSharing { .. } => "PAD002",
         Finding::ReorderSuggestion { .. } => "PAD003",
-        Finding::LocalityIssue     { .. } => "PAD004",
+        Finding::LocalityIssue { .. } => "PAD004",
     }
 }
 
 fn message_for(finding: &Finding) -> String {
     match finding {
-        Finding::PaddingWaste { wasted_bytes, waste_pct, struct_name, .. } =>
-            format!("{struct_name}: {wasted_bytes}B wasted ({waste_pct:.0}% of struct)"),
-        Finding::FalseSharing { struct_name, conflicts, .. } =>
-            format!("{struct_name}: {} cache-line conflict(s)", conflicts.len()),
-        Finding::ReorderSuggestion { struct_name, savings, .. } =>
-            format!("{struct_name}: reordering fields saves {savings}B"),
-        Finding::LocalityIssue { struct_name, .. } =>
-            format!("{struct_name}: hot and cold fields are interleaved"),
+        Finding::PaddingWaste {
+            wasted_bytes,
+            waste_pct,
+            struct_name,
+            ..
+        } => format!("{struct_name}: {wasted_bytes}B wasted ({waste_pct:.0}% of struct)"),
+        Finding::FalseSharing {
+            struct_name,
+            conflicts,
+            ..
+        } => format!("{struct_name}: {} cache-line conflict(s)", conflicts.len()),
+        Finding::ReorderSuggestion {
+            struct_name,
+            savings,
+            ..
+        } => format!("{struct_name}: reordering fields saves {savings}B"),
+        Finding::LocalityIssue { struct_name, .. } => {
+            format!("{struct_name}: hot and cold fields are interleaved")
+        }
     }
 }
 
@@ -126,13 +157,15 @@ pub fn to_sarif(report: &Report) -> anyhow::Result<String> {
 
     for sr in &report.structs {
         for finding in &sr.findings {
-            let uri  = sr.source_file.clone().unwrap_or_else(|| "unknown".into());
+            let uri = sr.source_file.clone().unwrap_or_else(|| "unknown".into());
             let line = sr.source_line.unwrap_or(1);
 
             results.push(SarifResult {
                 rule_id: rule_id_for(finding).into(),
-                level:   level_for(finding),
-                message: SarifMessage { text: message_for(finding) },
+                level: level_for(finding),
+                message: SarifMessage {
+                    text: message_for(finding),
+                },
                 locations: vec![SarifLocation {
                     physical_location: SarifPhysicalLocation {
                         artifact_location: SarifArtifactLocation { uri },

@@ -1,2 +1,348 @@
 # padlock
-Struct memory layout analyzer for C, C++, Rust, Go, and more. Finds padding waste, false sharing, and locality problems — ranks by impact, auto-fixes field ordering, flags concurrency risks. CLI-first, CI-ready, multi-arch.
+
+Struct memory layout analyzer for C, C++, Rust, and Go. Finds padding waste, false sharing, and cache locality problems — ranks findings by impact, generates reorder suggestions, and flags concurrency risks. CLI-first and CI-ready.
+
+```
+$ padlock analyze src/connection.rs
+
+Analyzed 2 structs
+
+[✗] Connection  24B  score=33
+    [HIGH] Padding waste: 10 bytes wasted (41.7%)
+    [HIGH] Reorder suggestion: saves 8 bytes → 16B total
+      Optimal order: timeout, port, is_active, is_tls
+    [HIGH] False sharing: 1 cache-line conflict(s)
+      Cache line 0: [reader_mu, writer_mu]
+
+[✓] ConnectionOptimal  16B  score=100
+```
+
+---
+
+## Features
+
+| Capability | Details |
+|---|---|
+| **Padding waste** | Finds gaps from poor field ordering; shows exact bytes wasted |
+| **Reorder suggestions** | Computes optimal declaration order; shows byte savings |
+| **False sharing** | Detects concurrent fields with different guards on the same cache line |
+| **Locality** | Flags hot/cold field interleaving that hurts cache utilisation |
+| **Scoring** | Each struct gets a 0–100 score (100 = no issues) |
+| **Multi-language** | C, C++, Rust, Go source; compiled binaries via DWARF/PDB |
+| **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64 |
+| **CI-ready** | JSON and SARIF output for GitHub/GitLab code-scanning annotations |
+
+---
+
+## Build
+
+Requires a Rust toolchain (1.75+).
+
+```bash
+git clone <repo>
+cd padlock
+cargo build --release
+# binary: target/release/padlock
+```
+
+Add to `PATH` or run directly:
+
+```bash
+export PATH="$PWD/target/release:$PATH"
+```
+
+---
+
+## Quick Start
+
+```bash
+# Analyze a source file
+padlock analyze myfile.c
+
+# Analyze and output JSON
+padlock analyze myfile.rs --json
+
+# Output SARIF for CI
+padlock analyze myfile.cpp --sarif > padlock.sarif
+
+# Show field-reordering diff
+padlock diff myfile.go
+
+# Show what fix would do (without writing)
+padlock fix myfile.c --dry-run
+
+# List all structs with sizes
+padlock list myfile.rs
+```
+
+---
+
+## Commands
+
+### `padlock analyze <file>`
+
+Analyzes all structs in a file and prints findings ranked by severity.
+
+```
+padlock analyze src/stats.rs
+padlock analyze target/debug/myapp        # compiled binary (DWARF)
+padlock analyze mylib.pdb                 # Windows PDB
+```
+
+Flags:
+- `--json` — emit JSON (array of StructReport objects)
+- `--sarif` — emit SARIF 2.1.0 for CI tooling / GitHub code scanning
+
+---
+
+### `padlock list <file>`
+
+Lists every struct found with its size, field count, and score. Useful for a quick inventory.
+
+```
+$ padlock list src/server.rs
+
+Name               Size   Fields  Score
+──────────────────────────────────────
+Stats              96B    4       55
+Connection         24B    4       33
+ConnectionOptimal  16B    4       100
+```
+
+---
+
+### `padlock diff <file>`
+
+Shows a unified diff of the current field order vs the optimal order for each struct that has a `ReorderSuggestion` finding.
+
+```
+$ padlock diff src/models.rs
+
+--- Connection (current order)
++++ Connection (optimal order)
+ Connection {
+-    is_active: bool,
+-    timeout: f64,
+-    is_tls: bool,
+-    port: i32,
++    timeout: f64,
++    port: i32,
++    is_active: bool,
++    is_tls: bool,
+ }
+```
+
+---
+
+### `padlock fix <file> [--dry-run]`
+
+Shows the reorder diff and — without `--dry-run` — writes a `.bak` backup of the original file. Full in-place source rewriting is planned.
+
+---
+
+### `padlock report <file>`
+
+Alias for `analyze`. Intended for future extended report formats.
+
+---
+
+## Understanding Findings
+
+### PaddingWaste
+
+The compiler inserts invisible padding bytes between fields to satisfy alignment requirements. These bytes are wasted memory that can push structs across cache lines.
+
+```
+struct Connection {
+    is_active: bool,  // 1 byte, then 7 bytes padding
+    timeout:   f64,   // 8 bytes
+    is_tls:    bool,  // 1 byte, then 3 bytes padding
+    port:      i32,   // 4 bytes
+}                     // total: 24 bytes, 10 wasted (41.7%)
+```
+
+Severity: **High** ≥ 30% wasted · **Medium** ≥ 10% · **Low** < 10%
+
+---
+
+### ReorderSuggestion
+
+Reordering fields by descending alignment eliminates most padding. padlock computes the optimal order and shows exact savings.
+
+```
+// Optimal: timeout (align 8) first, then port (align 4), then bools (align 1)
+struct Connection {
+    timeout:   f64,   // 8 bytes at offset 0
+    port:      i32,   // 4 bytes at offset 8
+    is_active: bool,  // 1 byte  at offset 12
+    is_tls:    bool,  // 1 byte  at offset 13
+}                     // total: 16 bytes — saves 8 bytes
+```
+
+Severity: **High** saves ≥ 8 bytes · **Medium** otherwise
+
+---
+
+### FalseSharing
+
+When two or more fields are accessed concurrently under **different** locks (or independently), but share the same 64-byte cache line, every write to one field invalidates the other core's cached copy — even though they protect independent data.
+
+```cpp
+struct Stats {
+    std::mutex read_mu;    // ┐ both on cache line 0 (offsets 0 and 48)
+    int64_t    read_count; // │
+    std::mutex write_mu;   // ┘ → false sharing between read_mu and write_mu
+    int64_t    write_count;
+};
+```
+
+Fix: pad each independently-locked group to its own cache line.
+
+Severity: always **High**
+
+---
+
+### LocalityIssue
+
+Hot fields (accessed concurrently / frequently) interleaved with cold fields (rarely accessed) waste cache lines and pollute the hot-path working set.
+
+```c
+struct Worker {
+    pthread_mutex_t mu;   // hot — locked on every task
+    int             id;   // cold — set once at startup
+    int             tasks_done; // hot
+    char            name[64];   // cold
+};
+```
+
+Severity: **Medium**
+
+---
+
+## Scoring
+
+Each struct receives a score from 0 (worst) to 100 (perfect packing, no concurrency issues).
+
+| Score | Meaning |
+|---|---|
+| 100 | No findings |
+| 80–99 | Minor issues (Low-severity padding) |
+| 50–79 | Moderate issues (Medium findings) |
+| 0–49 | Significant issues (High findings) |
+
+---
+
+## Language Support
+
+| Language | Source Analysis | Binary (DWARF) |
+|---|---|---|
+| C | ✓ | ✓ |
+| C++ | ✓ | ✓ |
+| Rust | ✓ | ✓ |
+| Go | ✓ | ✓ |
+
+**Notes on source analysis:**
+- Source analysis is approximate — no compiler is invoked; field sizes come from a built-in type table.
+- Rust `#[repr(C)]` and `#[repr(packed)]` are detected and respected.
+- C++ `alignas(N)` field annotations are currently ignored by the source frontend (use binary analysis for accurate C++ layout with alignment overrides).
+- Plain Rust structs (`repr(Rust)`) may be reordered by the compiler; padlock analyzes declaration order, which is what you control.
+
+---
+
+## Architecture Support
+
+| Architecture | Pointer | Cache Line | Notes |
+|---|---|---|---|
+| `x86_64` (SysV ABI) | 8 bytes | 64 bytes | Default |
+| `aarch64` | 8 bytes | 64 bytes | Linux/Android |
+| `aarch64_apple` | 8 bytes | 128 bytes | M-series Mac |
+| `wasm32` | 4 bytes | 64 bytes | WebAssembly |
+| `riscv64` | 8 bytes | 64 bytes | RISC-V 64-bit |
+
+The architecture is auto-detected from the host when analyzing source files. For binary analysis it is read from the binary's ELF/Mach-O/PE header.
+
+---
+
+## CI Integration
+
+### GitHub Actions
+
+```yaml
+- name: Analyze struct layouts
+  run: |
+    padlock analyze --sarif src/models.rs > padlock.sarif
+
+- name: Upload SARIF
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: padlock.sarif
+```
+
+### JSON output for scripting
+
+```bash
+padlock analyze myfile.rs --json | jq '.[] | select(.score < 60)'
+```
+
+---
+
+## Supported Types
+
+### SIMD
+
+padlock knows the sizes and alignments of SIMD vector types:
+
+| Type | Size | Align | ISA |
+|---|---|---|---|
+| `__m128`, `__m128d`, `__m128i` | 16 | 16 | SSE |
+| `__m256`, `__m256d`, `__m256i` | 32 | 32 | AVX |
+| `__m512`, `__m512d`, `__m512i` | 64 | 64 | AVX-512 |
+| `float32x4_t`, `int8x16_t`, … | 16 | 16 | ARM NEON 128-bit |
+| `float32x2_t`, `int8x8_t`, … | 8 | 8 | ARM NEON 64-bit |
+
+A struct with a field placed before a SIMD type will be flagged for `PaddingWaste` as normal.
+
+### Unions (C/C++)
+
+Unions are parsed and simulated correctly — all fields at offset 0, total size = largest field. `PaddingWaste` and `ReorderSuggestion` are suppressed for unions since they are already compact by definition. `FalseSharing` and `LocalityIssue` still apply.
+
+### Bit Fields (C/C++)
+
+Bit-field fields (`int flags : 3`) are detected and included as their full storage-unit size (e.g. 4 bytes for `int:3`). Layout is approximate for structs where multiple consecutive bit fields pack into a single storage unit.
+
+---
+
+## Scope and Limitations
+
+padlock is a **layout waste detector and optimizer**. It focuses on padding, field ordering, false sharing, and cache locality. It is not:
+
+- A full compiler — type sizes are approximated from a built-in table for source analysis.
+- A profiler — it cannot measure actual cache miss rates.
+
+**Known limitations:**
+- C++ `alignas` and `__attribute__((aligned))` on individual fields are not modeled in source analysis (use DWARF analysis for accurate alignment override handling).
+- Multiple consecutive bit fields that pack into one storage unit are each counted as a full storage unit, slightly overestimating struct size.
+- Nested struct fields (a field type referencing another struct in the same file) are treated as opaque with pointer-sized size.
+- C++ inheritance and virtual function table (vptr) padding are not modeled.
+- The "padded" variants in false-sharing samples may still be flagged because const-expression padding (e.g. `[u8; 64 - size_of::<Mutex<u64>>()]`) is not evaluated by the source frontend.
+
+---
+
+## Crate Architecture
+
+```
+padlock-cli       — binary; CLI parsing (clap), subcommand dispatch
+├── padlock-source  — source frontend: tree-sitter (C/C++/Go), syn (Rust)
+├── padlock-dwarf   — binary frontend: DWARF via gimli+object, PDB via pdb
+├── padlock-output  — formatters: terminal, JSON, SARIF, diff
+└── padlock-core    — IR types, analysis passes, findings, scoring
+```
+
+See [docs/architecture.md](docs/architecture.md) for the full data-flow diagram and crate responsibilities.  
+See [docs/findings.md](docs/findings.md) for detailed finding reference.  
+See [docs/comparison.md](docs/comparison.md) for how padlock compares to pahole, -Wpadded, and runtime profilers.  
+See [docs/publishing.md](docs/publishing.md) for crates.io publishing and GitHub Actions CI setup.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.

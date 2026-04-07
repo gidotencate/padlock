@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/padlock-cli",
+    "crates/padlock-core",
+    "crates/padlock-dwarf",
+    "crates/padlock-source",
+    "crates/padlock-output",
+]
+resolver = "2"
+
+[workspace.package]
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/gidotencate/padlock"
+description = "Struct memory layout analyzer for C, C++, Rust, and Go"
+keywords    = ["performance", "memory", "layout", "analysis", "cache"]
+categories  = ["development-tools", "development-tools::profiling"]

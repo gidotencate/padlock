@@ -1,0 +1,238 @@
+// padlock-source/src/frontends/rust.rs
+//
+// Extracts struct layouts from Rust source using syn + the Visit API.
+// Sizes are approximated from type names using the target arch config.
+// Only repr(C) / repr(packed) / plain structs are handled; generics are opaque.
+
+use padlock_core::arch::ArchConfig;
+use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+use quote::ToTokens;
+use syn::{visit::Visit, Fields, ItemStruct, Type};
+
+// ── type resolution ───────────────────────────────────────────────────────────
+
+fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, TypeInfo) {
+    match ty {
+        Type::Path(tp) => {
+            let name = tp
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default();
+            let (size, align) = primitive_size_align(&name, arch);
+            (size, align, TypeInfo::Primitive { name, size, align })
+        }
+        Type::Ptr(_) | Type::Reference(_) => {
+            let s = arch.pointer_size;
+            (s, s, TypeInfo::Pointer { size: s, align: s })
+        }
+        Type::Array(arr) => {
+            let (elem_size, elem_align, elem_ty) = rust_type_size_align(&arr.elem, arch);
+            let count = array_len_from_expr(&arr.len);
+            let size = elem_size * count;
+            (size, elem_align, TypeInfo::Array {
+                element: Box::new(elem_ty),
+                count,
+                size,
+                align: elem_align,
+            })
+        }
+        _ => {
+            let s = arch.pointer_size;
+            (s, s, TypeInfo::Opaque { name: "(unknown)".into(), size: s, align: s })
+        }
+    }
+}
+
+fn primitive_size_align(name: &str, arch: &'static ArchConfig) -> (usize, usize) {
+    match name {
+        "bool" | "u8"  | "i8"  => (1, 1),
+        "u16"  | "i16"          => (2, 2),
+        "u32"  | "i32"  | "f32" => (4, 4),
+        "u64"  | "i64"  | "f64" => (8, 8),
+        "u128" | "i128"         => (16, 16),
+        "usize" | "isize"        => (arch.pointer_size, arch.pointer_size),
+        "char"                   => (4, 4), // Rust char is a Unicode scalar (4 bytes)
+        // x86 SSE / AVX / AVX-512 SIMD types (via std::arch or target_feature)
+        "__m64"                          => (8,  8),
+        "__m128" | "__m128d" | "__m128i" => (16, 16),
+        "__m256" | "__m256d" | "__m256i" => (32, 32),
+        "__m512" | "__m512d" | "__m512i" => (64, 64),
+        // Rust portable SIMD / packed types (std::simd, packed_simd)
+        "f32x4"  | "i32x4"  | "u32x4"  => (16, 16),
+        "f64x2"  | "i64x2"  | "u64x2"  => (16, 16),
+        "f32x8"  | "i32x8"  | "u32x8"  => (32, 32),
+        "f64x4"  | "i64x4"  | "u64x4"  => (32, 32),
+        "f32x16" | "i32x16" | "u32x16" => (64, 64),
+        _                        => (arch.pointer_size, arch.pointer_size),
+    }
+}
+
+fn array_len_from_expr(expr: &syn::Expr) -> usize {
+    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(n), .. }) = expr {
+        n.base10_parse::<usize>().unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+// ── struct repr detection ─────────────────────────────────────────────────────
+
+fn is_packed(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident("repr")
+            && a.to_token_stream().to_string().contains("packed")
+    })
+}
+
+fn simulate_rust_layout(
+    name: String,
+    fields: &[(String, Type)],
+    packed: bool,
+    arch: &'static ArchConfig,
+) -> StructLayout {
+    let mut offset = 0usize;
+    let mut struct_align = 1usize;
+    let mut out_fields: Vec<Field> = Vec::new();
+
+    for (fname, ty) in fields {
+        let (size, align, type_info) = rust_type_size_align(ty, arch);
+        let effective_align = if packed { 1 } else { align };
+
+        if effective_align > 0 {
+            offset = offset.next_multiple_of(effective_align);
+        }
+        struct_align = struct_align.max(effective_align);
+
+        out_fields.push(Field {
+            name: fname.clone(),
+            ty: type_info,
+            offset,
+            size,
+            align: effective_align,
+            source_file: None,
+            source_line: None,
+            access: AccessPattern::Unknown,
+        });
+        offset += size;
+    }
+
+    if !packed && struct_align > 0 {
+        offset = offset.next_multiple_of(struct_align);
+    }
+
+    StructLayout {
+        name,
+        total_size: offset,
+        align: struct_align,
+        fields: out_fields,
+        source_file: None,
+        source_line: None,
+        arch,
+        is_packed: packed,
+        is_union: false,
+    }
+}
+
+// ── visitor ───────────────────────────────────────────────────────────────────
+
+struct StructVisitor {
+    arch: &'static ArchConfig,
+    layouts: Vec<StructLayout>,
+}
+
+impl<'ast> Visit<'ast> for StructVisitor {
+    fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
+        syn::visit::visit_item_struct(self, node); // recurse into nested items
+
+        let name = node.ident.to_string();
+        let packed = is_packed(&node.attrs);
+
+        let fields: Vec<(String, Type)> = match &node.fields {
+            Fields::Named(nf) => nf
+                .named
+                .iter()
+                .map(|f| (f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default(), f.ty.clone()))
+                .collect(),
+            Fields::Unnamed(uf) => uf
+                .unnamed
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (format!("_{i}"), f.ty.clone()))
+                .collect(),
+            Fields::Unit => vec![],
+        };
+
+        let layout = simulate_rust_layout(name, &fields, packed, self.arch);
+        self.layouts.push(layout);
+    }
+}
+
+// ── public API ────────────────────────────────────────────────────────────────
+
+pub fn parse_rust(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
+    let file: syn::File = syn::parse_str(source)?;
+    let mut visitor = StructVisitor { arch, layouts: Vec::new() };
+    visitor.visit_file(&file);
+    Ok(visitor.layouts)
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use padlock_core::arch::X86_64_SYSV;
+
+    #[test]
+    fn parse_simple_struct() {
+        let src = "struct Foo { a: u8, b: u64, c: u32 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let l = &layouts[0];
+        assert_eq!(l.name, "Foo");
+        assert_eq!(l.fields.len(), 3);
+        assert_eq!(l.fields[0].size, 1); // u8
+        assert_eq!(l.fields[1].size, 8); // u64
+        assert_eq!(l.fields[2].size, 4); // u32
+    }
+
+    #[test]
+    fn layout_includes_padding() {
+        // u8 then u64: 7 bytes padding inserted
+        let src = "struct T { a: u8, b: u64 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].offset, 0);
+        assert_eq!(l.fields[1].offset, 8); // u64 aligned to 8
+        assert_eq!(l.total_size, 16);
+        let gaps = padlock_core::ir::find_padding(l);
+        assert_eq!(gaps[0].bytes, 7);
+    }
+
+    #[test]
+    fn multiple_structs_parsed() {
+        let src = "struct A { x: u32 } struct B { y: u64 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 2);
+    }
+
+    #[test]
+    fn packed_struct_no_padding() {
+        let src = "#[repr(packed)] struct P { a: u8, b: u64 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert!(l.is_packed);
+        assert_eq!(l.fields[1].offset, 1); // no padding, b immediately after a
+        let gaps = padlock_core::ir::find_padding(l);
+        assert!(gaps.is_empty());
+    }
+
+    #[test]
+    fn pointer_field_uses_arch_size() {
+        let src = "struct S { p: *const u8 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 8); // 64-bit pointer
+    }
+}

@@ -1,0 +1,12 @@
+/target/
+# Cargo.lock is tracked for this CLI binary (reproducible builds).
+# Remove this comment and uncomment the line below only if converting to a library.
+# Cargo.lock
+*.o
+*.a
+*.so
+*.dylib
+*.pdb
+*.dSYM/
+.env
+.DS_Store

@@ -1,0 +1,24 @@
+[package]
+name        = "padlock-cli"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+description.workspace = true
+keywords.workspace    = true
+categories.workspace  = true
+
+[[bin]]
+name = "padlock"
+path = "src/main.rs"
+
+[dependencies]
+padlock-core   = { path = "../padlock-core" }
+padlock-dwarf  = { path = "../padlock-dwarf" }
+padlock-source = { path = "../padlock-source" }
+padlock-output = { path = "../padlock-output" }
+serde_json     = "1"
+anyhow         = "1"
+clap           = { version = "4", features = ["derive"] }
+owo-colors     = "4"
+comfy-table    = "7"

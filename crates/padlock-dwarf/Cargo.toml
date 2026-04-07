@@ -9,7 +9,7 @@ keywords.workspace    = true
 categories.workspace  = true
 
 [dependencies]
-padlock-core = { path = "../padlock-core" }
+padlock-core = { path = "../padlock-core", version = "0.1.0" }
 anyhow       = "1"
 gimli        = "0.29"
 object       = { version = "0.36", features = ["read"] }

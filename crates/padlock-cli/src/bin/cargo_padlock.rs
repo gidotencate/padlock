@@ -4,7 +4,7 @@
 // Cargo invokes this binary when the user runs `cargo padlock [args]`.
 // Cargo passes "padlock" as argv[1], so we skip it.
 //
-// Usage (after `cargo install padlock` or PATH contains ./target/debug/):
+// Usage (after `cargo install padlock-cli` or PATH contains ./target/debug/):
 //
 //   cargo padlock                      # analyze default binary
 //   cargo padlock --package mylib      # specific package

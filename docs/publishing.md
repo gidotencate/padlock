@@ -49,7 +49,7 @@ GPL v3 makes sense if you want to ensure that anyone who ships a modified padloc
 2. **Add `[package]` to each crate Cargo.toml** with `workspace = true` to inherit:
    ```toml
    [package]
-   name = "padlock"   # the CLI crate
+   name = "padlock-cli"   # the CLI crate
    version.workspace    = true
    edition.workspace    = true
    license.workspace    = true
@@ -60,7 +60,7 @@ GPL v3 makes sense if you want to ensure that anyone who ships a modified padloc
 3. **Check what will be published** (dry run):
    ```bash
    cargo publish --dry-run -p padlock-core
-   cargo publish --dry-run -p padlock
+   cargo publish --dry-run -p padlock-cli
    ```
 
 4. **Verify the README renders correctly** on crates.io. They use CommonMark; the current README is compatible.
@@ -75,7 +75,7 @@ cargo publish -p padlock-dwarf
 cargo publish -p padlock-source
 cargo publish -p padlock-output
 cargo publish -p padlock-macros   # proc-macro crate; no runtime deps on other crates
-cargo publish -p padlock-cli      # publishes as "padlock" on crates.io (the binary)
+cargo publish -p padlock-cli      # installs the `padlock` and `cargo-padlock` binaries
 ```
 
 Wait ~30 seconds between each to let the registry index propagate. The `cargo-padlock` binary is part of `padlock-cli` and is published alongside it automatically.
@@ -84,7 +84,7 @@ Wait ~30 seconds between each to let the registry index propagate. The `cargo-pa
 
 Users can install with:
 ```bash
-cargo install padlock
+cargo install padlock-cli
 ```
 
 ---
@@ -184,7 +184,7 @@ Before you publish to crates.io or announce the tool, consider addressing:
 | Watch mode (`padlock watch`) | High | Medium | Done |
 | `#[assert_no_padding]` proc macro | High | Medium | Done |
 | GitHub Actions `action.yml` | High | Low | Done |
-| `padlock-cli` publishes as "padlock" on crates.io | Required | Low | Done |
+| Rename CLI crate to `padlock-cli` (name conflict on crates.io) | Required | Low | Done |
 | In-place `fix` for all source languages | Medium | Medium | Done |
 | Nested struct size resolution | Medium | High | Done |
 | C++ inheritance / vtable padding | Medium | High | Done |
@@ -194,5 +194,5 @@ Before you publish to crates.io or announce the tool, consider addressing:
 
 The tool is feature-complete for its stated scope. Remaining pre-publish steps:
 1. Check whether any binary artifact (`libsource.a`, `*.o`) is tracked in git and remove it
-2. Decide on the crate name strategy (see note above about "padlock" name conflict)
+2. Run `cargo publish --dry-run -p padlock-cli` to catch metadata issues
 3. Run `cargo publish --dry-run -p padlock-core` through all crates to catch metadata issues

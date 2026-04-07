@@ -66,9 +66,9 @@ runs:
       if: ${{ inputs.padlock-version != 'local' }}
       run: |
         if [ "${{ inputs.padlock-version }}" = "latest" ]; then
-          cargo install padlock
+          cargo install padlock-cli
         else
-          cargo install padlock --version "${{ inputs.padlock-version }}"
+          cargo install padlock-cli --version "${{ inputs.padlock-version }}"
         fi
 
     - name: Run padlock analysis

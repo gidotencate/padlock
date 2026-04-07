@@ -433,7 +433,7 @@ See `.github/workflows/padlock-example.yml` for a full reference workflow includ
 
 ```yaml
 - uses: dtolnay/rust-toolchain@stable
-- run: cargo install padlock
+- run: cargo install padlock-cli
 - run: cargo padlock --sarif   # exits non-zero on high-severity findings
 ```
 

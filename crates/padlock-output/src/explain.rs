@@ -33,10 +33,7 @@ pub fn render_explain(layout: &StructLayout) -> String {
         (Some(f), None) => format!("  ({})", f),
         _ => String::new(),
     };
-    out.push_str(&format!(
-        "{}{}\n",
-        layout.name, loc
-    ));
+    out.push_str(&format!("{}{}\n", layout.name, loc));
     out.push_str(&format!(
         "{} bytes  align={}  fields={}{}\n",
         layout.total_size,
@@ -48,9 +45,12 @@ pub fn render_explain(layout: &StructLayout) -> String {
     // Table
     let col_field = 36usize;
     let divider = format!("├{:─<8}┼{:─<6}┼{:─<7}┼{:─<col_field$}┤", "", "", "", "");
-    let top     = format!("┌{:─<8}┬{:─<6}┬{:─<7}┬{:─<col_field$}┐", "", "", "", "");
-    let bot     = format!("└{:─<8}┴{:─<6}┴{:─<7}┴{:─<col_field$}┘", "", "", "", "");
-    let header  = format!("│ {:>6} │ {:>4} │ {:>5} │ {:<col_field$}│", "offset", "size", "align", "field");
+    let top = format!("┌{:─<8}┬{:─<6}┬{:─<7}┬{:─<col_field$}┐", "", "", "", "");
+    let bot = format!("└{:─<8}┴{:─<6}┴{:─<7}┴{:─<col_field$}┘", "", "", "", "");
+    let header = format!(
+        "│ {:>6} │ {:>4} │ {:>5} │ {:<col_field$}│",
+        "offset", "size", "align", "field"
+    );
 
     out.push_str(&top);
     out.push('\n');
@@ -62,8 +62,18 @@ pub fn render_explain(layout: &StructLayout) -> String {
     // Build rows: interleave fields with padding gaps
     #[derive(Debug)]
     enum Row {
-        Field { offset: usize, size: usize, align: usize, name: String, ty: String },
-        Pad  { offset: usize, size: usize, trailing: bool },
+        Field {
+            offset: usize,
+            size: usize,
+            align: usize,
+            name: String,
+            ty: String,
+        },
+        Pad {
+            offset: usize,
+            size: usize,
+            trailing: bool,
+        },
     }
 
     let mut rows: Vec<Row> = Vec::new();
@@ -95,7 +105,13 @@ pub fn render_explain(layout: &StructLayout) -> String {
 
     for row in &rows {
         match row {
-            Row::Field { offset, size, align, name, ty } => {
+            Row::Field {
+                offset,
+                size,
+                align,
+                name,
+                ty,
+            } => {
                 let label = format!("{}: {}", name, ty);
                 let label = if label.len() > col_field {
                     format!("{}…", &label[..col_field - 1])
@@ -107,7 +123,11 @@ pub fn render_explain(layout: &StructLayout) -> String {
                     offset, size, align, label
                 ));
             }
-            Row::Pad { offset, size, trailing } => {
+            Row::Pad {
+                offset,
+                size,
+                trailing,
+            } => {
                 let label = if *trailing {
                     "<padding> (trailing)".to_string()
                 } else {
@@ -137,7 +157,8 @@ pub fn render_explain(layout: &StructLayout) -> String {
                 .collect();
             out.push_str(&format!(
                 "{} bytes wasted ({:.0}%) — reorder: {} → {} bytes\n",
-                wasted, pct,
+                wasted,
+                pct,
                 opt_order.join(", "),
                 opt_size
             ));

@@ -157,9 +157,7 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Watch { path, json } => commands::watch::run(&path, json),
 
-        Commands::Explain { paths, filter } => {
-            commands::explain::run(&paths, filter.as_deref())
-        }
+        Commands::Explain { paths, filter } => commands::explain::run(&paths, filter.as_deref()),
 
         Commands::Check {
             paths,

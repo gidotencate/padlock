@@ -69,12 +69,7 @@ pub fn run(
     json: bool,
     filter: &FilterArgs,
 ) -> anyhow::Result<()> {
-    let cfg = Config::for_path(
-        paths
-            .first()
-            .map(|p| p.as_path())
-            .unwrap_or(Path::new(".")),
-    );
+    let cfg = Config::for_path(paths.first().map(|p| p.as_path()).unwrap_or(Path::new(".")));
 
     let (mut layouts, analyzed) = collect_layouts(paths)?;
     layouts.retain(|l| !cfg.is_ignored(&l.name));
@@ -86,8 +81,7 @@ pub fn run(
 
     // ── save-baseline mode ────────────────────────────────────────────────────
     if save_baseline {
-        let path = baseline_path
-            .unwrap_or(Path::new(".padlock-baseline.json"));
+        let path = baseline_path.unwrap_or(Path::new(".padlock-baseline.json"));
         let entries: Vec<BaselineEntry> = report
             .structs
             .iter()
@@ -180,10 +174,7 @@ pub fn run(
                             base.worst_severity, current_worst
                         )
                     } else {
-                        format!(
-                            "score dropped: {:.0} → {:.0}",
-                            base.score, sr.score
-                        )
+                        format!("score dropped: {:.0} → {:.0}", base.score, sr.score)
                     };
                     regressions.push(RegressionEntry {
                         struct_name: sr.struct_name.clone(),

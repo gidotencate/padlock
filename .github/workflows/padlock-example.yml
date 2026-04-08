@@ -38,7 +38,7 @@ jobs:
       - name: Analyse struct layouts (SARIF)
         uses: ./  # use `gidotencate/padlock@v1` in your own repo
         with:
-          path: target/debug/your-binary-name
+          path: target/debug/padlock
           output-format: sarif
           upload-sarif: 'true'
           fail-on-severity: high
@@ -47,7 +47,7 @@ jobs:
       # - name: Analyse struct layouts (human)
       #   uses: ./
       #   with:
-      #     path: target/debug/your-binary-name
+      #     path: target/debug/padlock
       #     output-format: human
       #     fail-on-severity: high
 

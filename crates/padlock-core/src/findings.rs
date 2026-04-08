@@ -200,10 +200,11 @@ mod tests {
         assert_eq!(report.total_structs, 1);
         let sr = &report.structs[0];
         assert!(sr.wasted_bytes > 0);
-        assert!(sr
-            .findings
-            .iter()
-            .any(|f| matches!(f, Finding::PaddingWaste { .. })));
+        assert!(
+            sr.findings
+                .iter()
+                .any(|f| matches!(f, Finding::PaddingWaste { .. }))
+        );
     }
 
     #[test]
@@ -211,20 +212,22 @@ mod tests {
         let report = Report::from_layouts(&[packed_layout()]);
         let sr = &report.structs[0];
         assert_eq!(sr.wasted_bytes, 0);
-        assert!(!sr
-            .findings
-            .iter()
-            .any(|f| matches!(f, Finding::PaddingWaste { .. })));
+        assert!(
+            !sr.findings
+                .iter()
+                .any(|f| matches!(f, Finding::PaddingWaste { .. }))
+        );
     }
 
     #[test]
     fn report_from_misaligned_has_reorder_suggestion() {
         let report = Report::from_layouts(&[connection_layout()]);
         let sr = &report.structs[0];
-        assert!(sr
-            .findings
-            .iter()
-            .any(|f| matches!(f, Finding::ReorderSuggestion { .. })));
+        assert!(
+            sr.findings
+                .iter()
+                .any(|f| matches!(f, Finding::ReorderSuggestion { .. }))
+        );
     }
 
     #[test]

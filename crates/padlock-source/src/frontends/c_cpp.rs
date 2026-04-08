@@ -822,14 +822,16 @@ typedef struct {
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
         let report = padlock_core::findings::Report::from_layouts(&layouts);
         let sr = &report.structs[0];
-        assert!(!sr
-            .findings
-            .iter()
-            .any(|f| matches!(f, padlock_core::findings::Finding::PaddingWaste { .. })));
-        assert!(!sr
-            .findings
-            .iter()
-            .any(|f| matches!(f, padlock_core::findings::Finding::ReorderSuggestion { .. })));
+        assert!(
+            !sr.findings
+                .iter()
+                .any(|f| matches!(f, padlock_core::findings::Finding::PaddingWaste { .. }))
+        );
+        assert!(
+            !sr.findings
+                .iter()
+                .any(|f| matches!(f, padlock_core::findings::Finding::ReorderSuggestion { .. }))
+        );
     }
 
     #[test]
@@ -966,7 +968,7 @@ class Widget {
         // First field must be __vptr
         assert_eq!(l.fields[0].name, "__vptr");
         assert_eq!(l.fields[0].size, 8); // pointer on x86_64
-                                         // __vptr is at offset 0
+        // __vptr is at offset 0
         assert_eq!(l.fields[0].offset, 0);
         // int x should come after the pointer (at offset 8)
         let x = l.fields.iter().find(|f| f.name == "x").unwrap();

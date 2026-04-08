@@ -135,7 +135,9 @@ pub fn run(
             } else {
                 print!("{}", padlock_output::render_report(&report));
                 if has_high {
-                    eprintln!("\npadlock: check failed — High severity findings present (use --save-baseline to establish a baseline)");
+                    eprintln!(
+                        "\npadlock: check failed — High severity findings present (use --save-baseline to establish a baseline)"
+                    );
                 }
             }
             if has_high {

@@ -1,6 +1,6 @@
 // padlock-output/src/diff.rs
 
-use padlock_core::ir::{optimal_order, StructLayout};
+use padlock_core::ir::{StructLayout, optimal_order};
 use similar::{ChangeTag, TextDiff};
 
 /// Render a unified diff of a struct's current field order vs the optimal order.

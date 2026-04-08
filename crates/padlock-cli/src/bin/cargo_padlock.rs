@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use clap::Parser;
 
 // Re-use config from the library part of the crate.
@@ -130,7 +130,9 @@ fn main() -> anyhow::Result<()> {
 
     if layouts.is_empty() {
         eprintln!("padlock: no struct layouts found — is the binary built with debug info?");
-        eprintln!("         Tip: add `[profile.release] debug = true` to Cargo.toml when using --release.");
+        eprintln!(
+            "         Tip: add `[profile.release] debug = true` to Cargo.toml when using --release."
+        );
         return Ok(());
     }
 

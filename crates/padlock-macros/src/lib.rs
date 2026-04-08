@@ -9,7 +9,7 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Fields, ItemStruct};
+use syn::{Fields, ItemStruct, parse_macro_input};
 
 // ── #[padlock::assert_no_padding] ────────────────────────────────────────────
 

@@ -11,7 +11,7 @@
 use anyhow::Context;
 use clap::{Args, ValueEnum};
 use padlock_core::findings::{Finding, Report};
-use padlock_core::ir::{find_padding, StructLayout};
+use padlock_core::ir::{StructLayout, find_padding};
 
 /// How to order the output structs.
 #[derive(Clone, ValueEnum, Default)]
@@ -205,10 +205,11 @@ mod tests {
         let mut report = Report::from_layouts(&[connection_layout(), packed_layout()]);
         args(None, None, None, None, true, SortBy::Score).apply_to_report(&mut report);
         // All remaining structs must have a ReorderSuggestion
-        assert!(report.structs.iter().all(|sr| sr
-            .findings
-            .iter()
-            .any(|f| matches!(f, Finding::ReorderSuggestion { .. }))));
+        assert!(report.structs.iter().all(|sr| {
+            sr.findings
+                .iter()
+                .any(|f| matches!(f, Finding::ReorderSuggestion { .. }))
+        }));
         // Packed has no reorder suggestion so it should be gone
         assert!(report.structs.iter().all(|sr| sr.struct_name != "Packed"));
     }

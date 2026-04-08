@@ -75,11 +75,18 @@ runs:
         REPO="gidotencate/padlock"
         VERSION="${{ inputs.padlock-version }}"
 
-        # Resolve "latest" → concrete version via GitHub API
+        # Resolve "latest" → concrete version via GitHub API.
+        # Use -L (follow redirects) without -f so a 404 (no releases yet) does
+        # not kill the script; handle the empty-result case explicitly instead.
         if [ "$VERSION" = "latest" ]; then
-          VERSION=$(curl -sSf "https://api.github.com/repos/$REPO/releases/latest" \
+          VERSION=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" \
             | grep '"tag_name"' \
-            | sed 's/.*"v\([^"]*\)".*/\1/')
+            | sed 's/.*"v\([^"]*\)".*/\1/') || true
+          if [ -z "$VERSION" ]; then
+            echo "No GitHub Release found for $REPO; installing latest via cargo..."
+            cargo install padlock-cli
+            exit 0
+          fi
         fi
 
         # Map runner platform to release-asset target triple

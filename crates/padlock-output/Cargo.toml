@@ -10,11 +10,11 @@ categories.workspace  = true
 readme                = "README.md"
 
 [dependencies]
-padlock-core = { path = "../padlock-core", version = "0.5.1" }
+padlock-core = { path = "../padlock-core", version = "0.5.2" }
 anyhow       = "1"
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
 similar      = "2"
 
 [dev-dependencies]
-padlock-core = { path = "../padlock-core", version = "0.5.1", features = ["test-helpers"] }
+padlock-core = { path = "../padlock-core", version = "0.5.2", features = ["test-helpers"] }

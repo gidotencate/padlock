@@ -2,7 +2,7 @@
 //
 // Generate reordered struct source text, unified diffs, and in-place rewrites.
 
-use padlock_core::ir::{optimal_order, StructLayout};
+use padlock_core::ir::{StructLayout, optimal_order};
 use similar::{ChangeTag, TextDiff};
 
 /// Render a reordered C/C++ struct definition as source text.

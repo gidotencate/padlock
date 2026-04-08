@@ -4,7 +4,7 @@
 // Shows each field's offset, size, alignment, and padding gaps inline.
 
 use padlock_core::analysis::impact::estimate_impact;
-use padlock_core::ir::{find_padding, StructLayout, TypeInfo};
+use padlock_core::ir::{StructLayout, TypeInfo, find_padding};
 
 /// Render a visual layout table for one struct.
 ///

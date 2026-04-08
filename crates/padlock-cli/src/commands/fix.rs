@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use padlock_core::findings::{Finding, Report};
-use padlock_source::{fixgen, SourceLanguage};
+use padlock_source::{SourceLanguage, fixgen};
 
 use crate::paths::walk_source_files;
 

@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gimli::read::EndianRcSlice;
 use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
-use padlock_core::arch::{ArchConfig, AARCH64, AARCH64_APPLE, RISCV64, WASM32, X86_64_SYSV};
+use padlock_core::arch::{AARCH64, AARCH64_APPLE, ArchConfig, RISCV64, WASM32, X86_64_SYSV};
 
 pub type DwarfRc = gimli::Dwarf<EndianRcSlice<gimli::RunTimeEndian>>;
 
@@ -147,7 +147,7 @@ mod tests {
         h[5] = 1; // ELFDATA2LSB (little-endian)
         h[6] = 1; // EV_CURRENT
         h[7] = 0; // ELFOSABI_NONE
-                  // e_type = ET_REL (1)
+        // e_type = ET_REL (1)
         h[16] = 1;
         h[17] = 0;
         // e_machine

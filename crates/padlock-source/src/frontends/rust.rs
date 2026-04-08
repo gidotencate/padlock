@@ -7,7 +7,7 @@
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
 use quote::ToTokens;
-use syn::{visit::Visit, Fields, ItemStruct, Type};
+use syn::{Fields, ItemStruct, Type, visit::Visit};
 
 // ── attribute guard extraction ────────────────────────────────────────────────
 

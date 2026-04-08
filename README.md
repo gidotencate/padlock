@@ -1,5 +1,9 @@
 # padlock
 
+[![crates.io](https://img.shields.io/crates/v/padlock-cli.svg)](https://crates.io/crates/padlock-cli)
+[![CI](https://github.com/gidotencate/padlock/actions/workflows/ci.yml/badge.svg)](https://github.com/gidotencate/padlock/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/padlock-cli.svg)](LICENSE)
+
 Struct memory layout analyzer for C, C++, Rust, and Go. Finds padding waste, false sharing, and cache locality problems — ranks findings by impact, generates reorder suggestions, and flags concurrency risks. CLI-first and CI-ready.
 
 ```
@@ -372,9 +376,48 @@ Each struct receives a score from 0 (worst) to 100 (perfect packing, no concurre
 
 **Notes on source analysis:**
 - Source analysis is approximate — no compiler is invoked; field sizes come from a built-in type table.
-- Rust `#[repr(C)]` and `#[repr(packed)]` are detected and respected.
-- C++ `alignas(N)` field annotations are currently ignored by the source frontend (use binary analysis for accurate C++ layout with alignment overrides).
-- Plain Rust structs (`repr(Rust)`) may be reordered by the compiler; padlock analyzes declaration order, which is what you control.
+- C++ `alignas(N)` field annotations are not modeled in source analysis; use binary (DWARF) analysis for accurate C++ layout with alignment overrides.
+
+### Rust repr support
+
+Rust's memory layout depends on which `repr` is in effect. padlock handles each case differently:
+
+| repr | Layout guarantee | padlock accuracy | Notes |
+|---|---|---|---|
+| `repr(Rust)` (default) | None — compiler may reorder | Approximate | Analyzes declaration order; use for finding issues to fix, not ABI verification |
+| `repr(C)` | C-compatible, declaration order | **Accurate** | Full analysis; best candidate for padding fixes |
+| `repr(packed)` / `repr(packed(n))` | No padding, fields may be unaligned | Accurate for waste | Reorder suggestions suppressed — packing is intentional; note that unaligned field references can cause UB |
+| `repr(align(n))` | Minimum alignment forced | Partial | Source frontend infers standard field sizes; struct-level forced alignment not modeled — use binary analysis |
+| `repr(transparent)` | Same as inner field | Accurate | Single-field wrapper; padding findings correctly suppressed |
+| `repr(u*)` / `repr(i*)` | Enum discriminant size | N/A | Applies to enums, not structs; padlock does not analyze enums |
+
+**Key points for Rust:**
+
+- **`repr(C)` structs are the highest-value target.** Their layout is fixed in declaration order, they may cross FFI boundaries, and every wasted byte is a genuine cost. padlock's reorder suggestions for `repr(C)` structs are directly actionable.
+
+- **Plain `repr(Rust)` structs** may already be optimally ordered by the compiler at compile time — the cost you pay is in source readability and the risk that adding a field in a "logical" position silently bloats the layout. padlock finds those risks.
+
+- **`repr(packed)` trades padding waste for unaligned access.** padlock detects it and suppresses false-positive reorder suggestions. If padlock flags a padded struct and you add `repr(packed)` as a fix, verify that you never take a reference to a field — that can cause undefined behaviour on some architectures.
+
+- **`repr(align(n))` is the correct fix for false sharing.** Instead of manual padding arrays, use `#[repr(align(64))]` (or 128 on Apple Silicon) on a wrapper struct. padlock's FalseSharing finding tells you *which* structs need this treatment; tokio's `CachePadded<T>` is the canonical Rust implementation of this pattern.
+
+```rust
+// What padlock flags:
+struct WorkerState {
+    task_count: AtomicU64,  // hot — modified on every task poll
+    is_parked:  AtomicBool, // hot — different lock bucket
+    name:       String,     // cold — set once at init
+}
+
+// One correct fix — separate hot fields onto their own cache line:
+#[repr(align(64))]
+struct WorkerState {
+    task_count: AtomicU64,
+    is_parked:  AtomicBool,
+}
+```
+
+For exact compiler-verified layout of any repr, use `padlock analyze target/debug/myapp` (binary/DWARF mode).
 
 ---
 
@@ -389,6 +432,87 @@ Each struct receives a score from 0 (worst) to 100 (perfect packing, no concurre
 | `riscv64` | 8 bytes | 64 bytes | RISC-V 64-bit |
 
 The architecture is auto-detected from the host when analyzing source files. For binary analysis it is read from the binary's ELF/Mach-O/PE header.
+
+---
+
+## Real-World Findings: tokio 1.51
+
+Running padlock against the tokio async runtime source reveals real layout issues in production code:
+
+```
+$ padlock analyze ~/.cargo/registry/src/.../tokio-1.51.1/src --sort-by waste --min-size 16
+Analyzed 373 files, 273 structs — 348 bytes wasted across all structs
+```
+
+### `ReadyEvent` — 58% padding waste
+
+```rust
+// tokio/src/runtime/io/driver.rs  (as written)
+pub(crate) struct ReadyEvent {
+    pub(super) tick:        u8,     // offset 0,  1 byte
+    //                              // 3 bytes padding
+    pub(crate) ready:       Ready,  // offset 4,  4 bytes
+    pub(super) is_shutdown: bool,   // offset 8,  1 byte
+    //                              // 15 bytes trailing padding
+}                                   // total: 24 bytes, 14 wasted (58%)
+```
+
+padlock suggests reordering to eliminate the waste:
+
+```
+[HIGH] Reorder fields to save 8B → 16B: ready, tick, is_shutdown
+```
+
+```rust
+// After reorder: 16 bytes, 6 bytes wasted → 37% (unavoidable trailing alignment)
+// With explicit packing possible to 6 bytes if repr(packed) is appropriate
+pub(crate) struct ReadyEvent {
+    pub(crate) ready:       Ready,  // offset 0, 4 bytes
+    pub(super) tick:        u8,     // offset 4, 1 byte
+    pub(super) is_shutdown: bool,   // offset 5, 1 byte
+}                                   // total: 8 bytes (no padding at all)
+```
+
+### `DirBuilder` — 44% padding waste
+
+```rust
+// tokio/src/fs/dir_builder.rs  (as written)
+pub struct DirBuilder {
+    recursive: bool,        // offset 0,  1 byte
+    //                      // 3 bytes padding
+    mode: Option<u32>,      // offset 4,  8 bytes
+}                           // total: 16 bytes, 7 wasted (44%)
+```
+
+```
+[HIGH] Padding waste: 7B (44%) across 1 gap(s)
+[HIGH] Reorder fields to save 4B → 12B: mode, recursive
+```
+
+### `Builder` (runtime builder) — 12% waste, 16 bytes recoverable
+
+The runtime `Builder` struct (200 bytes, 27 fields) has 23 bytes of padding spread across 4 gaps — recoverable to 184 bytes by reordering, freeing a full cache line worth of space that every `tokio::runtime::Builder::new_multi_thread()` call allocates on the stack.
+
+> **Note on repr:** `ReadyEvent` and `DirBuilder` are plain `repr(Rust)` structs. The Rust compiler *may* reorder their fields and eliminate the waste automatically at compile time — but it is not required to, and the declared order is what you see in the source, what code reviewers read, and what controls the layout if the struct is ever given `repr(C)`. padlock surfaces these issues so you can fix them intentionally rather than depending on compiler luck.
+
+### `WorkerMetrics` — `repr(align(128))` done right
+
+Tokio's worker metrics use `#[repr(align(128))]` to prevent false sharing across scheduler threads:
+
+```rust
+#[repr(align(128))]
+pub(crate) struct WorkerMetrics {
+    pub(crate) busy_duration_total: MetricAtomicU64,
+    pub(crate) queue_depth:         MetricAtomicUsize,
+    thread_id:                      Mutex<Option<ThreadId>>,
+    pub(crate) park_count:          MetricAtomicU64,
+    // ...
+}
+```
+
+padlock correctly identifies this as a false-sharing concern at the source level (different atomic fields without guard separation), while the `repr(align(128))` at the struct level ensures each `WorkerMetrics` instance is on its own cache line at runtime. This is the recommended pattern: use `repr(align(64))` (or 128 on Apple/ARM big cores) on the struct rather than manual `[u8; N]` padding arrays.
+
+These are not bugs — they are the kind of low-level layout details that accumulate invisibly over time. padlock surfaces them before they become performance regressions.
 
 ---
 

@@ -15,12 +15,27 @@
 //
 //   [arch]
 //   override = "aarch64"         # force a specific arch (x86_64|aarch64|aarch64_apple|wasm32|riscv64)
+//
+//   # Per-struct overrides — keyed by exact struct name
+//   [ignore."MyFfiStruct"]       # suppress entirely (same as adding to `ignore` list)
+//   [override."HotPath"]
+//   min_severity = "high"        # only report High findings for this struct
+//   fail_below   = 50            # lower threshold for this struct
 
 use std::path::{Path, PathBuf};
 
 use padlock_core::findings::Severity;
 
 const CONFIG_FILENAME: &str = ".padlock.toml";
+
+/// Per-struct severity and threshold overrides.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StructOverride {
+    /// Override min_severity for this struct only.
+    pub min_severity: Option<Severity>,
+    /// Override fail_below for this struct only.
+    pub fail_below: Option<u8>,
+}
 
 /// Loaded and validated project configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +48,8 @@ pub struct Config {
     pub ignore: Vec<String>,
     /// Optional architecture override name (validated at load time).
     pub arch_override: Option<String>,
+    /// Per-struct overrides keyed by exact struct name.
+    pub struct_overrides: std::collections::HashMap<String, StructOverride>,
 }
 
 impl Default for Config {
@@ -42,6 +59,7 @@ impl Default for Config {
             fail_below: 0,
             ignore: Vec::new(),
             arch_override: None,
+            struct_overrides: std::collections::HashMap::new(),
         }
     }
 }
@@ -102,11 +120,36 @@ impl Config {
             .and_then(|v| v.as_str())
             .map(str::to_owned);
 
+        // Per-struct overrides: [override."StructName"]
+        let mut struct_overrides = std::collections::HashMap::new();
+        if let Some(overrides_table) = doc.get("override").and_then(|v| v.as_table()) {
+            for (struct_name, val) in overrides_table {
+                let min_sev = val
+                    .get("min_severity")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_severity);
+                let fail_b = val
+                    .get("fail_below")
+                    .and_then(|v| v.as_integer())
+                    .map(|n| n.clamp(0, 100) as u8);
+                if min_sev.is_some() || fail_b.is_some() {
+                    struct_overrides.insert(
+                        struct_name.clone(),
+                        StructOverride {
+                            min_severity: min_sev,
+                            fail_below: fail_b,
+                        },
+                    );
+                }
+            }
+        }
+
         Some(Self {
             min_severity,
             fail_below,
             ignore,
             arch_override,
+            struct_overrides,
         })
     }
 
@@ -118,6 +161,27 @@ impl Config {
     /// Returns true if a finding with the given severity should be reported.
     pub fn should_report(&self, severity: &Severity) -> bool {
         severity_rank(severity) >= severity_rank(&self.min_severity)
+    }
+
+    /// Returns true if a finding with the given severity should be reported
+    /// for the named struct, applying any per-struct override.
+    #[allow(dead_code)]
+    pub fn should_report_for(&self, struct_name: &str, severity: &Severity) -> bool {
+        let effective_min = self
+            .struct_overrides
+            .get(struct_name)
+            .and_then(|o| o.min_severity.as_ref())
+            .unwrap_or(&self.min_severity);
+        severity_rank(severity) >= severity_rank(effective_min)
+    }
+
+    /// Returns the effective fail_below threshold for the named struct.
+    #[allow(dead_code)]
+    pub fn fail_below_for(&self, struct_name: &str) -> u8 {
+        self.struct_overrides
+            .get(struct_name)
+            .and_then(|o| o.fail_below)
+            .unwrap_or(self.fail_below)
     }
 }
 

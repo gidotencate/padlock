@@ -39,20 +39,20 @@ pub fn run(paths: &[PathBuf], json: bool, sarif: bool, filter: &FilterArgs) -> a
     let mut report = Report::from_layouts(&layouts);
     report.analyzed_paths = analyzed;
 
-    // Apply config severity filter.
+    // Apply config severity filter (respects per-struct overrides).
     for sr in &mut report.structs {
-        sr.findings.retain(|f| cfg.should_report(f.severity()));
+        sr.findings
+            .retain(|f| cfg.should_report_for(&sr.struct_name, f.severity()));
     }
 
     // Apply post-analysis CLI filters (packable) and sort.
     filter.apply_to_report(&mut report);
 
-    // Check fail_below score threshold.
-    let failed = cfg.fail_below > 0
-        && report
-            .structs
-            .iter()
-            .any(|s| s.score < cfg.fail_below as f64);
+    // Check fail_below score threshold (respects per-struct overrides).
+    let failed = report.structs.iter().any(|s| {
+        let threshold = cfg.fail_below_for(&s.struct_name);
+        threshold > 0 && s.score < threshold as f64
+    });
 
     if sarif {
         println!("{}", padlock_output::to_sarif(&report)?);

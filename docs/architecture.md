@@ -109,6 +109,7 @@ Binary analysis backend.
 Output formatters. All functions take `padlock-core` types as input.
 
 - **`summary.rs`** — Human-readable terminal output. `render_report` prints the analysis header and struct findings. When multiple files were analyzed (`analyzed_paths.len() > 1`), structs are grouped under `── filename ──` separator headers, and each struct shows only `:line` (the filename is already in the header). For single-file runs the full `(file:line)` location is shown inline per struct.
+- **`explain.rs`** — `render_explain(&layout)` renders a visual field layout table with offset/size/align columns and inline padding gap rows. Trailing padding is labelled `<padding> (trailing)`.
 - **`json.rs`** — Serialises `Report` to JSON via `serde_json`.
 - **`sarif.rs`** — Emits SARIF 2.1.0 (`sarifVersion`, `runs[0].results`) for GitHub/GitLab code-scanning integration.
 - **`diff.rs`** — Renders a unified diff of current vs optimal field order using `similar::TextDiff`.
@@ -119,7 +120,7 @@ Output formatters. All functions take `padlock-core` types as input.
 
 Two binaries. Wires all other crates together.
 
-- **`main.rs`** — `clap` derive API; subcommand dispatch for `padlock`. `--version` flag auto-populated from `Cargo.toml`.
+- **`main.rs`** — `clap` derive API; subcommand dispatch for `padlock`. `--version` flag auto-populated from `Cargo.toml`. Subcommands: `analyze`, `list`, `diff`, `fix`, `report`, `watch`, `explain`, `check`.
 - **`filter.rs`** — `FilterArgs` (shared CLI flags: `--filter`, `--exclude`, `--min-holes`, `--min-size`, `--packable`, `--sort-by`) and `SortBy` enum. Applies pre-analysis layout filtering and post-analysis report sorting.
 - **`paths.rs`** — `collect_layouts` (loads layouts from multiple paths, expands directories) and `walk_source_files` (recursive directory walker, skips `target/`, `.git/`, etc.).
 - **`commands/analyze.rs`** — Collects layouts from all paths, applies config + CLI filters, runs `Report::from_layouts`, dispatches to the right formatter.
@@ -128,6 +129,8 @@ Two binaries. Wires all other crates together.
 - **`commands/fix.rs`** — Accepts multiple paths/dirs, applies `--filter`, shows reorder diff and (non-dry-run) writes `.bak` backup then rewrites in-place.
 - **`commands/report.rs`** — Alias for analyze.
 - **`commands/watch.rs`** — File/directory watcher using `notify`. Debounces change events (250 ms) and re-runs analysis on each change. Clears the terminal between runs.
+- **`commands/explain.rs`** — Prints a visual field-by-field memory layout table (offset, size, align, padding gaps inline) for each struct. Accepts `--filter`.
+- **`commands/check.rs`** — Baseline/ratchet mode. `--save-baseline FILE` snapshots current findings as JSON. `--baseline FILE` compares current findings against the snapshot and fails only on regressions (new structs with High findings, score drops, severity increases). Supports `--json` output.
 - **`bin/cargo_padlock.rs`** — The `cargo-padlock` binary, installed as a cargo subcommand. Reads `Cargo.toml` for the default binary name, runs `cargo build`, locates the built binary in `target/{profile}/`, and runs DWARF analysis. Exits non-zero on high-severity findings.
 
 ---

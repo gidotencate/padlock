@@ -8,7 +8,9 @@ pub mod paths;
 
 mod commands {
     pub mod analyze;
+    pub mod check;
     pub mod diff;
+    pub mod explain;
     pub mod fix;
     pub mod list;
     pub mod report;
@@ -97,6 +99,34 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Show a visual field-by-field memory layout table for each struct
+    Explain {
+        /// Paths to analyze: source files, binaries, or directories
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Include only structs whose names match this regex pattern
+        #[arg(long, short = 'F', value_name = "PATTERN")]
+        filter: Option<String>,
+    },
+
+    /// Compare current layout findings against a saved baseline; fail only on regressions
+    Check {
+        /// Paths to analyze: source files, binaries, or directories
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Path to baseline JSON file (created with --save-baseline)
+        #[arg(long, value_name = "FILE")]
+        baseline: Option<PathBuf>,
+        /// Save current findings as the new baseline instead of comparing
+        #[arg(long)]
+        save_baseline: bool,
+        /// Output comparison result as JSON
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        filter: filter::FilterArgs,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -126,5 +156,17 @@ fn main() -> anyhow::Result<()> {
         } => commands::analyze::run(&paths, json, false, &filter),
 
         Commands::Watch { path, json } => commands::watch::run(&path, json),
+
+        Commands::Explain { paths, filter } => {
+            commands::explain::run(&paths, filter.as_deref())
+        }
+
+        Commands::Check {
+            paths,
+            baseline,
+            save_baseline,
+            json,
+            filter,
+        } => commands::check::run(&paths, baseline.as_deref(), save_baseline, json, &filter),
     }
 }

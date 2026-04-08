@@ -136,7 +136,7 @@ jobs:
           for f in padlock_samples/rust/*.rs padlock_samples/c/*.c; do
             ./target/release/padlock analyze "$f" --sarif >> padlock.sarif
           done
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: padlock.sarif
 ```

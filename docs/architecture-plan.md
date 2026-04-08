@@ -387,7 +387,7 @@ Summary: 12 high, 18 medium, 17 low findings
       -o padlock-results.sarif
 
 - name: Upload SARIF
-  uses: github/codeql-action/upload-sarif@v3
+  uses: github/codeql-action/upload-sarif@v4
   with:
     sarif_file: padlock-results.sarif
 ```

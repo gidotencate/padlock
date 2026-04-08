@@ -40,7 +40,7 @@ jobs:
         with:
           path: target/debug/padlock
           output-format: sarif
-          upload-sarif: 'true'
+          upload-sarif: 'false'
           fail-on-severity: none
 
       # ── Option B: human-readable summary only ────────────────────────────────

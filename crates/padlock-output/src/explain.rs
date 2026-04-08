@@ -3,6 +3,7 @@
 // Renders a visual field-by-field memory layout table for a single struct.
 // Shows each field's offset, size, alignment, and padding gaps inline.
 
+use padlock_core::analysis::impact::estimate_impact;
 use padlock_core::ir::{find_padding, StructLayout, TypeInfo};
 
 /// Render a visual layout table for one struct.
@@ -162,6 +163,22 @@ pub fn render_explain(layout: &StructLayout) -> String {
                 opt_order.join(", "),
                 opt_size
             ));
+
+            // Impact block: show concrete memory/cache effects at scale.
+            // Cache line size: default 64 bytes (x86-64 / aarch64).
+            const CACHE_LINE: usize = 64;
+            let impact = estimate_impact(savings, layout.total_size, opt_size, CACHE_LINE);
+            out.push_str(&format!(
+                "  ~{savings} KB extra per 1K instances · ~{savings} MB per 1M \
+                 instances · ~{cl_1m} extra cache lines/1M (seq. scan)\n",
+                cl_1m = fmt_count(impact.extra_cache_lines_1m),
+            ));
+            if impact.reduces_cache_line_crossings() {
+                out.push_str(&format!(
+                    "  Spans {} cache line(s); optimal spans {}\n",
+                    impact.current_cache_lines, impact.optimal_cache_lines,
+                ));
+            }
         } else {
             out.push_str(&format!(
                 "{} bytes wasted ({:.0}%) — already in optimal order\n",
@@ -175,6 +192,17 @@ pub fn render_explain(layout: &StructLayout) -> String {
     }
 
     out
+}
+
+/// Format a large count with K/M suffix for readability.
+fn fmt_count(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}K", n / 1_000)
+    } else {
+        n.to_string()
+    }
 }
 
 fn type_name(ty: &TypeInfo) -> String {
@@ -224,5 +252,32 @@ mod tests {
         let out = render_explain(&layout);
         assert!(out.contains("reorder"));
         assert!(out.contains("→"));
+    }
+
+    #[test]
+    fn explain_shows_impact_scale_line() {
+        let layout = connection_layout();
+        let out = render_explain(&layout);
+        // Connection saves 8B → should show ~8 KB per 1K and ~8 MB per 1M
+        assert!(out.contains("~8 KB extra per 1K instances"));
+        assert!(out.contains("~8 MB per 1M instances"));
+        assert!(out.contains("extra cache lines/1M"));
+    }
+
+    #[test]
+    fn explain_no_impact_line_when_no_savings() {
+        let layout = padlock_core::ir::test_fixtures::packed_layout();
+        let out = render_explain(&layout);
+        assert!(!out.contains("KB extra per 1K"));
+        assert!(!out.contains("MB per 1M"));
+    }
+
+    #[test]
+    fn fmt_count_formats_correctly() {
+        assert_eq!(fmt_count(999), "999");
+        assert_eq!(fmt_count(1_000), "1K");
+        assert_eq!(fmt_count(125_000), "125K");
+        assert_eq!(fmt_count(1_000_000), "1M");
+        assert_eq!(fmt_count(2_500_000), "2M");
     }
 }

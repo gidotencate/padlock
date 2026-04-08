@@ -25,8 +25,8 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
             (arch.pointer_size, arch.pointer_size)
         }
         ty if ty.starts_with('*') => (arch.pointer_size, arch.pointer_size),
-        // Interface types: two-word fat pointer
-        "error" => (arch.pointer_size * 2, arch.pointer_size),
+        // Interface types: two-word fat pointer (type pointer + data pointer)
+        "error" | "interface{}" | "any" => (arch.pointer_size * 2, arch.pointer_size),
         _ => (arch.pointer_size, arch.pointer_size),
     }
 }
@@ -237,7 +237,7 @@ fn collect_field_declarations(
             match child.kind() {
                 "field_identifier" => field_names.push(source[child.byte_range()].to_string()),
                 "type_identifier" | "pointer_type" | "qualified_type" | "slice_type"
-                | "map_type" | "channel_type" | "array_type" => {
+                | "map_type" | "channel_type" | "array_type" | "interface_type" => {
                     ty_text = Some(source[child.byte_range()].trim().to_string());
                 }
                 _ => {}
@@ -393,5 +393,47 @@ type Safe struct {
         assert!(!padlock_core::analysis::false_sharing::has_false_sharing(
             &layouts[0]
         ));
+    }
+
+    // ── interface{} / any sizing ───────────────────────────────────────────────
+
+    #[test]
+    fn interface_field_is_two_words() {
+        // interface{} is a fat pointer: (type pointer, data pointer) = 2×pointer
+        let src = "package p\ntype S struct { V interface{} }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 16); // 2 × 8B on x86-64
+        assert_eq!(layouts[0].fields[0].align, 8);
+    }
+
+    #[test]
+    fn any_field_is_two_words() {
+        // `any` is an alias for `interface{}` since Go 1.18
+        let src = "package p\ntype S struct { V any }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 16); // 2 × 8B on x86-64
+        assert_eq!(layouts[0].fields[0].align, 8);
+    }
+
+    #[test]
+    fn interface_field_same_size_as_error() {
+        // `error` was already two-word; interface{} must match
+        let src_iface = "package p\ntype S struct { V interface{} }";
+        let src_err = "package p\ntype S struct { V error }";
+        let iface = parse_go(src_iface, &X86_64_SYSV).unwrap();
+        let err = parse_go(src_err, &X86_64_SYSV).unwrap();
+        assert_eq!(iface[0].fields[0].size, err[0].fields[0].size);
+    }
+
+    #[test]
+    fn struct_with_mixed_interface_and_ints_has_correct_layout() {
+        // interface{} at offset 0 (size 16, align 8) then int64 at offset 16
+        let src = "package p\ntype S struct { V interface{}; N int64 }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].offset, 0);
+        assert_eq!(l.fields[0].size, 16);
+        assert_eq!(l.fields[1].offset, 16);
+        assert_eq!(l.total_size, 24);
     }
 }

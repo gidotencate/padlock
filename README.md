@@ -218,6 +218,56 @@ padlock watch target/debug/myapp
 
 ---
 
+### `padlock explain <path>… [--filter PATTERN]`
+
+Shows a visual field-by-field memory layout table with offset, size, alignment, and inline padding gap rows. When a reorder can reduce waste, an **impact block** is appended with concrete memory and cache estimates at 1K and 1M instance scales — turning an abstract percentage into a real number engineers can put in a code review.
+
+```
+$ padlock explain src/events.rs --filter ReadyEvent
+
+ReadyEvent  (src/events.rs:42)
+24 bytes  align=4  fields=3
+┌──────────┬──────┬───────┬────────────────────────────────────┐
+│   offset │ size │ align │ field                              │
+├──────────┼──────┼───────┼────────────────────────────────────┤
+│        0 │    1 │     1 │ tick: u8                           │
+│        1 │    3 │     — │ <padding>                          │
+│        4 │    4 │     4 │ ready: Ready                       │
+│        8 │    1 │     1 │ is_shutdown: bool                  │
+│        9 │   15 │     — │ <padding> (trailing)               │
+└──────────┴──────┴───────┴────────────────────────────────────┘
+14 bytes wasted (58%) — reorder: ready, tick, is_shutdown → 8 bytes
+  ~8 KB extra per 1K instances · ~8 MB per 1M instances · ~125K extra cache lines/1M (seq. scan)
+```
+
+The impact line uses SI scaling: `savings × 1 000 ≈ KB`, `savings × 1 000 000 ≈ MB`. Cache-line estimates assume a sequential scan (64-byte lines). If the reorder also reduces the number of cache lines the struct spans per instance, an extra note is shown.
+
+---
+
+### `padlock check [--baseline FILE] [--save-baseline] <path>…`
+
+Baseline / ratchet mode for CI. First run saves a JSON snapshot of current findings; subsequent runs fail only on regressions — existing issues do not block merges.
+
+```bash
+# Step 1: save a baseline
+padlock check src/ --save-baseline --baseline .padlock-baseline.json
+
+# Step 2: every CI run (fails only on new regressions)
+padlock check src/ --baseline .padlock-baseline.json
+```
+
+A struct is a regression if:
+- Its worst finding severity increased (Low → Medium, Medium → High)
+- Its score dropped by more than 1 point
+- It is new (not in the baseline) and has at least one High finding
+
+Flags:
+- `--baseline FILE` — path to baseline JSON (default: `.padlock-baseline.json`)
+- `--save-baseline` — write current findings as the new baseline instead of comparing
+- `--json` — emit comparison result as JSON
+
+---
+
 ### `cargo padlock [--bin NAME] [--release] [--json] [--sarif]`
 
 Installed as a cargo subcommand when padlock is on `PATH`. Reads `Cargo.toml` to determine the default binary name, runs `cargo build`, locates the built binary, and analyses it — all in one command.
@@ -630,7 +680,9 @@ Unions are parsed and simulated correctly — all fields at offset 0, total size
 
 ### Bit Fields (C/C++)
 
-Bit-field fields (`int flags : 3`) are detected and included as their full storage-unit size (e.g. 4 bytes for `int:3`). Layout is approximate for structs where multiple consecutive bit fields pack into a single storage unit.
+Structs containing bit-field members (`int flags : 3`) are **skipped** in source analysis. Bit-field packing is entirely compiler-controlled — which bits share a storage unit, and how padding works between them, cannot be correctly modelled without invoking a compiler. Showing wrong layout data is worse than showing nothing.
+
+Use binary analysis (`padlock analyze target/debug/myapp`) for accurate layout data on structs that contain bit fields; the compiler encodes the real offsets and sizes in DWARF. In DWARF binary mode, bit-field members (those carrying `DW_AT_bit_size`) are also silently skipped — the remaining byte-aligned fields in the struct are still extracted and analyzed.
 
 ---
 
@@ -638,14 +690,37 @@ Bit-field fields (`int flags : 3`) are detected and included as their full stora
 
 padlock is a **layout waste detector and optimizer**. It focuses on padding, field ordering, false sharing, and cache locality. It is not:
 
-- A full compiler — type sizes are approximated from a built-in table for source analysis.
+- A full compiler — type sizes are approximated from a built-in type table for source analysis. Use binary (DWARF) analysis for compiler-accurate results.
 - A profiler — it cannot measure actual cache miss rates.
 
-**Known limitations:**
-- C++ `alignas` and `__attribute__((aligned))` on individual fields are not modeled in source analysis (use DWARF analysis for accurate alignment override handling).
-- Multiple consecutive bit fields that pack into one storage unit are each counted as a full storage unit, slightly overestimating struct size.
-- The "padded" variants in false-sharing samples may still be flagged because const-expression padding (e.g. `[u8; 64 - size_of::<Mutex<u64>>()]`) is not evaluated by the source frontend.
-- Plain Rust structs (`repr(Rust)`) may be reordered by the compiler; padlock analyzes declaration order, which is what the developer controls.
+### What source analysis gets right
+
+| Language | Accurate | Notes |
+|---|---|---|
+| C / C++ | Normal structs, unions, pointer fields, all primitive types, `std::atomic<T>` | |
+| C++ | vtable pointer injection for `virtual` classes, single/multiple inheritance base slots | base-class sizes are approximate until nested-struct resolution |
+| Rust | All primitive types, `repr(C)`, `repr(packed)`, `repr(transparent)` | |
+| Rust stdlib | `Vec`, `String`, `Box`, `Arc`, `Rc`, all `AtomicXxx`, `PhantomData`, `Duration`, channels, smart pointers | size is independent of type parameter `T` |
+| Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words) | |
+| C / C++ | `__attribute__((packed))` structs and classes | no inter-field padding inserted; struct alignment set to 1 |
+
+### What source analysis skips (instead of showing wrong data)
+
+| Case | Action | Accurate alternative |
+|---|---|---|
+| C/C++ structs with bit-field members | Skipped | Binary (DWARF) analysis |
+| Rust generic struct definitions (`struct Foo<T>`) | Skipped | Binary analysis; or analyse concrete monomorphizations |
+| Forward-declared / incomplete structs | Skipped | Binary analysis |
+
+### Known remaining limitations (source analysis)
+
+- **C++ `alignas(N)` / `__attribute__((aligned(N)))` on individual fields** — field alignment overrides are not modeled; use binary analysis for accuracy.
+- **C++ templates** — unknown type parameters fall through to pointer-size; the struct is analyzed but may show approximate sizes.
+- **Rust enums with data variants** (`enum Foo { A(u64), B { x: u32 } }`) — not modeled; only plain structs are analyzed.
+- **Go named interface fields** (`io.Reader`, custom interfaces) — reported as 2 words (like `interface{}`/`any`), which is correct for the runtime representation. Named interfaces implemented by pointer types are always 2 words regardless.
+- **`#pragma pack(N)` on C/C++ structs** — only `__attribute__((packed))` (GCC/Clang style) is detected from source; MSVC-style `#pragma pack` is not. Use binary analysis for accuracy on MSVC-compiled code.
+- **Rust const-expression padding** (`[u8; 64 - size_of::<Mutex<u64>>()]`) — the expression is not evaluated; the field gets pointer-size as a default.
+- **`repr(Rust)` reordering** — the compiler may reorder fields and eliminate padding automatically; padlock analyzes declaration order, which is what developers read and control.
 
 ---
 

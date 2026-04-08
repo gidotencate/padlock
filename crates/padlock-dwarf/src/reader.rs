@@ -127,3 +127,108 @@ pub fn detect_arch_from_host() -> &'static ArchConfig {
         &X86_64_SYSV
     }
 }
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── synthetic binary header helpers ──────────────────────────────────────
+
+    /// Build a minimal 64-bit little-endian ELF header for the given machine
+    /// code. The header is valid enough for `object::File::parse` to accept it
+    /// (magic, class, data, version, e_ehsize, zero section count).
+    fn minimal_elf64(machine: u16) -> Vec<u8> {
+        let mut h = vec![0u8; 64];
+        // ELF identification
+        h[0..4].copy_from_slice(b"\x7fELF");
+        h[4] = 2; // ELFCLASS64
+        h[5] = 1; // ELFDATA2LSB (little-endian)
+        h[6] = 1; // EV_CURRENT
+        h[7] = 0; // ELFOSABI_NONE
+                  // e_type = ET_REL (1)
+        h[16] = 1;
+        h[17] = 0;
+        // e_machine
+        h[18] = (machine & 0xff) as u8;
+        h[19] = (machine >> 8) as u8;
+        // e_version = 1
+        h[20] = 1;
+        // e_ehsize = 64
+        h[52] = 64;
+        // e_shentsize = 64 (even with 0 sections object crate expects this)
+        h[58] = 64;
+        h
+    }
+
+    /// Build a minimal 64-bit little-endian Mach-O header for AArch64.
+    /// 32 bytes total (MH_MAGIC_64 header, zero load commands).
+    fn minimal_macho_arm64() -> Vec<u8> {
+        let mut h = vec![0u8; 32];
+        // MH_MAGIC_64 = 0xFEEDFACF → little-endian bytes
+        h[0..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        // CPU_TYPE_ARM64 = 0x0100000C
+        h[4..8].copy_from_slice(&0x0100_000Cu32.to_le_bytes());
+        // cpusubtype = CPU_SUBTYPE_ARM64_ALL = 0
+        // filetype = MH_OBJECT = 1
+        h[12..16].copy_from_slice(&1u32.to_le_bytes());
+        // ncmds = 0, sizeofcmds = 0, flags = 0, reserved = 0
+        h
+    }
+
+    // ELF machine codes
+    const EM_X86_64: u16 = 0x3e;
+    const EM_AARCH64: u16 = 0xb7;
+    const EM_RISCV: u16 = 0xf3;
+
+    // ── detect_arch tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_arch_x86_64_elf() {
+        let elf = minimal_elf64(EM_X86_64);
+        let arch = detect_arch(&elf).unwrap();
+        assert_eq!(arch.name, "x86_64");
+        assert_eq!(arch.pointer_size, 8);
+        assert_eq!(arch.cache_line_size, 64);
+    }
+
+    #[test]
+    fn detect_arch_aarch64_elf() {
+        let elf = minimal_elf64(EM_AARCH64);
+        let arch = detect_arch(&elf).unwrap();
+        assert_eq!(arch.name, "aarch64");
+        assert_eq!(arch.pointer_size, 8);
+        assert_eq!(arch.cache_line_size, 64);
+    }
+
+    #[test]
+    fn detect_arch_aarch64_macho_returns_apple_variant() {
+        let macho = minimal_macho_arm64();
+        let arch = detect_arch(&macho).unwrap();
+        assert_eq!(arch.name, "aarch64-apple");
+        assert_eq!(arch.cache_line_size, 128); // Apple Silicon: 128-byte cache lines
+    }
+
+    #[test]
+    fn detect_arch_riscv64_elf() {
+        let elf = minimal_elf64(EM_RISCV);
+        let arch = detect_arch(&elf).unwrap();
+        assert_eq!(arch.name, "riscv64");
+    }
+
+    #[test]
+    fn detect_arch_rejects_garbage() {
+        let garbage = vec![0u8; 64];
+        assert!(detect_arch(&garbage).is_err());
+    }
+
+    #[test]
+    fn detect_arch_from_host_returns_valid_config() {
+        let arch = detect_arch_from_host();
+        // Must be one of the known configs
+        assert!(matches!(arch.name, "x86_64" | "aarch64" | "aarch64-apple"));
+        assert!(arch.pointer_size == 4 || arch.pointer_size == 8);
+        assert!(arch.cache_line_size > 0);
+    }
+}

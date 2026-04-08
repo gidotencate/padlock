@@ -3,7 +3,7 @@ description: >
   Analyse struct memory layout of compiled binaries or source files for
   padding waste, false sharing, and cache locality issues.
 
-author: 'padlock'
+author: 'gidotencate'
 
 branding:
   icon: 'lock'
@@ -12,37 +12,36 @@ branding:
 inputs:
   path:
     description: >
-      Path to the binary (.o, ELF) or source file (.c, .cpp, .rs, .go) to
-      analyse. Glob patterns are not supported; run the action multiple times
-      for multiple targets.
+      Path to a binary (.o, ELF), source file (.c, .cpp, .rs, .go), or
+      directory to analyse. Multiple paths can be passed as a newline-separated
+      string.
     required: true
 
   fail-on-severity:
     description: >
-      Minimum severity level that causes the action to exit with a non-zero
-      status (blocking the merge). Valid values: `high`, `medium`, `low`,
-      `none` (never fail).
+      Minimum severity that causes the step to exit non-zero (blocking the
+      merge). Valid values: `high` (default), `medium`, `low`, `none`.
     default: 'high'
 
   output-format:
     description: >
-      Output format for findings. `human` prints a coloured summary,
-      `json` prints machine-readable JSON, `sarif` uploads results to
-      GitHub Code Scanning.
+      `human` (default) — coloured summary printed to the log.
+      `json`  — machine-readable JSON written to `padlock-results.json`.
+      `sarif` — SARIF 2.1.0 written to `padlock-results.sarif` and optionally
+                uploaded to GitHub Code Scanning.
     default: 'human'
 
   upload-sarif:
     description: >
-      When `true` (and output-format is `sarif`), automatically uploads the
-      SARIF report to GitHub Code Scanning using the
-      `github/codeql-action/upload-sarif` action. Requires
-      `security-events: write` permission.
+      When `true` and `output-format` is `sarif`, automatically upload the
+      SARIF report to GitHub Code Scanning. Requires `security-events: write`
+      permission in the calling workflow.
     default: 'true'
 
   padlock-version:
     description: >
-      Version of padlock to install. Defaults to `latest`. Pin to a specific
-      version (e.g. `0.1.0`) for reproducible CI.
+      Version of padlock to install (e.g. `0.4.0`). Defaults to `latest`.
+      Pin to a specific version for reproducible CI.
     default: 'latest'
 
 outputs:
@@ -51,26 +50,75 @@ outputs:
     value: ${{ steps.analyse.outputs.findings-count }}
 
   high-count:
-    description: 'Number of high-severity findings.'
+    description: 'Number of High-severity findings.'
     value: ${{ steps.analyse.outputs.high-count }}
+
+  medium-count:
+    description: 'Number of Medium-severity findings.'
+    value: ${{ steps.analyse.outputs.medium-count }}
+
+  low-count:
+    description: 'Number of Low-severity findings.'
+    value: ${{ steps.analyse.outputs.low-count }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      if: ${{ inputs.padlock-version == 'latest' }}
-
-    - name: Install padlock (from crates.io)
+    # ── Install padlock ─────────────────────────────────────────────────────────
+    # Prefer pre-built binaries from GitHub Releases (~10 s) and fall back to
+    # `cargo install` (~3 min) when no binary is available for the platform.
+    - name: Install padlock
       shell: bash
-      if: ${{ inputs.padlock-version != 'local' }}
       run: |
-        if [ "${{ inputs.padlock-version }}" = "latest" ]; then
-          cargo install padlock-cli
-        else
-          cargo install padlock-cli --version "${{ inputs.padlock-version }}"
+        set -euo pipefail
+
+        REPO="gidotencate/padlock"
+        VERSION="${{ inputs.padlock-version }}"
+
+        # Resolve "latest" → concrete version via GitHub API
+        if [ "$VERSION" = "latest" ]; then
+          VERSION=$(curl -sSf "https://api.github.com/repos/$REPO/releases/latest" \
+            | grep '"tag_name"' \
+            | sed 's/.*"v\([^"]*\)".*/\1/')
         fi
 
+        # Map runner platform to release-asset target triple
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64)   TARGET="x86_64-unknown-linux-gnu";  EXT="tar.gz" ;;
+          Linux-ARM64) TARGET="aarch64-unknown-linux-gnu"; EXT="tar.gz" ;;
+          macOS-X64)   TARGET="x86_64-apple-darwin";       EXT="tar.gz" ;;
+          macOS-ARM64) TARGET="aarch64-apple-darwin";      EXT="tar.gz" ;;
+          Windows-X64) TARGET="x86_64-pc-windows-msvc";   EXT="zip"    ;;
+          *)           TARGET=""; EXT="" ;;
+        esac
+
+        INSTALL_DIR="$HOME/.padlock-bin"
+        mkdir -p "$INSTALL_DIR"
+
+        DOWNLOADED=false
+        if [ -n "$TARGET" ]; then
+          ASSET="padlock-v${VERSION}-${TARGET}.${EXT}"
+          URL="https://github.com/$REPO/releases/download/v${VERSION}/${ASSET}"
+          TMP="/tmp/${ASSET}"
+          if curl -sSfL "$URL" -o "$TMP"; then
+            if [ "$EXT" = "tar.gz" ]; then
+              tar xzf "$TMP" -C "$INSTALL_DIR"
+            else
+              # Windows: use PowerShell (available on Windows runners)
+              powershell -Command "Expand-Archive -Path '$TMP' -DestinationPath '$INSTALL_DIR' -Force"
+            fi
+            echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+            echo "Installed padlock ${VERSION} from pre-built binary (${TARGET})"
+            DOWNLOADED=true
+          fi
+        fi
+
+        if [ "$DOWNLOADED" = "false" ]; then
+          echo "No pre-built binary for $RUNNER_OS-$RUNNER_ARCH; installing via cargo (this may take a few minutes)..."
+          cargo install padlock-cli --version "$VERSION"
+        fi
+
+    # ── Run analysis ────────────────────────────────────────────────────────────
     - name: Run padlock analysis
       id: analyse
       shell: bash
@@ -78,51 +126,69 @@ runs:
         set -euo pipefail
 
         FORMAT="${{ inputs.output-format }}"
-        PATH_ARG="${{ inputs.path }}"
+        # Support newline-separated list of paths
+        PATHS=(${{ inputs.path }})
 
+        # Always collect JSON so we can count findings for outputs / thresholds.
+        padlock analyze --json "${PATHS[@]}" > /tmp/padlock-results.json 2>&1 || true
+
+        # Also run the chosen output format for the log / artefacts.
         if [ "$FORMAT" = "sarif" ]; then
-          padlock analyze --sarif "$PATH_ARG" > padlock-results.sarif
-          echo "SARIF written to padlock-results.sarif"
-          # Count high-severity findings from SARIF
-          HIGH=$(python3 -c "
-        import json, sys
-        d = json.load(open('padlock-results.sarif'))
-        highs = sum(
-          1 for run in d.get('runs', [])
-            for r in run.get('results', [])
-            if r.get('level') == 'error'
-        )
-        print(highs)
-        " 2>/dev/null || echo "0")
+          padlock analyze --sarif "${PATHS[@]}" > padlock-results.sarif
         elif [ "$FORMAT" = "json" ]; then
-          padlock analyze --json "$PATH_ARG" | tee padlock-results.json
-          HIGH=$(python3 -c "
-        import json, sys
-        d = json.load(open('padlock-results.json'))
-        highs = sum(
-          1 for s in d.get('structs', [])
-            for f in s.get('findings', [])
-            if f.get('severity') == 'High'
-        )
-        print(highs)
-        " 2>/dev/null || echo "0")
+          cp /tmp/padlock-results.json padlock-results.json
         else
-          padlock analyze "$PATH_ARG"
-          HIGH=0
+          padlock analyze "${PATHS[@]}" || true
         fi
 
-        echo "high-count=$HIGH" >> "$GITHUB_OUTPUT"
-        echo "findings-count=$HIGH" >> "$GITHUB_OUTPUT"
+        # Count findings by severity from JSON output.
+        python3 - <<'PY'
+        import json, os, sys
 
-        FAIL_ON="${{ inputs.fail-on-severity }}"
-        if [ "$FAIL_ON" != "none" ] && [ "$HIGH" -gt 0 ] && [ "$FAIL_ON" = "high" ]; then
-          echo "::error::padlock found $HIGH high-severity struct layout issue(s) in $PATH_ARG."
-          exit 1
-        fi
+        try:
+            d = json.load(open('/tmp/padlock-results.json'))
+        except Exception as e:
+            print(f"Warning: could not parse JSON output: {e}", file=sys.stderr)
+            d = {}
 
+        findings = [
+            f
+            for s in d.get('structs', [])
+            for f in s.get('findings', [])
+        ]
+        high   = sum(1 for f in findings if f.get('severity') == 'High')
+        medium = sum(1 for f in findings if f.get('severity') == 'Medium')
+        low    = sum(1 for f in findings if f.get('severity') == 'Low')
+        total  = len(findings)
+
+        out = os.environ.get('GITHUB_OUTPUT', '')
+        if out:
+            with open(out, 'a') as fh:
+                fh.write(f'high-count={high}\n')
+                fh.write(f'medium-count={medium}\n')
+                fh.write(f'low-count={low}\n')
+                fh.write(f'findings-count={total}\n')
+
+        print(f'padlock: {total} finding(s) — High={high} Medium={medium} Low={low}')
+
+        fail_on = os.environ.get('PADLOCK_FAIL_ON', 'high')
+        should_fail = (
+            (fail_on == 'high'   and high > 0)
+            or (fail_on == 'medium' and (high + medium) > 0)
+            or (fail_on == 'low'    and total > 0)
+        )
+        if should_fail:
+            # Emit GitHub Actions error annotation
+            print(f'::error::padlock: {total} finding(s) at or above "{fail_on}" severity.')
+            sys.exit(1)
+        PY
+      env:
+        PADLOCK_FAIL_ON: ${{ inputs.fail-on-severity }}
+
+    # ── Upload SARIF ────────────────────────────────────────────────────────────
     - name: Upload SARIF to GitHub Code Scanning
       if: ${{ inputs.output-format == 'sarif' && inputs.upload-sarif == 'true' }}
-      uses: github/codeql-action/upload-sarif@v4
+      uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: padlock-results.sarif
         category: padlock

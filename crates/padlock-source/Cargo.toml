@@ -10,7 +10,7 @@ categories.workspace  = true
 readme                = "README.md"
 
 [dependencies]
-padlock-core    = { path = "../padlock-core", version = "0.4.0" }
+padlock-core    = { path = "../padlock-core", version = "0.5.0" }
 anyhow          = "1"
 proc-macro2     = { version = "1", features = ["span-locations"] }
 syn             = { version = "2", features = ["full", "visit"] }
@@ -22,4 +22,4 @@ tree-sitter-go  = "0.21"
 similar         = "2"
 
 [dev-dependencies]
-padlock-core = { path = "../padlock-core", version = "0.4.0", features = ["test-helpers"] }
+padlock-core = { path = "../padlock-core", version = "0.5.0", features = ["test-helpers"] }

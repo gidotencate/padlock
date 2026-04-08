@@ -1,4 +1,5 @@
 pub mod false_sharing;
+pub mod impact;
 pub mod locality;
 pub mod padding;
 pub mod reorder;

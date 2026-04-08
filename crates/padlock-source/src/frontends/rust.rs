@@ -97,26 +97,67 @@ fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, 
 }
 
 fn primitive_size_align(name: &str, arch: &'static ArchConfig) -> (usize, usize) {
+    let ps = arch.pointer_size;
     match name {
+        // ── language primitives ───────────────────────────────────────────────
         "bool" | "u8" | "i8" => (1, 1),
         "u16" | "i16" => (2, 2),
         "u32" | "i32" | "f32" => (4, 4),
         "u64" | "i64" | "f64" => (8, 8),
         "u128" | "i128" => (16, 16),
-        "usize" | "isize" => (arch.pointer_size, arch.pointer_size),
+        "usize" | "isize" => (ps, ps),
         "char" => (4, 4), // Rust char is a Unicode scalar (4 bytes)
-        // x86 SSE / AVX / AVX-512 SIMD types (via std::arch or target_feature)
+
+        // ── std atomics ───────────────────────────────────────────────────────
+        "AtomicBool" | "AtomicU8" | "AtomicI8" => (1, 1),
+        "AtomicU16" | "AtomicI16" => (2, 2),
+        "AtomicU32" | "AtomicI32" => (4, 4),
+        "AtomicU64" | "AtomicI64" => (8, 8),
+        "AtomicUsize" | "AtomicIsize" | "AtomicPtr" => (ps, ps),
+
+        // ── heap-allocated collections: ptr + len + cap (3 words) ────────────
+        // Size is independent of the element type T (generic arg already stripped).
+        "Vec" | "String" | "OsString" | "CString" | "PathBuf" => (3 * ps, ps),
+        "VecDeque" | "LinkedList" | "BinaryHeap" => (3 * ps, ps),
+        "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" => (3 * ps, ps),
+
+        // ── single-pointer smart pointers ─────────────────────────────────────
+        "Box" | "Rc" | "Arc" | "Weak" | "NonNull" | "Cell" => (ps, ps),
+
+        // ── interior-mutability / sync wrappers ───────────────────────────────
+        // Size depends on T but pointer-size is a reasonable approximation for
+        // display purposes; use binary analysis for precise results.
+        "RefCell" | "Mutex" | "RwLock" => (ps, ps),
+
+        // ── channels ─────────────────────────────────────────────────────────
+        "Sender" | "Receiver" | "SyncSender" => (ps, ps),
+
+        // ── zero-sized types ──────────────────────────────────────────────────
+        "PhantomData" | "PhantomPinned" => (0, 1),
+
+        // ── common fixed-size stdlib types ────────────────────────────────────
+        // Duration: u64 secs (8B) + u32 nanos (4B) → 12B + 4B trailing = 16B
+        "Duration" => (16, 8),
+        "Instant" | "SystemTime" => (16, 8),
+
+        // ── Pin<T> wraps T, pointer-size approximation ────────────────────────
+        "Pin" => (ps, ps),
+
+        // ── x86 SSE / AVX / AVX-512 SIMD types ───────────────────────────────
         "__m64" => (8, 8),
         "__m128" | "__m128d" | "__m128i" => (16, 16),
         "__m256" | "__m256d" | "__m256i" => (32, 32),
         "__m512" | "__m512d" | "__m512i" => (64, 64),
-        // Rust portable SIMD / packed types (std::simd, packed_simd)
+
+        // ── Rust portable SIMD / packed_simd types ────────────────────────────
         "f32x4" | "i32x4" | "u32x4" => (16, 16),
         "f64x2" | "i64x2" | "u64x2" => (16, 16),
         "f32x8" | "i32x8" | "u32x8" => (32, 32),
         "f64x4" | "i64x4" | "u64x4" => (32, 32),
         "f32x16" | "i32x16" | "u32x16" => (64, 64),
-        _ => (arch.pointer_size, arch.pointer_size),
+
+        // ── unknown / third-party / generic type params (T, E, …) ────────────
+        _ => (ps, ps),
     }
 }
 
@@ -199,6 +240,13 @@ struct StructVisitor {
 impl<'ast> Visit<'ast> for StructVisitor {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
         syn::visit::visit_item_struct(self, node); // recurse into nested items
+
+        // Generic structs (e.g. `struct Foo<T>`) cannot be accurately laid out
+        // without knowing the concrete type arguments. Skip them rather than
+        // producing wrong field sizes for the type parameters.
+        if !node.generics.params.is_empty() {
+            return;
+        }
 
         let name = node.ident.to_string();
         let packed = is_packed(&node.attrs);
@@ -429,5 +477,101 @@ struct Safe {
             layouts[0].fields[0].access,
             AccessPattern::Unknown
         ));
+    }
+
+    // ── stdlib type sizes ─────────────────────────────────────────────────────
+
+    #[test]
+    fn vec_field_has_three_pointer_size() {
+        // Vec<T> is always ptr + len + cap regardless of T
+        let src = "struct S { items: Vec<u64> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 24); // 3 × 8 on x86-64
+    }
+
+    #[test]
+    fn string_field_has_three_pointer_size() {
+        let src = "struct S { name: String }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 24);
+    }
+
+    #[test]
+    fn box_field_has_pointer_size() {
+        let src = "struct S { inner: Box<u64> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 8);
+    }
+
+    #[test]
+    fn arc_field_has_pointer_size() {
+        let src = "struct S { shared: Arc<Vec<u8>> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 8);
+    }
+
+    #[test]
+    fn phantom_data_is_zero_sized() {
+        let src = "struct S { a: u64, _marker: PhantomData<u8> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let marker = layouts[0]
+            .fields
+            .iter()
+            .find(|f| f.name == "_marker")
+            .unwrap();
+        assert_eq!(marker.size, 0);
+    }
+
+    #[test]
+    fn duration_field_is_16_bytes() {
+        let src = "struct S { timeout: Duration }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 16);
+    }
+
+    #[test]
+    fn atomic_u64_has_correct_size() {
+        let src = "struct S { counter: AtomicU64 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 8);
+    }
+
+    #[test]
+    fn atomic_bool_has_correct_size() {
+        let src = "struct S { flag: AtomicBool }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 1);
+    }
+
+    // ── generic struct skipping ───────────────────────────────────────────────
+
+    #[test]
+    fn generic_struct_is_skipped() {
+        // Cannot accurately lay out struct Foo<T> without knowing T.
+        let src = "struct Wrapper<T> { value: T, count: usize }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.is_empty(),
+            "generic structs should be skipped; got {:?}",
+            layouts.iter().map(|l| &l.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn generic_struct_with_multiple_params_is_skipped() {
+        let src = "struct Pair<A, B> { first: A, second: B }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(layouts.is_empty());
+    }
+
+    #[test]
+    fn non_generic_struct_still_parsed_when_generic_sibling_exists() {
+        let src = r#"
+struct Generic<T> { value: T }
+struct Concrete { a: u32, b: u64 }
+"#;
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].name, "Concrete");
     }
 }

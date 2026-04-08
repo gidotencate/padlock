@@ -1,12 +1,10 @@
-# Example workflow: run padlock on every PR to block merges on high-severity
+# Example workflow: run padlock on every PR and block merges on high-severity
 # struct layout regressions.
 #
-# Copy this to .github/workflows/padlock.yml in your own repository and
-# adjust the `path` input to point at your compiled binary.
-#
-# Required repository settings:
-#   Settings → Code security → Code scanning → enabled
-#   (Only needed when output-format: sarif is used)
+# To use this in your own repository:
+#   1. Copy this file to .github/workflows/padlock.yml
+#   2. Replace `uses: gidotencate/padlock@v1` with the version you want to pin
+#   3. Adjust `path` to point at your source directory or compiled binary
 
 name: Struct Layout Analysis
 
@@ -18,7 +16,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # required for SARIF upload
+  security-events: write   # only required when output-format: sarif
 
 jobs:
   padlock:
@@ -28,33 +26,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build with debug info
-        run: cargo build
-
-      # ── Option A: SARIF (recommended — shows inline annotations on PR diffs) ──
-      - name: Analyse struct layouts (SARIF)
-        uses: ./  # use `gidotencate/padlock@v1` in your own repo
+      # ── Option A: source file analysis (no build needed) ────────────────────
+      - name: Analyse Rust source
+        uses: gidotencate/padlock@v0.4.0
         with:
-          path: target/debug/padlock
-          output-format: sarif
-          upload-sarif: 'false'
-          fail-on-severity: none
+          path: src/
+          output-format: human
+          fail-on-severity: high
 
-      # ── Option B: human-readable summary only ────────────────────────────────
-      # - name: Analyse struct layouts (human)
-      #   uses: ./
+      # ── Option B: SARIF (shows inline annotations on PR diffs) ──────────────
+      # Requires: Settings → Code security → Code scanning → enabled
+      #
+      # - name: Analyse struct layouts (SARIF)
+      #   uses: gidotencate/padlock@v0.4.0
       #   with:
-      #     path: target/debug/padlock
+      #     path: src/
+      #     output-format: sarif
+      #     upload-sarif: 'true'
+      #     fail-on-severity: high
+
+      # ── Option C: compiled binary (most accurate — uses DWARF debug info) ───
+      # - uses: dtolnay/rust-toolchain@stable
+      # - run: cargo build
+      # - name: Analyse binary
+      #   uses: gidotencate/padlock@v0.4.0
+      #   with:
+      #     path: target/debug/myapp
       #     output-format: human
       #     fail-on-severity: high
 
-      # ── Option C: source file analysis (no build needed) ─────────────────────
-      # - name: Analyse Rust source
-      #   uses: ./
+      # ── Option D: baseline/ratchet mode (don't fail on pre-existing issues) ─
+      # - uses: actions/cache@v4
       #   with:
-      #     path: src/hot_path.rs
-      #     output-format: human
-      #     fail-on-severity: medium
+      #     path: .padlock-baseline.json
+      #     key: padlock-baseline
+      # - run: |
+      #     if [ -f .padlock-baseline.json ]; then
+      #       padlock check src/ --baseline .padlock-baseline.json
+      #     else
+      #       padlock check src/ --save-baseline
+      #     fi

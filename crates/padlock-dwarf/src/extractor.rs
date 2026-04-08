@@ -145,6 +145,14 @@ impl<'a, R: Reader> Extractor<'a, R> {
             _ => return Ok(None),
         };
 
+        // Bit-field members carry DW_AT_bit_size. They share byte offsets with
+        // adjacent fields and cannot be represented in the byte-level IR without
+        // losing accuracy. Skip them entirely — use source analysis for structs
+        // that contain bit-fields.
+        if entry.attr(gimli::DW_AT_bit_size)?.is_some() {
+            return Ok(None);
+        }
+
         let type_offset = match entry.attr_value(gimli::DW_AT_type)? {
             Some(gimli::AttributeValue::UnitRef(off)) => off,
             _ => return Ok(None),

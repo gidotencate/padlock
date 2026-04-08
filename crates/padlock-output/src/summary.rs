@@ -148,11 +148,21 @@ fn render_finding(f: &Finding) -> String {
             savings,
             optimized_size,
             suggested_order,
+            severity,
             ..
-        } => format!(
-            "[{sev}] Reorder fields to save {savings}B → {optimized_size}B: {}",
-            suggested_order.join(", ")
-        ),
+        } => {
+            let base = format!(
+                "[{sev}] Reorder fields to save {savings}B → {optimized_size}B: {}",
+                suggested_order.join(", ")
+            );
+            // For High-severity suggestions (≥8B savings) append a concrete
+            // scale hint so engineers immediately see why the reorder matters.
+            if *severity == Severity::High {
+                format!("{base}  (~{savings} MB/1M instances)")
+            } else {
+                base
+            }
+        }
         Finding::FalseSharing { conflicts, .. } => format!(
             "[{sev}] False sharing: {} cache-line conflict(s)",
             conflicts.len()
@@ -232,5 +242,20 @@ mod tests {
         report.analyzed_paths = vec!["a.rs".into(), "b.rs".into()];
         let out = render_report(&report);
         assert!(out.contains("2 files"));
+    }
+
+    #[test]
+    fn high_reorder_finding_shows_mb_hint() {
+        // Connection saves 8B (High severity) → should show MB/1M hint
+        let report = Report::from_layouts(&[connection_layout()]);
+        let out = render_report(&report);
+        assert!(out.contains("MB/1M instances"));
+    }
+
+    #[test]
+    fn mb_hint_absent_for_packed_struct() {
+        let report = Report::from_layouts(&[packed_layout()]);
+        let out = render_report(&report);
+        assert!(!out.contains("MB/1M instances"));
     }
 }

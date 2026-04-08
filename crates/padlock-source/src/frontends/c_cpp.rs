@@ -91,26 +91,40 @@ fn strip_bitfield_suffix(ty: &str) -> &str {
     ty
 }
 
-/// Simulate C struct layout (no `__attribute__((packed))`) given ordered fields.
+/// Return `true` when `ty` carries a bit-field width annotation (e.g. `"int:3"`).
+/// Bit-field packing is compiler-controlled and cannot be accurately modelled
+/// without a compiler, so structs containing bit-field members are skipped.
+fn is_bitfield_type(ty: &str) -> bool {
+    strip_bitfield_suffix(ty) != ty
+}
+
+/// Simulate C/C++ struct layout given ordered fields.
+///
+/// When `packed` is `true` the layout mirrors `__attribute__((packed))`:
+/// no inter-field alignment padding is inserted and the struct alignment
+/// is forced to 1. This matches GCC/Clang behaviour for packed structs.
 fn simulate_layout(
     fields: &mut Vec<Field>,
     struct_name: String,
     arch: &'static ArchConfig,
     source_line: Option<u32>,
+    packed: bool,
 ) -> StructLayout {
     let mut offset = 0usize;
     let mut struct_align = 1usize;
 
     for f in fields.iter_mut() {
-        if f.align > 0 {
+        if !packed && f.align > 0 {
             offset = offset.next_multiple_of(f.align);
         }
         f.offset = offset;
         offset += f.size;
-        struct_align = struct_align.max(f.align);
+        if !packed {
+            struct_align = struct_align.max(f.align);
+        }
     }
-    // Trailing padding
-    if struct_align > 0 {
+    // Trailing padding (not present in packed structs)
+    if !packed && struct_align > 0 {
         offset = offset.next_multiple_of(struct_align);
     }
 
@@ -122,7 +136,7 @@ fn simulate_layout(
         source_file: None,
         source_line,
         arch,
-        is_packed: false,
+        is_packed: packed,
         is_union: false,
     }
 }
@@ -173,6 +187,7 @@ fn parse_class_specifier(
     let mut class_name = "<anonymous>".to_string();
     let mut base_names: Vec<String> = Vec::new();
     let mut body_node: Option<Node> = None;
+    let mut is_packed = false;
 
     for i in 0..node.child_count() {
         let child = node.child(i)?;
@@ -190,6 +205,11 @@ fn parse_class_specifier(
                 }
             }
             "field_declaration_list" => body_node = Some(child),
+            "attribute_specifier" => {
+                if source[child.byte_range()].contains("packed") {
+                    is_packed = true;
+                }
+            }
             _ => {}
         }
     }
@@ -251,10 +271,14 @@ fn parse_class_specifier(
         });
     }
 
+    // Skip classes with bit-field members (same reason as structs).
+    if raw_fields.iter().any(|(_, ty, _)| is_bitfield_type(ty)) {
+        return None;
+    }
+
     // Declared member fields
     for (fname, ty_name, guard) in raw_fields {
-        let base_ty = strip_bitfield_suffix(&ty_name);
-        let (size, align) = c_type_size_align(base_ty, arch);
+        let (size, align) = c_type_size_align(&ty_name, arch);
         let access = if let Some(g) = guard {
             AccessPattern::Concurrent {
                 guard: Some(g),
@@ -284,7 +308,13 @@ fn parse_class_specifier(
     }
 
     let line = node.start_position().row as u32 + 1;
-    Some(simulate_layout(&mut fields, class_name, arch, Some(line)))
+    Some(simulate_layout(
+        &mut fields,
+        class_name,
+        arch,
+        Some(line),
+        is_packed,
+    ))
 }
 
 /// Return true if a `field_declaration_list` node contains any `virtual` keyword
@@ -388,12 +418,18 @@ fn parse_struct_or_union_specifier(
 ) -> Option<StructLayout> {
     let mut name = "<anonymous>".to_string();
     let mut body_node: Option<Node> = None;
+    let mut is_packed = false;
 
     for i in 0..node.child_count() {
         let child = node.child(i)?;
         match child.kind() {
             "type_identifier" => name = source[child.byte_range()].to_string(),
             "field_declaration_list" => body_node = Some(child),
+            "attribute_specifier" => {
+                if source[child.byte_range()].contains("packed") {
+                    is_packed = true;
+                }
+            }
             _ => {}
         }
     }
@@ -414,12 +450,17 @@ fn parse_struct_or_union_specifier(
         return None;
     }
 
+    // Bit-field packing is compiler-controlled and cannot be accurately modelled
+    // without a compiler. Skip the entire struct to avoid producing wrong layout
+    // data. Use `padlock analyze` on the compiled binary for accurate results.
+    if raw_fields.iter().any(|(_, ty, _)| is_bitfield_type(ty)) {
+        return None;
+    }
+
     let mut fields: Vec<Field> = raw_fields
         .into_iter()
         .map(|(fname, ty_name, guard)| {
-            // Use the base type (without bit-field `:N` suffix) for size/align lookup.
-            let base = strip_bitfield_suffix(&ty_name);
-            let (size, align) = c_type_size_align(base, arch);
+            let (size, align) = c_type_size_align(&ty_name, arch);
             let access = if let Some(g) = guard {
                 AccessPattern::Concurrent {
                     guard: Some(g),
@@ -449,7 +490,13 @@ fn parse_struct_or_union_specifier(
     if is_union {
         Some(simulate_union_layout(&mut fields, name, arch, Some(line)))
     } else {
-        Some(simulate_layout(&mut fields, name, arch, Some(line)))
+        Some(simulate_layout(
+            &mut fields,
+            name,
+            arch,
+            Some(line),
+            is_packed,
+        ))
     }
 }
 
@@ -794,35 +841,6 @@ typedef struct {
         assert!(layouts[0].is_union);
     }
 
-    // ── bit fields ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn bitfield_type_annotated_with_width() {
-        let src = "struct Flags { int a : 3; int b : 5; };";
-        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
-        assert_eq!(layouts.len(), 1);
-        // Both fields should be present; type names should contain the width
-        let names: Vec<&str> = layouts[0].fields.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains(&"a") && names.contains(&"b"));
-        // Type name should encode the bit width
-        let a_ty = match &layouts[0].fields[0].ty {
-            padlock_core::ir::TypeInfo::Primitive { name, .. } => name.clone(),
-            _ => panic!("expected Primitive"),
-        };
-        assert!(
-            a_ty.contains(':'),
-            "bit field type should contain ':' width annotation"
-        );
-    }
-
-    #[test]
-    fn bitfield_uses_storage_unit_size() {
-        // `int a : 3` should report size = sizeof(int) = 4
-        let src = "struct S { int a : 3; };";
-        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
-        assert_eq!(layouts[0].fields[0].size, 4);
-    }
-
     // ── attribute guard extraction ─────────────────────────────────────────────
 
     #[test]
@@ -1024,5 +1042,114 @@ class C : public A, public B { int c; };
         let l = &layouts[0];
         // __vptr(8) + int(4) + 4 pad = 16 bytes on x86_64
         assert_eq!(l.total_size, 16);
+    }
+
+    // ── bitfield handling ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_bitfield_type_detects_colon_n() {
+        assert!(is_bitfield_type("int:3"));
+        assert!(is_bitfield_type("unsigned int:16"));
+        assert!(is_bitfield_type("uint32_t:1"));
+        // Not bit-fields — contains ':' but not followed by pure digits
+        assert!(!is_bitfield_type("std::atomic<int>"));
+        assert!(!is_bitfield_type("ns::Type"));
+        assert!(!is_bitfield_type("int"));
+    }
+
+    #[test]
+    fn struct_with_bitfields_is_skipped() {
+        // Bit-field layout is compiler-controlled and cannot be accurately modelled
+        // without a compiler. The struct must be skipped entirely.
+        let src = r#"
+struct Flags {
+    unsigned int active : 1;
+    unsigned int ready  : 1;
+    unsigned int error  : 6;
+    int value;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        // Flags must not appear — its layout cannot be accurately computed.
+        assert!(
+            layouts.iter().all(|l| l.name != "Flags"),
+            "struct with bitfields should be skipped; got {:?}",
+            layouts.iter().map(|l| &l.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn struct_without_bitfields_is_still_parsed() {
+        // Ensure the bitfield guard doesn't affect normal structs.
+        let src = "struct Normal { int a; char b; double c; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].name, "Normal");
+    }
+
+    #[test]
+    fn cpp_class_with_bitfields_is_skipped() {
+        let src = "class Packed { int x : 4; int y : 4; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.iter().all(|l| l.name != "Packed"),
+            "C++ class with bitfields should be skipped"
+        );
+    }
+
+    // ── __attribute__((packed)) detection ─────────────────────────────────────
+
+    #[test]
+    fn packed_struct_has_no_alignment_padding() {
+        // Without packed: char(1) + 3-byte pad + int(4) + char(1) + 3-byte pad = 12 bytes
+        // With packed:    char(1) + int(4) + char(1) = 6 bytes, align=1
+        let src = r#"
+struct __attribute__((packed)) Tight {
+    char a;
+    int  b;
+    char c;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Tight").expect("Tight");
+        assert!(l.is_packed, "should be marked is_packed");
+        assert_eq!(l.total_size, 6, "packed: no padding inserted");
+        assert_eq!(l.fields[0].offset, 0);
+        assert_eq!(l.fields[1].offset, 1); // immediately after char
+        assert_eq!(l.fields[2].offset, 5);
+    }
+
+    #[test]
+    fn non_packed_struct_has_normal_alignment_padding() {
+        // Confirm baseline: same struct without __attribute__((packed)) gets padded
+        let src = r#"
+struct Normal {
+    char a;
+    int  b;
+    char c;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Normal").expect("Normal");
+        assert!(!l.is_packed);
+        assert_eq!(l.total_size, 12);
+        assert_eq!(l.fields[1].offset, 4); // aligned to 4
+    }
+
+    #[test]
+    fn cpp_class_packed_attribute_detected() {
+        let src = r#"
+class __attribute__((packed)) Dense {
+    char a;
+    int  b;
+};
+"#;
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Dense").expect("Dense");
+        assert!(
+            l.is_packed,
+            "C++ class with __attribute__((packed)) must be marked packed"
+        );
+        assert_eq!(l.total_size, 5); // char(1) + int(4), no padding
     }
 }

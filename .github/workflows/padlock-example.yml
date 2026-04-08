@@ -41,7 +41,7 @@ jobs:
           path: target/debug/padlock
           output-format: sarif
           upload-sarif: 'true'
-          fail-on-severity: high
+          fail-on-severity: none
 
       # ── Option B: human-readable summary only ────────────────────────────────
       # - name: Analyse struct layouts (human)

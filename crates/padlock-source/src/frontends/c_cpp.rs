@@ -197,10 +197,10 @@ fn parse_class_specifier(
                 // tree-sitter-cpp structure: ':' [access_specifier] type_identifier
                 // type_identifier nodes are direct children of base_class_clause.
                 for j in 0..child.child_count() {
-                    if let Some(base) = child.child(j) {
-                        if base.kind() == "type_identifier" {
-                            base_names.push(source[base.byte_range()].to_string());
-                        }
+                    if let Some(base) = child.child(j)
+                        && base.kind() == "type_identifier"
+                    {
+                        base_names.push(source[base.byte_range()].to_string());
                     }
                 }
             }
@@ -222,12 +222,11 @@ fn parse_class_specifier(
     // Collect declared fields
     let mut raw_fields: Vec<(String, String, Option<String>)> = Vec::new();
     for i in 0..body.child_count() {
-        if let Some(child) = body.child(i) {
-            if child.kind() == "field_declaration" {
-                if let Some((ty, fname, guard)) = parse_field_declaration(source, child) {
-                    raw_fields.push((fname, ty, guard));
-                }
-            }
+        if let Some(child) = body.child(i)
+            && child.kind() == "field_declaration"
+            && let Some((ty, fname, guard)) = parse_field_declaration(source, child)
+        {
+            raw_fields.push((fname, ty, guard));
         }
     }
 
@@ -390,18 +389,18 @@ fn extract_structs_from_tree(
                 stack2.push(child);
             }
         }
-        if node.kind() == "type_definition" {
-            if let Some(layout) = parse_typedef_struct_or_union(source, node, arch) {
-                let existing = layouts
-                    .iter()
-                    .position(|l| l.name == layout.name || l.name == "<anonymous>");
-                match existing {
-                    Some(i) if layouts[i].name == "<anonymous>" => {
-                        layouts[i] = layout;
-                    }
-                    None => layouts.push(layout),
-                    _ => {}
+        if node.kind() == "type_definition"
+            && let Some(layout) = parse_typedef_struct_or_union(source, node, arch)
+        {
+            let existing = layouts
+                .iter()
+                .position(|l| l.name == layout.name || l.name == "<anonymous>");
+            match existing {
+                Some(i) if layouts[i].name == "<anonymous>" => {
+                    layouts[i] = layout;
                 }
+                None => layouts.push(layout),
+                _ => {}
             }
         }
     }
@@ -439,10 +438,10 @@ fn parse_struct_or_union_specifier(
 
     for i in 0..body.child_count() {
         let child = body.child(i)?;
-        if child.kind() == "field_declaration" {
-            if let Some((ty, fname, guard)) = parse_field_declaration(source, child) {
-                raw_fields.push((fname, ty, guard));
-            }
+        if child.kind() == "field_declaration"
+            && let Some((ty, fname, guard)) = parse_field_declaration(source, child)
+        {
+            raw_fields.push((fname, ty, guard));
         }
     }
 
@@ -601,11 +600,11 @@ fn parse_field_declaration(
             // nested-struct resolution pass can match it by name.
             "struct_specifier" | "union_specifier" => {
                 for j in 0..child.child_count() {
-                    if let Some(sub) = child.child(j) {
-                        if sub.kind() == "type_identifier" {
-                            ty_parts.push(source[sub.byte_range()].trim().to_string());
-                            break;
-                        }
+                    if let Some(sub) = child.child(j)
+                        && sub.kind() == "type_identifier"
+                    {
+                        ty_parts.push(source[sub.byte_range()].trim().to_string());
+                        break;
                     }
                 }
             }
@@ -658,10 +657,10 @@ fn extract_identifier(source: &str, node: Node<'_>) -> Option<String> {
         return Some(source[node.byte_range()].to_string());
     }
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if let Some(name) = extract_identifier(source, child) {
-                return Some(name);
-            }
+        if let Some(child) = node.child(i)
+            && let Some(name) = extract_identifier(source, child)
+        {
+            return Some(name);
         }
     }
     None

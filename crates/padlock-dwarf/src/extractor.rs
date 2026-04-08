@@ -35,15 +35,15 @@ impl<'a, R: Reader> Extractor<'a, R> {
 
         let mut entries = unit.entries();
         while let Some((_, entry)) = entries.next_dfs()? {
-            if entry.tag() == gimli::DW_TAG_structure_type {
-                if let Some(mut layout) = self.extract_struct(unit, entry)? {
-                    if layout.name == "<anonymous>" {
-                        if let Some(name) = typedef_names.get(&entry.offset()) {
-                            layout.name = name.clone();
-                        }
-                    }
-                    out.push(layout);
+            if entry.tag() == gimli::DW_TAG_structure_type
+                && let Some(mut layout) = self.extract_struct(unit, entry)?
+            {
+                if layout.name == "<anonymous>"
+                    && let Some(name) = typedef_names.get(&entry.offset())
+                {
+                    layout.name = name.clone();
                 }
+                out.push(layout);
             }
         }
         Ok(())
@@ -108,10 +108,10 @@ impl<'a, R: Reader> Extractor<'a, R> {
 
         while let Some(child) = child_iter.next()? {
             let child_entry = child.entry();
-            if child_entry.tag() == gimli::DW_TAG_member {
-                if let Some(field) = self.extract_field(unit, child_entry)? {
-                    fields.push(field);
-                }
+            if child_entry.tag() == gimli::DW_TAG_member
+                && let Some(field) = self.extract_field(unit, child_entry)?
+            {
+                fields.push(field);
             }
         }
 

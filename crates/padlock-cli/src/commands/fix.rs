@@ -45,10 +45,10 @@ fn fix_file(path: &Path, dry_run: bool, re: Option<&regex::Regex>) -> anyhow::Re
     // Collect layouts that have a ReorderSuggestion and (optionally) match the filter.
     let mut layouts_to_fix: Vec<&padlock_core::ir::StructLayout> = Vec::new();
     for sr in &report.structs {
-        if let Some(re) = re {
-            if !re.is_match(&sr.struct_name) {
-                continue;
-            }
+        if let Some(re) = re
+            && !re.is_match(&sr.struct_name)
+        {
+            continue;
         }
         let has_reorder = sr
             .findings

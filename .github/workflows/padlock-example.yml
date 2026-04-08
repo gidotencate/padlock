@@ -25,7 +25,7 @@ jobs:
 
       # ── Option A: source file analysis (no build needed) ────────────────────
       - name: Analyse Rust source
-        uses: gidotencate/padlock@v0.5.2
+        uses: gidotencate/padlock@v0.5.3
         with:
           path: crates/
           output-format: human
@@ -35,7 +35,7 @@ jobs:
       # Requires: Settings → Code security → Code scanning → enabled
       #
       # - name: Analyse struct layouts (SARIF)
-      #   uses: gidotencate/padlock@v0.5.2
+      #   uses: gidotencate/padlock@v0.5.3
       #   with:
       #     path: crates/
       #     output-format: sarif
@@ -46,7 +46,7 @@ jobs:
       # - uses: dtolnay/rust-toolchain@stable
       # - run: cargo build
       # - name: Analyse binary
-      #   uses: gidotencate/padlock@v0.5.2
+      #   uses: gidotencate/padlock@v0.5.3
       #   with:
       #     path: target/debug/myapp
       #     output-format: human

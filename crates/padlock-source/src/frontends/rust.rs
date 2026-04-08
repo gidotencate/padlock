@@ -22,16 +22,14 @@ pub fn extract_guard_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
     for attr in attrs {
         let path = attr.path();
         // Name-value form: #[lock_protected_by = "mu"] / #[protected_by = "mu"]
-        if path.is_ident("lock_protected_by") || path.is_ident("protected_by") {
-            if let syn::Meta::NameValue(nv) = &attr.meta {
-                if let syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(s),
-                    ..
-                }) = &nv.value
-                {
-                    return Some(s.value());
-                }
-            }
+        if (path.is_ident("lock_protected_by") || path.is_ident("protected_by"))
+            && let syn::Meta::NameValue(nv) = &attr.meta
+            && let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) = &nv.value
+        {
+            return Some(s.value());
         }
         // List form: #[guarded_by("mu")] / #[guarded_by(mu)] / #[pt_guarded_by(...)]
         if path.is_ident("guarded_by") || path.is_ident("pt_guarded_by") {

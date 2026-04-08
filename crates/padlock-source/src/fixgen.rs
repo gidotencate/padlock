@@ -130,11 +130,10 @@ pub fn find_c_struct_span(source: &str, struct_name: &str) -> Option<std::ops::R
                     if source[after_name..brace_start]
                         .chars()
                         .all(|c| c.is_whitespace())
+                        && let Some(body_len) = match_braces(&source[brace_start..])
                     {
-                        if let Some(body_len) = match_braces(&source[brace_start..]) {
-                            let end = consume_semicolon(source, brace_start + body_len);
-                            return Some(start..end);
-                        }
+                        let end = consume_semicolon(source, brace_start + body_len);
+                        return Some(start..end);
                     }
                 }
             }
@@ -155,18 +154,16 @@ pub fn find_rust_struct_span(source: &str, struct_name: &str) -> Option<std::ops
         if matches!(
             boundary,
             Some('{') | Some('\n') | Some('\r') | Some(' ') | Some('\t') | None
-        ) {
-            if let Some(brace_rel) = source[after_name..].find('{') {
-                let brace_start = after_name + brace_rel;
-                if source[after_name..brace_start]
-                    .chars()
-                    .all(|c| c.is_whitespace())
-                {
-                    if let Some(body_len) = match_braces(&source[brace_start..]) {
-                        // Rust structs have no trailing `;` (unit structs do, but we skip those)
-                        return Some(start..brace_start + body_len);
-                    }
-                }
+        ) && let Some(brace_rel) = source[after_name..].find('{')
+        {
+            let brace_start = after_name + brace_rel;
+            if source[after_name..brace_start]
+                .chars()
+                .all(|c| c.is_whitespace())
+                && let Some(body_len) = match_braces(&source[brace_start..])
+            {
+                // Rust structs have no trailing `;` (unit structs do, but we skip those)
+                return Some(start..brace_start + body_len);
             }
         }
         search_from = start + 1;
@@ -186,10 +183,9 @@ pub fn find_go_struct_span(source: &str, struct_name: &str) -> Option<std::ops::
             if source[after_kw..brace_start]
                 .chars()
                 .all(|c| c.is_whitespace())
+                && let Some(body_len) = match_braces(&source[brace_start..])
             {
-                if let Some(body_len) = match_braces(&source[brace_start..]) {
-                    return Some(start..brace_start + body_len);
-                }
+                return Some(start..brace_start + body_len);
             }
         }
         search_from = start + 1;

@@ -45,10 +45,10 @@ fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> V
         }
 
         // type_declaration → type_spec → struct_type
-        if node.kind() == "type_declaration" {
-            if let Some(layout) = parse_type_declaration(source, node, arch) {
-                layouts.push(layout);
-            }
+        if node.kind() == "type_declaration"
+            && let Some(layout) = parse_type_declaration(source, node, arch)
+        {
+            layouts.push(layout);
         }
     }
     layouts

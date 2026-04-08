@@ -26,10 +26,10 @@ pub fn run(paths: &[PathBuf], filter: Option<&str>) -> anyhow::Result<()> {
         };
 
         for layout in &layouts {
-            if let Some(ref re) = re {
-                if !re.is_match(&layout.name) {
-                    continue;
-                }
+            if let Some(ref re) = re
+                && !re.is_match(&layout.name)
+            {
+                continue;
             }
             let d = padlock_output::render_diff(layout);
             if d != "(no changes)\n" {

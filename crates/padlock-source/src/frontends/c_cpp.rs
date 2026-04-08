@@ -217,7 +217,10 @@ fn parse_class_specifier(
         let ps = arch.pointer_size;
         fields.push(Field {
             name: "__vptr".to_string(),
-            ty: TypeInfo::Pointer { size: ps, align: ps },
+            ty: TypeInfo::Pointer {
+                size: ps,
+                align: ps,
+            },
             offset: 0,
             size: ps,
             align: ps,
@@ -251,13 +254,20 @@ fn parse_class_specifier(
         let base_ty = strip_bitfield_suffix(&ty_name);
         let (size, align) = c_type_size_align(base_ty, arch);
         let access = if let Some(g) = guard {
-            AccessPattern::Concurrent { guard: Some(g), is_atomic: false }
+            AccessPattern::Concurrent {
+                guard: Some(g),
+                is_atomic: false,
+            }
         } else {
             AccessPattern::Unknown
         };
         fields.push(Field {
             name: fname,
-            ty: TypeInfo::Primitive { name: ty_name, size, align },
+            ty: TypeInfo::Primitive {
+                name: ty_name,
+                size,
+                align,
+            },
             offset: 0,
             size,
             align,
@@ -935,7 +945,7 @@ class Widget {
         // First field must be __vptr
         assert_eq!(l.fields[0].name, "__vptr");
         assert_eq!(l.fields[0].size, 8); // pointer on x86_64
-        // __vptr is at offset 0
+                                         // __vptr is at offset 0
         assert_eq!(l.fields[0].offset, 0);
         // int x should come after the pointer (at offset 8)
         let x = l.fields.iter().find(|f| f.name == "x").unwrap();
@@ -981,7 +991,11 @@ class Derived : public Base {
             "Derived should have a __base_Base field"
         );
         // The y field should come after __base_Base
-        let base_field = derived.fields.iter().find(|f| f.name == "__base_Base").unwrap();
+        let base_field = derived
+            .fields
+            .iter()
+            .find(|f| f.name == "__base_Base")
+            .unwrap();
         let y_field = derived.fields.iter().find(|f| f.name == "y").unwrap();
         assert!(y_field.offset >= base_field.offset + base_field.size);
     }

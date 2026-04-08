@@ -144,9 +144,9 @@ fn run_analysis(path: &Path) -> anyhow::Result<Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use notify::event::{AccessKind, CreateKind, ModifyKind};
     use notify::{Event, EventKind};
+    use std::path::PathBuf;
 
     fn make_event(kind: EventKind) -> Event {
         Event {

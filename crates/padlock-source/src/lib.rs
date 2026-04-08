@@ -402,7 +402,8 @@ mod tests {
 
     #[test]
     fn nested_c_struct_resolved() {
-        let src = "struct Vec2 { float x; float y; };\nstruct Rect { struct Vec2 tl; struct Vec2 br; };";
+        let src =
+            "struct Vec2 { float x; float y; };\nstruct Rect { struct Vec2 tl; struct Vec2 br; };";
         let layouts = parse_source_str(src, &SourceLanguage::C, &X86_64_SYSV).unwrap();
         let rect = layouts.iter().find(|l| l.name == "Rect").unwrap();
         // Each Vec2 is 8 bytes (two floats). Rect = 16 bytes, no padding.

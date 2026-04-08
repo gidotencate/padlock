@@ -163,7 +163,10 @@ fn main() -> anyhow::Result<()> {
 
     // Exit non-zero when fail_below threshold is breached or any high-severity finding exists.
     let failed_score = cfg.fail_below > 0
-        && report.structs.iter().any(|s| s.score < cfg.fail_below as f64);
+        && report
+            .structs
+            .iter()
+            .any(|s| s.score < cfg.fail_below as f64);
     let has_high = report.structs.iter().any(|sr| {
         sr.findings
             .iter()

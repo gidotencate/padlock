@@ -17,3 +17,4 @@ repository  = "https://github.com/gidotencate/padlock"
 description = "Struct memory layout analyzer for C, C++, Rust, and Go"
 keywords    = ["performance", "memory", "layout", "analysis", "cache"]
 categories  = ["development-tools", "development-tools::profiling"]
+readme      = "README.md"

@@ -180,7 +180,10 @@ fn detect_arch_on_real_object() {
     };
     let arch = reader::detect_arch(&binary).unwrap();
     assert!(
-        matches!(arch.name, "x86_64" | "aarch64" | "riscv64"),
+        matches!(
+            arch.name,
+            "x86_64" | "aarch64" | "aarch64-apple" | "riscv64"
+        ),
         "unexpected arch: {}",
         arch.name
     );

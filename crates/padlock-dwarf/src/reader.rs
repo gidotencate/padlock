@@ -27,7 +27,7 @@ pub fn load(binary_data: &[u8]) -> anyhow::Result<DwarfRc> {
             Ok(EndianRcSlice::new(Rc::from(data.as_slice()), endian))
         };
 
-    Ok(gimli::Dwarf::load(load_section)?)
+    gimli::Dwarf::load(load_section)
 }
 
 /// Load a section's bytes and apply any ELF RELA relocations targeting it.

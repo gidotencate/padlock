@@ -31,10 +31,10 @@ pub fn annotate_concurrency(layout: &mut StructLayout, language: &SourceLanguage
                     is_atomic,
                 };
             }
-        } else if is_read_mostly_type(&ty_name, language) {
-            if matches!(field.access, AccessPattern::Unknown) {
-                field.access = AccessPattern::ReadMostly;
-            }
+        } else if is_read_mostly_type(&ty_name, language)
+            && matches!(field.access, AccessPattern::Unknown)
+        {
+            field.access = AccessPattern::ReadMostly;
         }
     }
 }

@@ -117,7 +117,7 @@ fn simulate_layout(
         name: struct_name,
         total_size: offset,
         align: struct_align,
-        fields: fields.drain(..).collect(),
+        fields: std::mem::take(fields),
         source_file: None,
         source_line: None,
         arch,
@@ -148,7 +148,7 @@ fn simulate_union_layout(
         name,
         total_size,
         align: max_align,
-        fields: fields.drain(..).collect(),
+        fields: std::mem::take(fields),
         source_file: None,
         source_line: None,
         arch,
@@ -509,8 +509,7 @@ fn extract_guard_from_c_field_text(field_source: &str) -> Option<String> {
             let after = &field_source[pos + kw.len()..];
             // Expect `(` optionally preceded by whitespace
             let trimmed = after.trim_start();
-            if trimmed.starts_with('(') {
-                let inner = &trimmed[1..];
+            if let Some(inner) = trimmed.strip_prefix('(') {
                 // Read until the matching ')'
                 if let Some(end) = inner.find(')') {
                     let guard = inner[..end].trim().trim_matches('"');

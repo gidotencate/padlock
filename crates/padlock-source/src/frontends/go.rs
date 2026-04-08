@@ -217,11 +217,7 @@ fn trailing_comment_on_line(source: &str, node: Node<'_>) -> Option<String> {
     // Take only up to the next newline
     let line = rest.lines().next().unwrap_or("");
     // Look for `//` in that remainder
-    if let Some(pos) = line.find("//") {
-        Some(line[pos..].to_string())
-    } else {
-        None
-    }
+    line.find("//").map(|pos| line[pos..].to_string())
 }
 
 fn collect_field_declarations(

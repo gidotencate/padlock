@@ -95,7 +95,7 @@ fn is_known_primitive(name: &str) -> bool {
 ///
 /// Runs in a loop until stable to handle transitive nesting (struct A contains
 /// B which contains C). In practice, 2–3 iterations suffice for typical code.
-fn resolve_nested_structs(layouts: &mut Vec<StructLayout>) {
+fn resolve_nested_structs(layouts: &mut [StructLayout]) {
     loop {
         // Build name → (total_size, align) from whatever we have so far.
         let known: HashMap<String, (usize, usize)> = layouts
@@ -218,7 +218,7 @@ fn is_padlock_ignored(source: &str, struct_name: &str) -> bool {
             let is_boundary = source[after_name..]
                 .chars()
                 .next()
-                .map_or(true, |c| !c.is_alphanumeric() && c != '_');
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
             if is_boundary {
                 let line_start = source[..abs].rfind('\n').map(|i| i + 1).unwrap_or(0);
                 // Check the line containing the struct keyword for an inline annotation

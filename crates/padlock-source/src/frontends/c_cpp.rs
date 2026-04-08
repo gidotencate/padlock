@@ -96,6 +96,7 @@ fn simulate_layout(
     fields: &mut Vec<Field>,
     struct_name: String,
     arch: &'static ArchConfig,
+    source_line: Option<u32>,
 ) -> StructLayout {
     let mut offset = 0usize;
     let mut struct_align = 1usize;
@@ -119,7 +120,7 @@ fn simulate_layout(
         align: struct_align,
         fields: std::mem::take(fields),
         source_file: None,
-        source_line: None,
+        source_line,
         arch,
         is_packed: false,
         is_union: false,
@@ -132,6 +133,7 @@ fn simulate_union_layout(
     fields: &mut Vec<Field>,
     name: String,
     arch: &'static ArchConfig,
+    source_line: Option<u32>,
 ) -> StructLayout {
     for f in fields.iter_mut() {
         f.offset = 0;
@@ -150,7 +152,7 @@ fn simulate_union_layout(
         align: max_align,
         fields: std::mem::take(fields),
         source_file: None,
-        source_line: None,
+        source_line,
         arch,
         is_packed: false,
         is_union: true,
@@ -281,7 +283,8 @@ fn parse_class_specifier(
         return None;
     }
 
-    Some(simulate_layout(&mut fields, class_name, arch))
+    let line = node.start_position().row as u32 + 1;
+    Some(simulate_layout(&mut fields, class_name, arch, Some(line)))
 }
 
 /// Return true if a `field_declaration_list` node contains any `virtual` keyword
@@ -442,10 +445,11 @@ fn parse_struct_or_union_specifier(
         })
         .collect();
 
+    let line = node.start_position().row as u32 + 1;
     if is_union {
-        Some(simulate_union_layout(&mut fields, name, arch))
+        Some(simulate_union_layout(&mut fields, name, arch, Some(line)))
     } else {
-        Some(simulate_layout(&mut fields, name, arch))
+        Some(simulate_layout(&mut fields, name, arch, Some(line)))
     }
 }
 

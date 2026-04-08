@@ -59,11 +59,12 @@ fn parse_type_declaration(
     node: Node<'_>,
     arch: &'static ArchConfig,
 ) -> Option<StructLayout> {
+    let source_line = node.start_position().row as u32 + 1;
     // type_declaration has a type_spec child
     for i in 0..node.child_count() {
         let child = node.child(i)?;
         if child.kind() == "type_spec" {
-            return parse_type_spec(source, child, arch);
+            return parse_type_spec(source, child, arch, source_line);
         }
     }
     None
@@ -73,6 +74,7 @@ fn parse_type_spec(
     source: &str,
     node: Node<'_>,
     arch: &'static ArchConfig,
+    source_line: u32,
 ) -> Option<StructLayout> {
     let mut name: Option<String> = None;
     let mut struct_node: Option<Node> = None;
@@ -88,7 +90,7 @@ fn parse_type_spec(
 
     let name = name?;
     let struct_node = struct_node?;
-    parse_struct_type(source, struct_node, name, arch)
+    parse_struct_type(source, struct_node, name, arch, source_line)
 }
 
 fn parse_struct_type(
@@ -96,6 +98,7 @@ fn parse_struct_type(
     node: Node<'_>,
     name: String,
     arch: &'static ArchConfig,
+    source_line: u32,
 ) -> Option<StructLayout> {
     let mut raw_fields: Vec<(String, String, Option<String>)> = Vec::new();
 
@@ -160,7 +163,7 @@ fn parse_struct_type(
         align: struct_align,
         fields,
         source_file: None,
-        source_line: None,
+        source_line: Some(source_line),
         arch,
         is_packed: false,
         is_union: false,

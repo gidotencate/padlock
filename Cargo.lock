@@ -638,6 +638,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "padlock-core",
+ "proc-macro2",
  "quote",
  "similar",
  "syn",

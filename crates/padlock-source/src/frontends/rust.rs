@@ -231,6 +231,7 @@ impl<'ast> Visit<'ast> for StructVisitor {
             .map(|(n, t, _)| (n.clone(), t.clone()))
             .collect();
         let mut layout = simulate_rust_layout(name, &name_ty, packed, self.arch);
+        layout.source_line = Some(node.ident.span().start().line as u32);
 
         // Apply explicit guard annotations; these take precedence over the
         // heuristic type-name pass in concurrency.rs (which skips non-Unknown fields).

@@ -34,7 +34,12 @@ pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<Ve
     let lang = detect_language(path)
         .ok_or_else(|| anyhow::anyhow!("unsupported file type: {}", path.display()))?;
     let source = std::fs::read_to_string(path)?;
-    parse_source_str(&source, &lang, arch)
+    let mut layouts = parse_source_str(&source, &lang, arch)?;
+    let file_str = path.to_string_lossy().into_owned();
+    for layout in &mut layouts {
+        layout.source_file = Some(file_str.clone());
+    }
+    Ok(layouts)
 }
 
 /// Parse source text directly (useful for tests and piped input).

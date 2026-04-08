@@ -5,9 +5,10 @@ use padlock_core::findings::{Finding, Report, Severity, StructReport};
 /// Render a full report as a human-readable multi-line string.
 pub fn render_report(report: &Report) -> String {
     let mut out = String::new();
+    let multi_file = report.analyzed_paths.len() > 1;
 
-    // When multiple files were analyzed, show the file count first.
-    if report.analyzed_paths.len() > 1 {
+    // Header line
+    if multi_file {
         out.push_str(&format!("Analyzed {} files, ", report.analyzed_paths.len()));
         out.push_str(&format!(
             "{} struct{}",
@@ -30,17 +31,56 @@ pub fn render_report(report: &Report) -> String {
     } else {
         out.push_str(" — no padding waste found\n");
     }
-    out.push('\n');
 
-    for sr in &report.structs {
-        out.push_str(&render_struct(sr));
+    if multi_file {
+        render_grouped(&mut out, report);
+    } else {
         out.push('\n');
+        for sr in &report.structs {
+            out.push_str(&render_struct(sr, true));
+            out.push('\n');
+        }
     }
 
     out
 }
 
-pub fn render_struct(sr: &StructReport) -> String {
+/// Render structs grouped by source file with a `── file ──` separator header.
+fn render_grouped(out: &mut String, report: &Report) {
+    // Collect distinct source files in encounter order, preserving struct order.
+    let mut file_order: Vec<Option<String>> = Vec::new();
+    let mut groups: std::collections::HashMap<Option<String>, Vec<&StructReport>> =
+        std::collections::HashMap::new();
+
+    for sr in &report.structs {
+        let key = sr.source_file.clone();
+        if !groups.contains_key(&key) {
+            file_order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(sr);
+    }
+
+    for key in &file_order {
+        // File separator header
+        let label = key.as_deref().unwrap_or("<binary>");
+        let bar = "─".repeat(60usize.saturating_sub(label.len() + 4));
+        out.push_str(&format!("\n── {label} {bar}\n\n"));
+
+        if let Some(structs) = groups.get(key) {
+            for sr in structs {
+                // Within a group, suppress the filename (show only line number).
+                out.push_str(&render_struct(sr, false));
+                out.push('\n');
+            }
+        }
+    }
+}
+
+/// Render one struct report.
+///
+/// `show_filename`: when `true`, the `source_file` is included in the location hint;
+/// when `false` (inside a file-grouped section), only the line number is shown.
+pub fn render_struct(sr: &StructReport, show_filename: bool) -> String {
     let mut out = String::new();
 
     let score_label = match sr.score as u32 {
@@ -49,10 +89,17 @@ pub fn render_struct(sr: &StructReport) -> String {
         _ => "✗",
     };
 
-    let location = match (&sr.source_file, sr.source_line) {
-        (Some(f), Some(l)) => format!(" ({}:{})", f, l),
-        (Some(f), None) => format!(" ({})", f),
-        _ => String::new(),
+    let location = if show_filename {
+        match (&sr.source_file, sr.source_line) {
+            (Some(f), Some(l)) => format!(" ({}:{})", f, l),
+            (Some(f), None) => format!(" ({})", f),
+            _ => String::new(),
+        }
+    } else {
+        match sr.source_line {
+            Some(l) => format!(" :{l}"),
+            None => String::new(),
+        }
     };
 
     let holes_hint = if sr.num_holes > 0 {
@@ -161,21 +208,21 @@ mod tests {
     #[test]
     fn render_struct_shows_hole_count_when_nonzero() {
         let report = Report::from_layouts(&[connection_layout()]);
-        let out = render_struct(&report.structs[0]);
+        let out = render_struct(&report.structs[0], true);
         assert!(out.contains("holes=2"));
     }
 
     #[test]
     fn render_struct_omits_holes_when_zero() {
         let report = Report::from_layouts(&[packed_layout()]);
-        let out = render_struct(&report.structs[0]);
+        let out = render_struct(&report.structs[0], true);
         assert!(!out.contains("holes="));
     }
 
     #[test]
     fn render_struct_shows_field_count() {
         let report = Report::from_layouts(&[connection_layout()]);
-        let out = render_struct(&report.structs[0]);
+        let out = render_struct(&report.structs[0], true);
         assert!(out.contains("fields=4"));
     }
 

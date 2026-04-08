@@ -5,16 +5,15 @@ Struct memory layout analyzer for C, C++, Rust, and Go. Finds padding waste, fal
 ```
 $ padlock analyze src/connection.rs
 
-Analyzed 2 structs
+Analyzed 2 structs — 10 bytes wasted across all structs
 
-[✗] Connection  24B  score=33
-    [HIGH] Padding waste: 10 bytes wasted (41.7%)
-    [HIGH] Reorder suggestion: saves 8 bytes → 16B total
-      Optimal order: timeout, port, is_active, is_tls
+[✗] Connection (src/connection.rs:4)  24B  fields=4  holes=2  score=33
+    [HIGH] Padding waste: 10B (41%) across 2 gap(s)
+    [HIGH] Reorder fields to save 8B → 16B: timeout, port, is_active, is_tls
     [HIGH] False sharing: 1 cache-line conflict(s)
-      Cache line 0: [reader_mu, writer_mu]
 
-[✓] ConnectionOptimal  16B  score=100
+[✓] ConnectionOptimal (src/connection.rs:22)  16B  fields=4  score=100
+    (no issues found)
 ```
 
 ---
@@ -63,71 +62,91 @@ export PATH="$PWD/target/release:$PATH"
 # Analyze a source file
 padlock analyze myfile.c
 
+# Analyze an entire directory (recursive)
+padlock analyze src/
+
 # Analyze a compiled binary (DWARF)
 padlock analyze target/debug/myapp
+
+# Filter to only the worst structs
+padlock analyze src/ --packable --sort-by waste
+
+# Only structs with at least 2 padding holes, matching a name pattern
+padlock analyze src/ --min-holes 2 --filter '^Hot'
 
 # Cargo subcommand — build + analyze in one step
 cargo padlock
 cargo padlock --bin myapp --sarif
 
 # Analyze and output JSON
-padlock analyze myfile.rs --json
+padlock analyze src/ --json
 
 # Output SARIF for CI
 padlock analyze myfile.cpp --sarif > padlock.sarif
 
 # Show field-reordering diff
-padlock diff myfile.go
+padlock diff src/
 
 # Show what fix would do (without writing)
-padlock fix myfile.c --dry-run
+padlock fix src/ --dry-run
 
-# List all structs with sizes
-padlock list myfile.rs
+# List all structs with sizes, holes, and scores
+padlock list src/ --sort-by waste
 
 # Live feedback — re-analyse on every save
 padlock watch src/models.rs
+
+# Show version
+padlock --version
 ```
 
 ---
 
 ## Commands
 
-### `padlock analyze <file>`
+### `padlock analyze <path>…`
 
-Analyzes all structs in a file and prints findings ranked by severity.
+Analyzes all structs in one or more files or directories and prints findings ranked by severity. Directories are walked recursively (skipping `target/`, `.git/`, etc.).
 
 ```
 padlock analyze src/stats.rs
+padlock analyze src/                      # entire directory
+padlock analyze a.rs b.rs c.c            # multiple files
 padlock analyze target/debug/myapp        # compiled binary (DWARF)
 padlock analyze mylib.pdb                 # Windows PDB
 ```
 
 Flags:
-- `--json` — emit JSON (array of StructReport objects)
+- `--json` — emit JSON
 - `--sarif` — emit SARIF 2.1.0 for CI tooling / GitHub code scanning
+- `--filter <PATTERN>` — include only structs whose names match this regex
+- `--exclude <PATTERN>` — exclude structs whose names match this regex
+- `--min-holes <N>` — only structs with ≥ N padding gaps
+- `--min-size <N>` — only structs with total size ≥ N bytes
+- `--packable` — only structs that have a reorder suggestion
+- `--sort-by score|size|waste|name` — sort order (default: score, worst first)
 
 ---
 
-### `padlock list <file>`
+### `padlock list <path>…`
 
-Lists every struct found with its size, field count, and score. Useful for a quick inventory.
+Lists every struct found with its size, field count, hole count, waste, and score. Accepts the same filtering and sorting flags as `analyze`.
 
 ```
-$ padlock list src/server.rs
+$ padlock list src/server.rs --sort-by waste
 
-Name               Size   Fields  Score
-──────────────────────────────────────
-Stats              96B    4       55
-Connection         24B    4       33
-ConnectionOptimal  16B    4       100
+Name               Size   Fields  Holes  Wasted  Score  Location
+───────────────────────────────────────────────────────────────
+Connection         24B    4       2      10B     33     src/server.rs:12
+Stats              96B    4       1      8B      55     src/server.rs:28
+ConnectionOptimal  16B    4       0      0B      100    src/server.rs:44
 ```
 
 ---
 
-### `padlock diff <file>`
+### `padlock diff <path>… [--filter PATTERN]`
 
-Shows a unified diff of the current field order vs the optimal order for each struct that has a `ReorderSuggestion` finding.
+Shows a unified diff of the current field order vs the optimal order. Accepts directories and multiple files.
 
 ```
 $ padlock diff src/models.rs
@@ -148,15 +167,15 @@ $ padlock diff src/models.rs
 
 ---
 
-### `padlock fix <file> [--dry-run]`
+### `padlock fix <path>… [--dry-run] [--filter PATTERN]`
 
-Shows the reorder diff and — without `--dry-run` — writes a `.bak` backup of the original file. Full in-place source rewriting is planned.
+Shows the reorder diff and — without `--dry-run` — rewrites the source file in-place, saving a `.bak` backup first. Accepts directories and multiple files; `--filter` limits which structs are rewritten.
 
 ---
 
-### `padlock report <file>`
+### `padlock report <path>…`
 
-Alias for `analyze`. Intended for future extended report formats.
+Alias for `analyze`. Accepts the same flags.
 
 ---
 
@@ -440,7 +459,7 @@ See `.github/workflows/padlock-example.yml` for a full reference workflow includ
 ### JSON output for scripting
 
 ```bash
-padlock analyze myfile.rs --json | jq '.[] | select(.score < 60)'
+padlock analyze src/ --json | jq '.structs[] | select(.score < 60)'
 ```
 
 ---
@@ -481,9 +500,8 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 **Known limitations:**
 - C++ `alignas` and `__attribute__((aligned))` on individual fields are not modeled in source analysis (use DWARF analysis for accurate alignment override handling).
 - Multiple consecutive bit fields that pack into one storage unit are each counted as a full storage unit, slightly overestimating struct size.
-- Nested struct fields (a field type referencing another struct in the same file) are treated as opaque with pointer-sized size.
-- C++ inheritance and virtual function table (vptr) padding are not modeled.
 - The "padded" variants in false-sharing samples may still be flagged because const-expression padding (e.g. `[u8; 64 - size_of::<Mutex<u64>>()]`) is not evaluated by the source frontend.
+- Plain Rust structs (`repr(Rust)`) may be reordered by the compiler; padlock analyzes declaration order, which is what the developer controls.
 
 ---
 

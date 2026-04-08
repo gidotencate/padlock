@@ -43,6 +43,10 @@ So for the binary-analysis path on C/C++ programs, the capabilities are substant
 |---|---|---|
 | Source analysis (no compilation) | — | ✓ |
 | Language-native output (Rust/Go syntax) | — | ✓ |
+| Multi-path / directory analysis | — | ✓ |
+| Struct name filtering (`--filter`, `--exclude`) | — | ✓ (regex) |
+| Hole-count / size / packable filters | — | ✓ |
+| Sort by score / size / waste / name | — | ✓ |
 | False sharing detection | — | ✓ |
 | Explicit guard annotation | — | ✓ (`#[lock_protected_by]`, `GUARDED_BY()`, `// padlock:guard=`) |
 | In-place source rewriting | — | ✓ |

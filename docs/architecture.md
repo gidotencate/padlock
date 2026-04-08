@@ -2,7 +2,7 @@
 
 ## Overview
 
-padlock is a Cargo workspace of seven crates. The data flows in one direction:
+padlock is a Cargo workspace of six crates. The data flows in one direction:
 
 ```
   Source / Binary input
@@ -45,11 +45,6 @@ padlock is a Cargo workspace of seven crates. The data flows in one direction:
   │ #[assert_no_padding]              │
   │ #[assert_size(N)]                 │
   └────────────────┘
-         ▲
-  ┌────────────────┐
-  │padlock         │  facade crate — re-exports padlock-macros
-  │ use padlock::assert_no_padding    │
-  └────────────────┘
 ```
 
 ---
@@ -69,7 +64,7 @@ Central dependency for all other crates. Contains:
 
 - **`arch.rs`** — `ArchConfig` constants for each supported target (pointer size, cache line size). Statics: `X86_64_SYSV`, `AARCH64`, `AARCH64_APPLE`, `WASM32`, `RISCV64`.
 
-- **`findings.rs`** — `Finding` enum, `StructReport`, `Report`. `Report::from_layouts` is the single entry point that runs all passes and returns the full report.
+- **`findings.rs`** — `Finding` enum, `StructReport` (includes `num_fields`, `num_holes`, source location), `Report` (includes `analyzed_paths`). `Report::from_layouts` is the single entry point that runs all passes and returns the full report.
 
 - **`analysis/`** — One module per analysis pass:
   - `padding` — re-exports `ir::find_padding`
@@ -124,12 +119,14 @@ Output formatters. All functions take `padlock-core` types as input.
 
 Two binaries. Wires all other crates together.
 
-- **`main.rs`** — `clap` derive API; subcommand dispatch for `padlock`.
-- **`commands/analyze.rs`** — Detects source vs binary, calls the right frontend, runs `Report::from_layouts`, dispatches to the right formatter.
-- **`commands/list.rs`** — Prints a summary table of all structs (size, fields, score).
-- **`commands/diff.rs`** — Calls `padlock_output::render_diff` per layout and prints the unified diff.
-- **`commands/fix.rs`** — Shows the reorder diff and (non-dry-run) writes a `.bak` backup.
-- **`commands/report.rs`** — Alias for analyze; intended for extended report formats.
+- **`main.rs`** — `clap` derive API; subcommand dispatch for `padlock`. `--version` flag auto-populated from `Cargo.toml`.
+- **`filter.rs`** — `FilterArgs` (shared CLI flags: `--filter`, `--exclude`, `--min-holes`, `--min-size`, `--packable`, `--sort-by`) and `SortBy` enum. Applies pre-analysis layout filtering and post-analysis report sorting.
+- **`paths.rs`** — `collect_layouts` (loads layouts from multiple paths, expands directories) and `walk_source_files` (recursive directory walker, skips `target/`, `.git/`, etc.).
+- **`commands/analyze.rs`** — Collects layouts from all paths, applies config + CLI filters, runs `Report::from_layouts`, dispatches to the right formatter.
+- **`commands/list.rs`** — Prints a summary table of all structs (size, fields, holes, wasted bytes, score, location). Accepts filter and sort flags.
+- **`commands/diff.rs`** — Accepts multiple paths/dirs, applies `--filter`, calls `padlock_output::render_diff` per layout.
+- **`commands/fix.rs`** — Accepts multiple paths/dirs, applies `--filter`, shows reorder diff and (non-dry-run) writes `.bak` backup then rewrites in-place.
+- **`commands/report.rs`** — Alias for analyze.
 - **`commands/watch.rs`** — File/directory watcher using `notify`. Debounces change events (250 ms) and re-runs analysis on each change. Clears the terminal between runs.
 - **`bin/cargo_padlock.rs`** — The `cargo-padlock` binary, installed as a cargo subcommand. Reads `Cargo.toml` for the default binary name, runs `cargo build`, locates the built binary in `target/{profile}/`, and runs DWARF analysis. Exits non-zero on high-severity findings.
 

@@ -1,22 +1,28 @@
 // padlock-cli/src/commands/list.rs
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use comfy_table::{Cell, Table};
+use padlock_core::findings::Report;
 
-pub fn run(path: &Path) -> anyhow::Result<()> {
-    let layouts = if padlock_source::detect_language(path).is_some() {
-        let arch = padlock_dwarf::reader::detect_arch_from_host();
-        padlock_source::parse_source(path, arch)?
-    } else {
-        let data = std::fs::read(path)?;
-        let dwarf = padlock_dwarf::reader::load(&data)?;
-        let arch = padlock_dwarf::reader::detect_arch(&data)?;
-        padlock_dwarf::extractor::Extractor::new(&dwarf, arch).extract_all()?
-    };
+use crate::filter::FilterArgs;
+use crate::paths::collect_layouts;
+
+pub fn run(paths: &[PathBuf], filter: &FilterArgs) -> anyhow::Result<()> {
+    let (mut layouts, _) = collect_layouts(paths)?;
+    filter.apply_to_layouts(&mut layouts)?;
 
     if layouts.is_empty() {
-        println!("No structs found in {}", path.display());
+        println!("No structs found.");
+        return Ok(());
+    }
+
+    // Run analysis to get scores and findings (needed for sort/packable filter).
+    let mut report = Report::from_layouts(&layouts);
+    filter.apply_to_report(&mut report);
+
+    if report.structs.is_empty() {
+        println!("No structs matched the given filters.");
         return Ok(());
     }
 
@@ -25,32 +31,65 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
         "Struct",
         "Size (B)",
         "Fields",
+        "Holes",
         "Wasted (B)",
         "Score",
         "Location",
     ]);
 
-    for layout in &layouts {
-        let gaps = padlock_core::ir::find_padding(layout);
-        let wasted: usize = gaps.iter().map(|g| g.bytes).sum();
-        let score = padlock_core::analysis::scorer::score(layout);
-
-        let location = match (&layout.source_file, layout.source_line) {
-            (Some(f), Some(l)) => format!("{}:{}", f, l),
+    for sr in &report.structs {
+        let location = match (&sr.source_file, sr.source_line) {
+            (Some(f), Some(l)) => format!("{f}:{l}"),
             (Some(f), None) => f.clone(),
             _ => "-".to_string(),
         };
 
         table.add_row(vec![
-            Cell::new(&layout.name),
-            Cell::new(layout.total_size),
-            Cell::new(layout.fields.len()),
-            Cell::new(wasted),
-            Cell::new(format!("{score:.0}")),
+            Cell::new(&sr.struct_name),
+            Cell::new(sr.total_size),
+            Cell::new(sr.num_fields),
+            Cell::new(sr.num_holes),
+            Cell::new(sr.wasted_bytes),
+            Cell::new(format!("{:.0}", sr.score)),
             Cell::new(location),
         ]);
     }
 
     println!("{table}");
     Ok(())
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::filter::SortBy;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn default_filter() -> FilterArgs {
+        FilterArgs {
+            filter: None,
+            exclude: None,
+            min_holes: None,
+            min_size: None,
+            packable: false,
+            sort_by: SortBy::Score,
+        }
+    }
+
+    #[test]
+    fn list_runs_without_error() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("s.rs");
+        fs::write(&file, "struct S { x: i32, y: i64, z: bool }").unwrap();
+        assert!(run(&[file], &default_filter()).is_ok());
+    }
+
+    #[test]
+    fn list_empty_dir_does_not_error() {
+        let dir = TempDir::new().unwrap();
+        assert!(run(&[dir.path().to_path_buf()], &default_filter()).is_ok());
+    }
 }

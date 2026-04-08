@@ -1,26 +1,26 @@
 // padlock-cli/src/commands/analyze.rs
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use padlock_core::findings::Report;
 
 use crate::config::Config;
+use crate::filter::FilterArgs;
+use crate::paths::collect_layouts;
 
-pub fn run(path: &Path, json: bool, sarif: bool) -> anyhow::Result<()> {
-    let cfg = Config::for_path(path);
+pub fn run(paths: &[PathBuf], json: bool, sarif: bool, filter: &FilterArgs) -> anyhow::Result<()> {
+    // Load config by searching upward from the first supplied path.
+    let cfg = Config::for_path(
+        paths
+            .first()
+            .map(|p| p.as_path())
+            .unwrap_or(std::path::Path::new(".")),
+    );
 
-    // Decide whether this is a source file or a binary.
-    let mut layouts = if is_source_file(path) {
-        let arch = padlock_dwarf::reader::detect_arch_from_host();
-        padlock_source::parse_source(path, arch)?
-    } else {
-        let data = std::fs::read(path)?;
-        let dwarf = padlock_dwarf::reader::load(&data)?;
-        let arch = padlock_dwarf::reader::detect_arch(&data)?;
-        padlock_dwarf::extractor::Extractor::new(&dwarf, arch).extract_all()?
-    };
+    // Collect layouts from all paths (dirs expanded, binaries via DWARF).
+    let (mut layouts, analyzed) = collect_layouts(paths)?;
 
-    // Apply arch override if set in config
+    // Apply arch override from config.
     if let Some(ref arch_name) = cfg.arch_override {
         let arch = padlock_core::arch::arch_by_name(arch_name).unwrap_or_else(|| {
             eprintln!("padlock: warning: unknown arch '{arch_name}', ignoring override");
@@ -31,15 +31,23 @@ pub fn run(path: &Path, json: bool, sarif: bool) -> anyhow::Result<()> {
         }
     }
 
-    // Filter ignored structs
+    // Apply config ignore list, then CLI pre-filters (name, size, holes).
     layouts.retain(|l| !cfg.is_ignored(&l.name));
+    filter.apply_to_layouts(&mut layouts)?;
 
-    let report = Report::from_layouts(&layouts);
+    // Run all analysis passes.
+    let mut report = Report::from_layouts(&layouts);
+    report.analyzed_paths = analyzed;
 
-    // Apply severity filter
-    let report = filter_report(report, &cfg);
+    // Apply config severity filter.
+    for sr in &mut report.structs {
+        sr.findings.retain(|f| cfg.should_report(f.severity()));
+    }
 
-    // Check fail_below threshold
+    // Apply post-analysis CLI filters (packable) and sort.
+    filter.apply_to_report(&mut report);
+
+    // Check fail_below score threshold.
     let failed = cfg.fail_below > 0
         && report
             .structs
@@ -59,15 +67,4 @@ pub fn run(path: &Path, json: bool, sarif: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn filter_report(mut report: Report, cfg: &Config) -> Report {
-    for sr in &mut report.structs {
-        sr.findings.retain(|f| cfg.should_report(f.severity()));
-    }
-    report
-}
-
-fn is_source_file(path: &Path) -> bool {
-    padlock_source::detect_language(path).is_some()
 }

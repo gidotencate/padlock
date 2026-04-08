@@ -586,6 +586,7 @@ dependencies = [
  "padlock-dwarf",
  "padlock-output",
  "padlock-source",
+ "regex",
  "serde_json",
  "tempfile",
  "toml",

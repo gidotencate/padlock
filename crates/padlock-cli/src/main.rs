@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 pub mod config;
+pub mod filter;
+pub mod paths;
+
 mod commands {
     pub mod analyze;
     pub mod diff;
@@ -16,7 +19,11 @@ mod output {
 }
 
 #[derive(Parser)]
-#[command(name = "padlock", about = "Struct memory layout analyzer")]
+#[command(
+    name = "padlock",
+    about = "Struct memory layout analyzer for C, C++, Rust, and Go",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -24,34 +31,64 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Analyze a binary or source file for struct layout issues
+    /// Analyze one or more files or directories for struct layout issues
     Analyze {
-        /// Path to the binary (.o, ELF) or source file (.c, .cpp, .rs, .go)
-        path: PathBuf,
+        /// Paths to analyze: source files (.c .cpp .rs .go), binaries, or directories
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
-        /// Output as SARIF (for CI / GitHub annotations)
+        /// Output as SARIF (for CI / GitHub Code Scanning annotations)
         #[arg(long)]
         sarif: bool,
+        #[command(flatten)]
+        filter: filter::FilterArgs,
     },
-    /// List all structs found in a file with basic stats
-    List { path: PathBuf },
+
+    /// List all structs found in one or more files with basic stats
+    List {
+        /// Paths to analyze: source files, binaries, or directories
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        #[command(flatten)]
+        filter: filter::FilterArgs,
+    },
+
     /// Show a diff of original vs optimal field ordering
-    Diff { path: PathBuf },
-    /// Apply automatic field reordering to a source file
+    Diff {
+        /// Source files or directories to diff (binaries not supported)
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Include only structs whose names match this regex pattern
+        #[arg(long, short = 'F', value_name = "PATTERN")]
+        filter: Option<String>,
+    },
+
+    /// Apply automatic field reordering to source files in-place
     Fix {
-        path: PathBuf,
+        /// Source files or directories to fix (binaries not supported)
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
         /// Show the diff without writing any files
         #[arg(long)]
         dry_run: bool,
+        /// Include only structs whose names match this regex pattern
+        #[arg(long, short = 'F', value_name = "PATTERN")]
+        filter: Option<String>,
     },
-    /// Generate a full report
+
+    /// Generate a full report (alias for analyze)
     Report {
-        path: PathBuf,
+        /// Paths to analyze: source files, binaries, or directories
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        filter: filter::FilterArgs,
     },
+
     /// Watch a file or directory and re-analyse on every change
     Watch {
         /// Path to watch (source file, binary, or directory)
@@ -65,11 +102,29 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Analyze { path, json, sarif } => commands::analyze::run(&path, json, sarif),
-        Commands::List { path } => commands::list::run(&path),
-        Commands::Diff { path } => commands::diff::run(&path),
-        Commands::Fix { path, dry_run } => commands::fix::run(&path, dry_run),
-        Commands::Report { path, json } => commands::analyze::run(&path, json, false),
+        Commands::Analyze {
+            paths,
+            json,
+            sarif,
+            filter,
+        } => commands::analyze::run(&paths, json, sarif, &filter),
+
+        Commands::List { paths, filter } => commands::list::run(&paths, &filter),
+
+        Commands::Diff { paths, filter } => commands::diff::run(&paths, filter.as_deref()),
+
+        Commands::Fix {
+            paths,
+            dry_run,
+            filter,
+        } => commands::fix::run(&paths, dry_run, filter.as_deref()),
+
+        Commands::Report {
+            paths,
+            json,
+            filter,
+        } => commands::analyze::run(&paths, json, false, &filter),
+
         Commands::Watch { path, json } => commands::watch::run(&path, json),
     }
 }

@@ -68,6 +68,10 @@ pub struct StructReport {
     pub source_file: Option<String>,
     pub source_line: Option<u32>,
     pub total_size: usize,
+    /// Number of data fields (excludes padding pseudo-fields).
+    pub num_fields: usize,
+    /// Number of byte-level padding gaps (holes) in the layout.
+    pub num_holes: usize,
     pub wasted_bytes: usize,
     pub score: f64,
     pub findings: Vec<Finding>,
@@ -78,6 +82,9 @@ pub struct Report {
     pub structs: Vec<StructReport>,
     pub total_structs: usize,
     pub total_wasted_bytes: usize,
+    /// Paths that were analyzed to produce this report (populated by the CLI).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub analyzed_paths: Vec<String>,
 }
 
 impl Report {
@@ -89,6 +96,7 @@ impl Report {
             total_structs: structs.len(),
             total_wasted_bytes,
             structs,
+            analyzed_paths: Vec::new(),
         }
     }
 }
@@ -98,6 +106,7 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
 
     // ── padding waste ────────────────────────────────────────────────────────
     let gaps = padding::find_padding(layout);
+    let num_holes = gaps.len();
     let wasted: usize = gaps.iter().map(|g| g.bytes).sum();
     // Unions: is_union suppresses padding at the find_padding level; no extra check needed.
     if wasted > 0 {
@@ -170,6 +179,8 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
         source_file: layout.source_file.clone(),
         source_line: layout.source_line,
         total_size: layout.total_size,
+        num_fields: layout.fields.len(),
+        num_holes,
         wasted_bytes: wasted,
         score,
         findings,

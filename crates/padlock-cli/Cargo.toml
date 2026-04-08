@@ -22,6 +22,7 @@ padlock-dwarf  = { path = "../padlock-dwarf",  version = "0.1.0" }
 padlock-source = { path = "../padlock-source", version = "0.1.0" }
 padlock-output = { path = "../padlock-output", version = "0.1.0" }
 serde_json     = "1"
+regex          = "1"
 anyhow         = "1"
 clap           = { version = "4", features = ["derive"] }
 owo-colors     = "4"

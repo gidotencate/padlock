@@ -16,6 +16,26 @@ Analyzed 2 structs — 10 bytes wasted across all structs
     (no issues found)
 ```
 
+When analyzing a directory or multiple files, structs are grouped under `── file ──` headers with per-struct line numbers:
+
+```
+$ padlock analyze src/
+
+Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
+
+── src/connection.rs ───────────────────────────────────────
+
+[✗] Connection :4  24B  fields=4  holes=2  score=33
+    [HIGH] Padding waste: 10B (41%) across 2 gap(s)
+    [HIGH] Reorder fields to save 8B → 16B: timeout, port, is_active, is_tls
+
+── src/stats.cpp ───────────────────────────────────────────
+
+[✗] Stats :12  96B  fields=4  score=55
+    [HIGH] False sharing: 1 cache-line conflict(s)
+    [MEDIUM] Locality: hot [read_mu, write_mu] interleaved with cold [read_count, write_count]
+```
+
 ---
 
 ## Features

@@ -575,7 +575,7 @@ checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
 name = "padlock-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rayon",
  "serde",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-dwarf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "gimli",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-output"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "padlock-core",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-source"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "padlock-core",

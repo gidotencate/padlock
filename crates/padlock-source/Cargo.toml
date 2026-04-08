@@ -9,7 +9,7 @@ keywords.workspace    = true
 categories.workspace  = true
 
 [dependencies]
-padlock-core    = { path = "../padlock-core", version = "0.1.0" }
+padlock-core    = { path = "../padlock-core", version = "0.2.0" }
 anyhow          = "1"
 syn             = { version = "2", features = ["full", "visit"] }
 quote           = "1"
@@ -20,4 +20,4 @@ tree-sitter-go  = "0.21"
 similar         = "2"
 
 [dev-dependencies]
-padlock-core = { path = "../padlock-core", version = "0.1.0", features = ["test-helpers"] }
+padlock-core = { path = "../padlock-core", version = "0.2.0", features = ["test-helpers"] }

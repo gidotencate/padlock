@@ -1,7 +1,5 @@
-name: 'padlock'
-description: >
-  Analyse struct memory layout of compiled binaries or source files for
-  padding waste, false sharing, and cache locality issues.
+name: 'padlock-action'
+description: 'Detect padding waste, false sharing, and cache locality problems in C, C++, Rust, and Go structs.'
 
 author: 'gidotencate'
 

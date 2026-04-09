@@ -1,4 +1,9 @@
 /target/
+
+# VS Code extension build output
+editors/vscode/out/
+editors/vscode/node_modules/
+editors/vscode/*.vsix
 # Cargo.lock is tracked for this CLI binary (reproducible builds).
 # Remove this comment and uncomment the line below only if converting to a library.
 # Cargo.lock

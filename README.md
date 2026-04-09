@@ -4,7 +4,9 @@
 [![CI](https://github.com/gidotencate/padlock/actions/workflows/ci.yml/badge.svg)](https://github.com/gidotencate/padlock/actions/workflows/ci.yml)
 [![License](https://img.shields.io/crates/l/padlock-cli.svg)](LICENSE)
 
-Struct memory layout analyzer for C, C++, Rust, and Go. Finds padding waste, false sharing, and cache locality problems — ranks findings by impact, generates reorder suggestions, and flags concurrency risks. CLI-first and CI-ready.
+**The lint pass for struct memory layout** — catches padding waste, false sharing, and cache locality problems at the source level, before they cost you at runtime.
+
+Supports C, C++, Rust, and Go. Ranks findings by impact, generates reorder suggestions, flags concurrency risks. CLI-first and CI-ready.
 
 ```
 $ padlock analyze src/connection.rs
@@ -654,6 +656,53 @@ See `.github/workflows/padlock-example.yml` for a full reference workflow includ
 
 ```bash
 padlock analyze src/ --json | jq '.structs[] | select(.score < 60)'
+```
+
+### Pre-commit hook
+
+Run padlock before every commit so layout regressions never reach the repo.
+
+**Plain git hook** — add to `.git/hooks/pre-commit` (and `chmod +x`):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Collect staged source files padlock understands
+FILES=$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -E '\.(c|cpp|cc|h|hpp|rs|go)$' || true)
+
+if [ -z "$FILES" ]; then
+  exit 0
+fi
+
+echo "padlock: checking struct layouts…"
+padlock analyze $FILES --fail-on-severity high
+```
+
+**[pre-commit](https://pre-commit.com) framework** — add to `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: padlock
+        name: padlock struct layout check
+        language: system
+        entry: padlock analyze
+        args: [--fail-on-severity, high]
+        types_or: [c, c++, rust]   # pre-commit passes matched files as arguments
+        pass_filenames: true
+```
+
+**[lefthook](https://github.com/evilmartians/lefthook)** — add to `lefthook.yml`:
+
+```yaml
+pre-commit:
+  commands:
+    padlock:
+      glob: "*.{c,cpp,h,rs,go}"
+      run: padlock analyze {staged_files} --fail-on-severity high
 ```
 
 ---

@@ -1,0 +1,88 @@
+{
+  "name": "padlock",
+  "displayName": "padlock",
+  "description": "The lint pass for struct memory layout — finds padding waste, false sharing, and cache locality problems in C, C++, Rust, and Go.",
+  "version": "0.5.4",
+  "publisher": "gidotencate",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gidotencate/padlock"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Linters"],
+  "keywords": ["rust", "c", "cpp", "go", "memory", "layout", "padding", "performance"],
+  "icon": "icon.png",
+  "activationEvents": [
+    "onLanguage:rust",
+    "onLanguage:c",
+    "onLanguage:cpp",
+    "onLanguage:go"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "padlock.analyzeFile",
+        "title": "padlock: Analyze current file"
+      },
+      {
+        "command": "padlock.analyzeWorkspace",
+        "title": "padlock: Analyze workspace"
+      },
+      {
+        "command": "padlock.fixFile",
+        "title": "padlock: Apply fix (reorder fields)"
+      },
+      {
+        "command": "padlock.clearDiagnostics",
+        "title": "padlock: Clear findings"
+      }
+    ],
+    "configuration": {
+      "title": "padlock",
+      "properties": {
+        "padlock.executable": {
+          "type": "string",
+          "default": "padlock",
+          "description": "Path to the padlock executable. Defaults to 'padlock' (must be on PATH). Set to an absolute path if needed."
+        },
+        "padlock.runOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically run padlock when a supported file is saved."
+        },
+        "padlock.severity": {
+          "type": "string",
+          "enum": ["high", "medium", "low"],
+          "enumDescriptions": [
+            "Show only High-severity findings (padding waste ≥30%, false sharing)",
+            "Show High and Medium findings",
+            "Show all findings"
+          ],
+          "default": "high",
+          "description": "Minimum severity level to show in the Problems panel."
+        },
+        "padlock.extraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra arguments passed to every padlock analyze invocation (e.g. [\"--min-size\", \"16\"])."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.24.0"
+  }
+}

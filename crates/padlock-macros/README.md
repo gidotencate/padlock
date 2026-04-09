@@ -1,6 +1,6 @@
 # padlock-macros
 
-Compile-time struct layout assertions for [padlock](https://github.com/gidotencate/padlock).
+Compile-time struct layout assertions for [padlock](https://github.com/gidotencate/padlock) — the lint pass for struct memory layout.
 
 This crate provides two proc-macro attributes that turn layout regressions into compile errors.
 

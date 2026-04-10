@@ -10,7 +10,7 @@ use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
 
 // ── BTF constants ─────────────────────────────────────────────────────────────
 
-const BTF_MAGIC: u16 = 0xeB9F;
+const BTF_MAGIC: u16 = 0xEB9F;
 const BTF_KIND_INT: u32 = 1;
 const BTF_KIND_PTR: u32 = 2;
 const BTF_KIND_ARRAY: u32 = 3;
@@ -44,9 +44,7 @@ struct BtfHeader {
 
 #[derive(Debug, Clone)]
 struct RawBtfType {
-    name_off: u32,
     info: u32,
-    size_or_type: u32,
 }
 
 impl RawBtfType {
@@ -163,11 +161,7 @@ impl<'a> BtfParser<'a> {
             let size_or_type = u32::from_le_bytes(type_data[off + 8..off + 12].try_into()?);
             off += 12;
 
-            let raw = RawBtfType {
-                name_off,
-                info,
-                size_or_type,
-            };
+            let raw = RawBtfType { info };
             let name = read_btf_str(str_data, name_off as usize);
             let kind = raw.kind();
             let vlen = raw.vlen() as usize;

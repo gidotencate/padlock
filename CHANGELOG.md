@@ -2,6 +2,15 @@
 
 All notable changes to padlock are documented here.
 
+## [0.6.2] — 2026-04-10
+
+### Fixed
+- `cargo clippy`: mixed-case hex literal (`0xeB9F` → `0xEB9F`), unused `RawBtfType` fields, two `collapsible_if` patterns in `zig.rs`
+- Release workflow: added a `create-release` job so the GitHub release is created once before the matrix build jobs run, eliminating the `already_exists` race condition when multiple platform builds finish simultaneously
+
+### Changed
+- VS Code extension version aligned to `0.6.2` to match the Rust crates
+
 ## [0.6.1] — 2026-04-10
 
 ### Changed

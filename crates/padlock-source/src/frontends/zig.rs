@@ -103,10 +103,10 @@ fn parse_array_type(
 
 fn find_child_by_kinds<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
     for i in 0..node.child_count() {
-        if let Some(c) = node.child(i) {
-            if kinds.contains(&c.kind()) {
-                return Some(c);
-            }
+        if let Some(c) = node.child(i)
+            && kinds.contains(&c.kind())
+        {
+            return Some(c);
         }
     }
     None
@@ -139,10 +139,10 @@ fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> V
             }
         }
 
-        if node.kind() == "variable_declaration" {
-            if let Some(layout) = parse_variable_declaration(source, node, arch) {
-                layouts.push(layout);
-            }
+        if node.kind() == "variable_declaration"
+            && let Some(layout) = parse_variable_declaration(source, node, arch)
+        {
+            layouts.push(layout);
         }
     }
     layouts

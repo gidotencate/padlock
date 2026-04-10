@@ -149,7 +149,15 @@ fn main() -> anyhow::Result<()> {
             cache_line_size,
             word_size,
             filter,
-        } => commands::analyze::run(&paths, json, sarif, markdown, cache_line_size, word_size, &filter),
+        } => commands::analyze::run(
+            &paths,
+            json,
+            sarif,
+            markdown,
+            cache_line_size,
+            word_size,
+            &filter,
+        ),
 
         Commands::List { paths, filter } => commands::list::run(&paths, &filter),
 

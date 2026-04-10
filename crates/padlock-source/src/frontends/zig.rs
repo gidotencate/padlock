@@ -31,11 +31,7 @@ fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
 }
 
 /// Determine size/align of a type node, dispatching by node kind.
-fn type_node_size_align(
-    source: &str,
-    node: Node<'_>,
-    arch: &'static ArchConfig,
-) -> (usize, usize) {
+fn type_node_size_align(source: &str, node: Node<'_>, arch: &'static ArchConfig) -> (usize, usize) {
     match node.kind() {
         "builtin_type" | "identifier" => {
             let text = source[node.byte_range()].trim();

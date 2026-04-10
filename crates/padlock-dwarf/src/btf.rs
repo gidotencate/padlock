@@ -197,12 +197,9 @@ impl<'a> BtfParser<'a> {
                         if off + 12 > type_data.len() {
                             break;
                         }
-                        let m_name_off =
-                            u32::from_le_bytes(type_data[off..off + 4].try_into()?);
-                        let m_type =
-                            u32::from_le_bytes(type_data[off + 4..off + 8].try_into()?);
-                        let m_offset =
-                            u32::from_le_bytes(type_data[off + 8..off + 12].try_into()?);
+                        let m_name_off = u32::from_le_bytes(type_data[off..off + 4].try_into()?);
+                        let m_type = u32::from_le_bytes(type_data[off + 4..off + 8].try_into()?);
+                        let m_offset = u32::from_le_bytes(type_data[off + 8..off + 12].try_into()?);
                         off += 12;
 
                         let (bit_offset, bitfield_size) = if raw.kind_flag() {
@@ -227,9 +224,7 @@ impl<'a> BtfParser<'a> {
                 }
                 BTF_KIND_ENUM => {
                     off += vlen * 8; // each enum value = name_off(4) + val(4)
-                    BtfType::Enum {
-                        size: size_or_type,
-                    }
+                    BtfType::Enum { size: size_or_type }
                 }
                 BTF_KIND_TYPEDEF => BtfType::Typedef {
                     type_id: size_or_type,
@@ -237,14 +232,10 @@ impl<'a> BtfParser<'a> {
                 BTF_KIND_VOLATILE | BTF_KIND_CONST | BTF_KIND_RESTRICT => BtfType::Qualifier {
                     type_id: size_or_type,
                 },
-                BTF_KIND_FLOAT => BtfType::Float {
-                    size: size_or_type,
-                },
+                BTF_KIND_FLOAT => BtfType::Float { size: size_or_type },
                 BTF_KIND_ENUM64 => {
                     off += vlen * 12; // each enum64 value = name_off(4) + val_lo(4) + val_hi(4)
-                    BtfType::Enum {
-                        size: size_or_type,
-                    }
+                    BtfType::Enum { size: size_or_type }
                 }
                 // Kinds with no extra bytes beyond the 12-byte header
                 BTF_KIND_FWD | BTF_KIND_FUNC | BTF_KIND_TYPE_TAG => BtfType::Unknown,
@@ -294,9 +285,7 @@ impl<'a> BtfParser<'a> {
                 *size as usize
             }
             BtfType::Ptr => self.arch.pointer_size,
-            BtfType::Array { elem_type, nelems } => {
-                self.type_size(*elem_type) * (*nelems as usize)
-            }
+            BtfType::Array { elem_type, nelems } => self.type_size(*elem_type) * (*nelems as usize),
             BtfType::Struct { size, .. } => *size as usize,
             BtfType::Typedef { type_id } | BtfType::Qualifier { type_id } => {
                 self.type_size(*type_id)
@@ -393,8 +382,7 @@ impl<'a> BtfParser<'a> {
                         let storage_size = self.type_size(member.type_id).max(1);
                         // Align the bit offset down to the nearest storage-unit boundary.
                         let storage_bits = (storage_size * 8) as u32;
-                        let unit_start_bit =
-                            (member.bit_offset / storage_bits) * storage_bits;
+                        let unit_start_bit = (member.bit_offset / storage_bits) * storage_bits;
                         let unit_byte_offset = (unit_start_bit / 8) as usize;
                         let unit_end = unit_byte_offset + storage_size;
 
@@ -650,7 +638,8 @@ mod tests {
         let hdr_len: u32 = 24;
         let mut btf = Vec::new();
         btf.extend_from_slice(&BTF_MAGIC.to_le_bytes());
-        btf.push(1); btf.push(0);
+        btf.push(1);
+        btf.push(0);
         btf.extend_from_slice(&hdr_len.to_le_bytes());
         btf.extend_from_slice(&0u32.to_le_bytes());
         btf.extend_from_slice(&type_len.to_le_bytes());

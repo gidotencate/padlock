@@ -252,10 +252,7 @@ pub fn find_zig_struct_span(source: &str, struct_name: &str) -> Option<std::ops:
             // (beyond optional packed/extern modifiers)
             let prefix = &after_eq_rest[..struct_rel];
             let prefix_clean = prefix.trim();
-            if prefix_clean.is_empty()
-                || prefix_clean == "packed"
-                || prefix_clean == "extern"
-            {
+            if prefix_clean.is_empty() || prefix_clean == "packed" || prefix_clean == "extern" {
                 let struct_kw_end = after_eq + struct_rel + "struct".len();
                 if let Some(brace_rel) = source[struct_kw_end..].find('{') {
                     let brace_start = struct_kw_end + brace_rel;
@@ -468,6 +465,9 @@ mod tests {
         // b (u64, align 8) should come before a (u8)
         let b_pos = fixed.find("b:").unwrap();
         let a_pos = fixed.find("a:").unwrap();
-        assert!(b_pos < a_pos, "u64 field should come before u8 after reorder");
+        assert!(
+            b_pos < a_pos,
+            "u64 field should come before u8 after reorder"
+        );
     }
 }

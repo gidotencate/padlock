@@ -9,7 +9,11 @@ use padlock_core::findings::{Finding, Report, Severity, StructReport};
 pub fn to_markdown(report: &Report) -> String {
     let mut out = String::new();
 
-    let struct_word = if report.total_structs == 1 { "struct" } else { "structs" };
+    let struct_word = if report.total_structs == 1 {
+        "struct"
+    } else {
+        "structs"
+    };
     if report.total_wasted_bytes > 0 {
         out.push_str(&format!(
             "# padlock: {} {}, {} bytes wasted\n\n",

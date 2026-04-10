@@ -11,7 +11,7 @@ Several tools address struct layout and memory performance, but they have differ
 | Tool | Languages | Scope | Source? | Binary? | CI output | False sharing | Auto-fix |
 |---|---|---|---|---|---|---|---|
 | **padlock** | C, C++, Rust, Go, Zig | Layout waste, false sharing, locality | ✓ | ✓ (DWARF/PDB/BTF) | JSON, SARIF, Markdown | ✓ | ✓ (diff) |
-| `pahole` | Any (DWARF) | Struct holes, reorder | — | ✓ | Text only | — | Text only (`--reorganize`) |
+| `pahole` | Any (DWARF/BTF) | Struct holes, reorder, BTF encode/decode | — | ✓ | Text only | — | Text only (`--reorganize`) |
 | `offsetof` / `sizeof` | Any | Size inspection | — | — | — | — | — |
 | Clang `-Wpadded` | C, C++ | Padding warning | ✓ | — | Compiler diag | — | — |
 | `cargo-geiger` | Rust | Unsafe usage | ✓ | — | — | — | — |
@@ -30,12 +30,15 @@ Several tools address struct layout and memory performance, but they have differ
 
 **Where the tools genuinely overlap:**
 
-Both tools, given a compiled binary with DWARF:
+Both tools, given a compiled binary with DWARF or BTF:
 - Show field offsets, sizes, and padding gaps
 - Can suggest reordered layouts (`pahole --reorganize` / `padlock diff`)
 - Work across any language that produced DWARF
+- Read BTF from eBPF object files
 
 So for the binary-analysis path on C/C++ programs, the capabilities are substantially similar.
+
+**A note on BTF:** pahole has deep BTF integration — it is the canonical tool for *generating* BTF from DWARF (used in the Linux kernel build system via `CONFIG_DEBUG_INFO_BTF`) and can encode/decode BTF in ways padlock does not attempt. padlock's BTF support reads the `.BTF` ELF section from eBPF objects and applies its analysis pipeline (padding, false sharing, scoring, CI output) to the extracted layouts — useful for eBPF developers who want actionable findings rather than raw type dumps.
 
 **Where padlock differentiates:**
 
@@ -55,12 +58,14 @@ So for the binary-analysis path on C/C++ programs, the capabilities are substant
 | Compile-time assertions | — | ✓ (`#[assert_no_padding]`) |
 | Watch mode | — | ✓ |
 | Cargo subcommand | — | ✓ (`cargo padlock`) |
+| eBPF BTF analysis (padding/false-sharing) | — | ✓ |
 | Exact compiler-verified layout | ✓ | Binary only |
-| Linux kernel / driver use | ✓ | — |
+| BTF generation from DWARF (kernel build) | ✓ | — |
+| Linux kernel / driver use | ✓ | supplementary |
 
-**When to use pahole:** forensic investigation of compiled C/C++ or kernel binaries where you need exact, compiler-verified layout and are already in a DWARF-centric workflow.
+**When to use pahole:** forensic investigation of compiled C/C++ or kernel binaries; generating BTF for the Linux kernel build; raw DWARF/BTF type dumps; environments where you are already deep in a kernel-centric workflow.
 
-**When to use padlock:** development-time feedback, multi-language codebases, CI layout gates, false-sharing detection, or any workflow where source analysis (no build required) or actionable output (diffs, patches, SARIF) matters.
+**When to use padlock:** development-time feedback, multi-language codebases, CI layout gates, false-sharing detection, eBPF struct analysis with actionable output, or any workflow where source analysis (no build required) or structured output (diffs, patches, SARIF, Markdown) matters.
 
 ---
 
@@ -70,7 +75,7 @@ Clang's `-Wpadded` warns about padding when compiling C/C++. It is accurate (com
 - Requires compilation (slow in CI, not useful without a compiler)
 - Only warns — no suggested fix, no diff, no scoring
 - No false-sharing detection
-- No Rust/Go support
+- No Rust/Go/Zig support
 
 padlock is not a replacement but a complement: use `-Wpadded` for C/C++ when you want compiler-verified accuracy; use padlock for multi-language source scanning and actionable output.
 
@@ -90,7 +95,7 @@ padlock is a *static* tool: it finds issues before runtime, across all structs i
 
 ```
 Write code  →  padlock (pre-commit, editor)   — catch layout issues immediately
-            →  CI (SARIF / JSON)              — enforce layout quality in PRs
+            →  CI (SARIF / JSON / Markdown)   — enforce layout quality in PRs
             →  Compilation (-Wpadded)         — catch anything padlock missed
             →  Testing (unit/integration)     — ensure correctness
             →  Profiling (VTune/Perf)         — measure real-world cache impact
@@ -109,11 +114,12 @@ padlock is most valuable at the **earliest stages** (editor/pre-commit) and in *
 
 **Yes**, if you:
 - Have structs that are accessed in hot loops or allocated in large numbers
-- Work across C, C++, Rust, and Go in the same codebase
+- Work across C, C++, Rust, Go, or Zig in the same codebase
 - Want layout quality enforced in CI without running the full compiler
 - Have concurrent data structures and want automatic false-sharing detection
+- Write eBPF programs and want padding/false-sharing analysis on your BTF objects
 
 **No** (or low priority), if you:
 - Only write C/C++, work exclusively with compiled binaries, and are already satisfied with `pahole` + `-Wpadded`
 - Have very few structs and performance is not a concern
-- Need exact compiler-verified layout for kernel/driver work (use pahole + compiler for that path; padlock's binary analysis is supplementary)
+- Need BTF *generation* from DWARF for the Linux kernel build system — that is pahole's domain

@@ -32,7 +32,7 @@ pub fn run(paths: &[PathBuf], dry_run: bool, filter: Option<&str>) -> anyhow::Re
 fn fix_file(path: &Path, dry_run: bool, re: Option<&regex::Regex>) -> anyhow::Result<()> {
     let lang = padlock_source::detect_language(path).ok_or_else(|| {
         anyhow::anyhow!(
-            "fix only works on source files (.c, .cpp, .rs, .go); got {}",
+            "fix only works on source files (.c, .cpp, .rs, .go, .zig); got {}",
             path.display()
         )
     })?;
@@ -81,12 +81,15 @@ fn fix_file(path: &Path, dry_run: bool, re: Option<&regex::Regex>) -> anyhow::Re
                     .map(|r| source[r].to_string()),
                 SourceLanguage::Go => fixgen::find_go_struct_span(&source, &layout.name)
                     .map(|r| source[r].to_string()),
+                SourceLanguage::Zig => fixgen::find_zig_struct_span(&source, &layout.name)
+                    .map(|r| source[r].to_string()),
             };
 
         let new_text = match lang {
             SourceLanguage::C | SourceLanguage::Cpp => fixgen::generate_c_fix(layout),
             SourceLanguage::Rust => fixgen::generate_rust_fix(layout),
             SourceLanguage::Go => fixgen::generate_go_fix(layout),
+            SourceLanguage::Zig => fixgen::generate_zig_fix(layout),
         };
 
         let diff_base = old_text.as_deref().unwrap_or(&source);
@@ -111,6 +114,7 @@ fn fix_file(path: &Path, dry_run: bool, re: Option<&regex::Regex>) -> anyhow::Re
         SourceLanguage::C | SourceLanguage::Cpp => fixgen::apply_fixes_c(&source, &layouts_to_fix),
         SourceLanguage::Rust => fixgen::apply_fixes_rust(&source, &layouts_to_fix),
         SourceLanguage::Go => fixgen::apply_fixes_go(&source, &layouts_to_fix),
+        SourceLanguage::Zig => fixgen::apply_fixes_zig(&source, &layouts_to_fix),
     };
 
     std::fs::write(path, &fixed_source)?;
@@ -133,7 +137,7 @@ fn expand_to_source_files(paths: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
             files.push(path.clone());
         } else {
             anyhow::bail!(
-                "fix only works on source files (.c, .cpp, .rs, .go) or directories; got {}",
+                "fix only works on source files (.c, .cpp, .rs, .go, .zig) or directories; got {}",
                 path.display()
             );
         }

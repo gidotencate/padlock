@@ -51,11 +51,16 @@ pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, 
             analyzed.push(path.display().to_string());
             all_layouts.extend(layouts);
         } else {
-            // Binary — analyze via DWARF.
+            // Binary — try BTF first (eBPF objects), then fall back to DWARF.
             let data = std::fs::read(path)?;
-            let dwarf = padlock_dwarf::reader::load(&data)?;
-            let arch = padlock_dwarf::reader::detect_arch(&data)?;
-            let layouts = padlock_dwarf::extractor::Extractor::new(&dwarf, arch).extract_all()?;
+            let arch = padlock_dwarf::reader::detect_arch(&data)
+                .unwrap_or_else(|_| padlock_dwarf::reader::detect_arch_from_host());
+            let layouts = if has_btf_section(&data) {
+                extract_btf_layouts(&data, arch)?
+            } else {
+                let dwarf = padlock_dwarf::reader::load(&data)?;
+                padlock_dwarf::extractor::Extractor::new(&dwarf, arch).extract_all()?
+            };
             analyzed.push(path.display().to_string());
             all_layouts.extend(layouts);
         }
@@ -97,6 +102,28 @@ fn walk_inner(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Returns `true` if the binary data contains a `.BTF` ELF section.
+fn has_btf_section(data: &[u8]) -> bool {
+    use object::Object;
+    object::File::parse(data)
+        .map(|f| f.section_by_name(".BTF").is_some())
+        .unwrap_or(false)
+}
+
+/// Extract struct layouts from the `.BTF` section of a binary.
+fn extract_btf_layouts(
+    data: &[u8],
+    arch: &'static padlock_core::arch::ArchConfig,
+) -> anyhow::Result<Vec<padlock_core::ir::StructLayout>> {
+    use object::{Object, ObjectSection};
+    let obj = object::File::parse(data)?;
+    let section = obj
+        .section_by_name(".BTF")
+        .ok_or_else(|| anyhow::anyhow!("no .BTF section"))?;
+    let btf_data = section.data()?;
+    padlock_dwarf::btf::extract_from_btf(btf_data, arch)
 }
 
 fn should_skip_dir(name: &str) -> bool {

@@ -53,6 +53,31 @@ pub const RISCV64: ArchConfig = ArchConfig {
     endianness: Endianness::Little,
 };
 
+/// Create a custom `ArchConfig` by overriding specific fields of a base arch.
+///
+/// Useful for `--cache-line-size` and `--word-size` CLI overrides.
+/// The returned reference is intentionally leaked — CLI binaries are short-lived.
+pub fn with_overrides(
+    base: &ArchConfig,
+    cache_line_size: Option<usize>,
+    word_size: Option<usize>,
+) -> &'static ArchConfig {
+    let ptr = word_size.unwrap_or(base.pointer_size);
+    let max_align = if word_size.is_some() {
+        // 32-bit targets typically cap natural alignment at 8; 64-bit at 16
+        if ptr <= 4 { 8 } else { base.max_align }
+    } else {
+        base.max_align
+    };
+    Box::leak(Box::new(ArchConfig {
+        name: "custom",
+        pointer_size: ptr,
+        cache_line_size: cache_line_size.unwrap_or(base.cache_line_size),
+        max_align,
+        endianness: base.endianness,
+    }))
+}
+
 /// Resolve an architecture name string to a static `ArchConfig` reference.
 ///
 /// Accepted values: `x86_64`, `aarch64`, `aarch64_apple`, `wasm32`, `riscv64`.

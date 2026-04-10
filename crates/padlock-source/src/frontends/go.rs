@@ -259,7 +259,7 @@ fn collect_field_declarations(
 
 pub fn parse_go(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_go::language())?;
+    parser.set_language(&tree_sitter_go::LANGUAGE.into())?;
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter-go parse failed"))?;

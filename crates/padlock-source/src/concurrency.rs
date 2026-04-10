@@ -71,6 +71,12 @@ fn is_concurrent_type(name: &str, lang: &SourceLanguage) -> bool {
                 || name == "RWMutex"
                 || name.contains("atomic")
         }
+        SourceLanguage::Zig => {
+            name.contains("Mutex")
+                || name.contains("RwLock")
+                || name.contains("atomic.Value")
+                || name.contains("Atomic")
+        }
     }
 }
 
@@ -79,6 +85,7 @@ fn is_atomic_type(name: &str, lang: &SourceLanguage) -> bool {
         SourceLanguage::Rust => name.contains("Atomic"),
         SourceLanguage::C | SourceLanguage::Cpp => name.contains("atomic"),
         SourceLanguage::Go => name.contains("atomic"),
+        SourceLanguage::Zig => name.contains("atomic.Value") || name.contains("Atomic"),
     }
 }
 
@@ -89,6 +96,7 @@ fn is_read_mostly_type(name: &str, lang: &SourceLanguage) -> bool {
             name.contains("rwlock") || name.contains("shared_mutex")
         }
         SourceLanguage::Go => name == "sync.RWMutex" || name == "RWMutex",
+        SourceLanguage::Zig => name.contains("RwLock"),
     }
 }
 

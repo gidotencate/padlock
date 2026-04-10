@@ -35,7 +35,7 @@ struct Cli {
 enum Commands {
     /// Analyze one or more files or directories for struct layout issues
     Analyze {
-        /// Paths to analyze: source files (.c .cpp .rs .go), binaries, or directories
+        /// Paths to analyze: source files (.c .cpp .rs .go .zig), binaries, or directories
         #[arg(num_args = 1.., value_name = "PATH")]
         paths: Vec<PathBuf>,
         /// Output as JSON
@@ -44,6 +44,15 @@ enum Commands {
         /// Output as SARIF (for CI / GitHub Code Scanning annotations)
         #[arg(long)]
         sarif: bool,
+        /// Output as Markdown (suitable for CI step summaries or PR comment bots)
+        #[arg(long)]
+        markdown: bool,
+        /// Override the cache-line size in bytes (e.g. 128 for Apple Silicon or POWER)
+        #[arg(long, value_name = "BYTES")]
+        cache_line_size: Option<usize>,
+        /// Override the pointer/word size in bytes (e.g. 4 for 32-bit targets)
+        #[arg(long, value_name = "BYTES")]
+        word_size: Option<usize>,
         #[command(flatten)]
         filter: filter::FilterArgs,
     },
@@ -136,8 +145,11 @@ fn main() -> anyhow::Result<()> {
             paths,
             json,
             sarif,
+            markdown,
+            cache_line_size,
+            word_size,
             filter,
-        } => commands::analyze::run(&paths, json, sarif, &filter),
+        } => commands::analyze::run(&paths, json, sarif, markdown, cache_line_size, word_size, &filter),
 
         Commands::List { paths, filter } => commands::list::run(&paths, &filter),
 
@@ -153,7 +165,7 @@ fn main() -> anyhow::Result<()> {
             paths,
             json,
             filter,
-        } => commands::analyze::run(&paths, json, false, &filter),
+        } => commands::analyze::run(&paths, json, false, false, None, None, &filter),
 
         Commands::Watch { path, json } => commands::watch::run(&path, json),
 

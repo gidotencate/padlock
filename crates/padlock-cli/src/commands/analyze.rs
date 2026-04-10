@@ -8,7 +8,15 @@ use crate::config::Config;
 use crate::filter::FilterArgs;
 use crate::paths::collect_layouts;
 
-pub fn run(paths: &[PathBuf], json: bool, sarif: bool, filter: &FilterArgs) -> anyhow::Result<()> {
+pub fn run(
+    paths: &[PathBuf],
+    json: bool,
+    sarif: bool,
+    markdown: bool,
+    cache_line_size: Option<usize>,
+    word_size: Option<usize>,
+    filter: &FilterArgs,
+) -> anyhow::Result<()> {
     // Load config by searching upward from the first supplied path.
     let cfg = Config::for_path(
         paths
@@ -28,6 +36,14 @@ pub fn run(paths: &[PathBuf], json: bool, sarif: bool, filter: &FilterArgs) -> a
         });
         for layout in &mut layouts {
             layout.arch = arch;
+        }
+    }
+
+    // Apply --cache-line-size / --word-size overrides per layout.
+    if cache_line_size.is_some() || word_size.is_some() {
+        for layout in &mut layouts {
+            layout.arch =
+                padlock_core::arch::with_overrides(layout.arch, cache_line_size, word_size);
         }
     }
 
@@ -58,6 +74,8 @@ pub fn run(paths: &[PathBuf], json: bool, sarif: bool, filter: &FilterArgs) -> a
         println!("{}", padlock_output::to_sarif(&report)?);
     } else if json {
         println!("{}", padlock_output::to_json(&report)?);
+    } else if markdown {
+        print!("{}", padlock_output::to_markdown(&report));
     } else {
         print!("{}", padlock_output::render_report(&report));
     }

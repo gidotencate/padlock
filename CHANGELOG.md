@@ -2,6 +2,19 @@
 
 All notable changes to padlock are documented here.
 
+## [0.6.0] — 2026-04-10
+
+### Added
+- **Zig source frontend**: struct layouts extracted from `.zig` files via `tree-sitter-zig`. Handles regular, `packed`, and `extern` structs; resolves built-in types (`u8`–`u128`, `i8`–`i128`, `f16`–`f128`, `usize`, `isize`, `bool`, `void`), pointers, optionals (`?T`), slices (`[]T`), arrays (`[N]T`), and error unions. Concurrency heuristics detect `std.Thread.Mutex`, `std.Thread.RwLock`, `std.atomic.Value`, and `Atomic` wrappers. Fix generation not yet supported for Zig.
+- **BTF binary frontend**: pure-Rust parser for the BPF Type Format (`.BTF` ELF section) present in Linux eBPF object files. Handles all stable BTF kinds (`INT`, `PTR`, `ARRAY`, `STRUCT`, `UNION`, `ENUM`, `TYPEDEF`, `VOLATILE`, `CONST`, `RESTRICT`, `FLOAT`, `ENUM64`) and gracefully skips modern kinds (`FUNC`, `FUNC_PROTO`, `VAR`, `DATASEC`, `DECL_TAG`, `TYPE_TAG`, `FWD`) without aborting. Bitfield members are represented as synthetic storage-unit fields (`flags__bits: u32`) so their byte-level footprint is preserved for padding analysis — consecutive bitfields sharing the same storage unit produce a single synthetic field. Packed structs detected automatically from size vs. natural-aligned size. Automatically preferred over DWARF when a `.BTF` section is present (`padlock analyze my.bpf.o`).
+- **`--cache-line-size <N>`**: override the assumed cache-line size (bytes) for the analysis, independent of the target architecture. Useful for analysing structs for non-standard hardware or comparing AMD (64-byte) vs Apple Silicon (128-byte) behaviour.
+- **`--word-size <N>`**: override pointer/word size (bytes) for cross-architecture analysis (e.g. `--word-size 4` for 32-bit targets).
+- **`--markdown` output format**: `padlock analyze --markdown` emits a GitHub-Flavored Markdown report with score emoji, severity badges (🔴/🟡/🔵), and per-struct GFM tables.
+- **GitHub Action `output-format: markdown`**: when set, the markdown report is appended to `$GITHUB_STEP_SUMMARY` so findings appear on the workflow summary page without leaving the Actions UI.
+
+### Changed
+- `tree-sitter` upgraded from `0.22` to `0.23`; grammar crates updated to matching versions (`tree-sitter-c 0.23`, `tree-sitter-cpp 0.23`, `tree-sitter-go 0.23`). Language initialisation now uses the `LANGUAGE.into()` API instead of the deprecated `language()` function.
+
 ## [0.5.3] — 2026-04-09
 
 ### Fixed

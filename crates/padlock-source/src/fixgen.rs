@@ -213,6 +213,73 @@ pub fn apply_fixes_go(source: &str, layouts: &[&StructLayout]) -> String {
     apply_fixes(source, layouts, find_go_struct_span, generate_go_fix)
 }
 
+/// Render a reordered Zig struct definition as source text.
+/// Zig structs are declared as `const Name = struct { ... };`.
+/// If the layout is packed, the output uses `packed struct`.
+pub fn generate_zig_fix(layout: &StructLayout) -> String {
+    let optimal = optimal_order(layout);
+    let qualifier = if layout.is_packed { "packed " } else { "" };
+    let mut out = format!("const {} = {}struct {{\n", layout.name, qualifier);
+    for field in &optimal {
+        let ty = field_type_name(field);
+        out.push_str(&format!("    {}: {ty},\n", field.name));
+    }
+    out.push_str("};\n");
+    out
+}
+
+/// Find the byte range of a named Zig struct in source.
+/// Matches `const Name = [packed|extern ]struct { ... };`.
+pub fn find_zig_struct_span(source: &str, struct_name: &str) -> Option<std::ops::Range<usize>> {
+    // Match `const Name =` (with optional whitespace variations)
+    let needle = format!("const {struct_name}");
+    let mut search_from = 0usize;
+    while let Some(rel) = source[search_from..].find(&needle) {
+        let start = search_from + rel;
+        let after_name = start + needle.len();
+        // Must be followed by whitespace then `=`
+        let rest = source[after_name..].trim_start();
+        if !rest.starts_with('=') {
+            search_from = start + 1;
+            continue;
+        }
+        // Find `struct` keyword after `=`
+        let after_eq = after_name + source[after_name..].find('=')? + 1;
+        let after_eq_rest = &source[after_eq..];
+        // Skip optional `packed` or `extern` modifiers
+        if let Some(struct_rel) = after_eq_rest.find("struct") {
+            // Check no non-whitespace/identifier characters between = and struct
+            // (beyond optional packed/extern modifiers)
+            let prefix = &after_eq_rest[..struct_rel];
+            let prefix_clean = prefix.trim();
+            if prefix_clean.is_empty()
+                || prefix_clean == "packed"
+                || prefix_clean == "extern"
+            {
+                let struct_kw_end = after_eq + struct_rel + "struct".len();
+                if let Some(brace_rel) = source[struct_kw_end..].find('{') {
+                    let brace_start = struct_kw_end + brace_rel;
+                    if source[struct_kw_end..brace_start]
+                        .chars()
+                        .all(|c| c.is_whitespace())
+                        && let Some(body_len) = match_braces(&source[brace_start..])
+                    {
+                        let end = consume_semicolon(source, brace_start + body_len);
+                        return Some(start..end);
+                    }
+                }
+            }
+        }
+        search_from = start + 1;
+    }
+    None
+}
+
+/// Apply Zig struct reorderings in-place, returning the modified source.
+pub fn apply_fixes_zig(source: &str, layouts: &[&StructLayout]) -> String {
+    apply_fixes(source, layouts, find_zig_struct_span, generate_zig_fix)
+}
+
 fn apply_fixes(
     source: &str,
     layouts: &[&StructLayout],
@@ -361,5 +428,46 @@ mod tests {
         let out = generate_go_fix(&layout);
         assert!(out.starts_with("type Connection struct"));
         assert!(out.contains('\t'));
+    }
+
+    #[test]
+    fn zig_fix_uses_const_struct_syntax() {
+        let out = generate_zig_fix(&connection_layout());
+        assert!(out.starts_with("const Connection = struct {"));
+        assert!(out.ends_with("};\n"));
+    }
+
+    #[test]
+    fn find_zig_struct_span_basic() {
+        let src = "const S = struct {\n    x: u32,\n    y: u8,\n};\n";
+        let span = find_zig_struct_span(src, "S").unwrap();
+        assert!(src[span].starts_with("const S = struct"));
+    }
+
+    #[test]
+    fn find_zig_struct_span_packed() {
+        let src = "const S = packed struct {\n    x: u32,\n    y: u8,\n};\n";
+        let span = find_zig_struct_span(src, "S").unwrap();
+        assert!(src[span].contains("packed struct"));
+    }
+
+    #[test]
+    fn find_zig_struct_span_missing_returns_none() {
+        let src = "const Other = struct { x: u8 };\n";
+        assert!(find_zig_struct_span(src, "Missing").is_none());
+    }
+
+    #[test]
+    fn apply_fixes_zig_reorders_in_place() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let src = "const S = struct {\n    a: u8,\n    b: u64,\n};\n";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Zig, &X86_64_SYSV).unwrap();
+        let layout = &layouts[0];
+        let fixed = apply_fixes_zig(src, &[layout]);
+        // b (u64, align 8) should come before a (u8)
+        let b_pos = fixed.find("b:").unwrap();
+        let a_pos = fixed.find("a:").unwrap();
+        assert!(b_pos < a_pos, "u64 field should come before u8 after reorder");
     }
 }

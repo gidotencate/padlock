@@ -16,6 +16,7 @@ pub enum SourceLanguage {
     Cpp,
     Rust,
     Go,
+    Zig,
 }
 
 /// Detect language from file extension.
@@ -25,6 +26,7 @@ pub fn detect_language(path: &Path) -> Option<SourceLanguage> {
         Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") => Some(SourceLanguage::Cpp),
         Some("rs") => Some(SourceLanguage::Rust),
         Some("go") => Some(SourceLanguage::Go),
+        Some("zig") => Some(SourceLanguage::Zig),
         _ => None,
     }
 }
@@ -53,6 +55,7 @@ pub fn parse_source_str(
         SourceLanguage::Cpp => frontends::c_cpp::parse_cpp(source, arch)?,
         SourceLanguage::Rust => frontends::rust::parse_rust(source, arch)?,
         SourceLanguage::Go => frontends::go::parse_go(source, arch)?,
+        SourceLanguage::Zig => frontends::zig::parse_zig(source, arch)?,
     };
 
     // Resolve fields whose type names match other structs in this file.
@@ -295,6 +298,14 @@ mod tests {
         assert_eq!(
             detect_language(Path::new("foo.go")),
             Some(SourceLanguage::Go)
+        );
+    }
+
+    #[test]
+    fn detect_zig_extension() {
+        assert_eq!(
+            detect_language(Path::new("foo.zig")),
+            Some(SourceLanguage::Zig)
         );
     }
 

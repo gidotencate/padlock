@@ -2,7 +2,7 @@
 
 ## Tool Landscape
 
-Several tools address struct layout and memory performance, but they have different scopes, languages, and integration points. padlock occupies a specific niche: **static, source-level layout analysis across four languages with CI-ready output**.
+Several tools address struct layout and memory performance, but they have different scopes, languages, and integration points. padlock occupies a specific niche: **static, source-level layout analysis across five languages with CI-ready output**.
 
 ---
 
@@ -10,7 +10,7 @@ Several tools address struct layout and memory performance, but they have differ
 
 | Tool | Languages | Scope | Source? | Binary? | CI output | False sharing | Auto-fix |
 |---|---|---|---|---|---|---|---|
-| **padlock** | C, C++, Rust, Go | Layout waste, false sharing, locality | ✓ | ✓ (DWARF/PDB) | JSON, SARIF | ✓ | ✓ (diff) |
+| **padlock** | C, C++, Rust, Go, Zig | Layout waste, false sharing, locality | ✓ | ✓ (DWARF/PDB/BTF) | JSON, SARIF, Markdown | ✓ | ✓ (diff) |
 | `pahole` | Any (DWARF) | Struct holes, reorder | — | ✓ | Text only | — | Text only (`--reorganize`) |
 | `offsetof` / `sizeof` | Any | Size inspection | — | — | — | — | — |
 | Clang `-Wpadded` | C, C++ | Padding warning | ✓ | — | Compiler diag | — | — |

@@ -23,10 +23,13 @@ inputs:
 
   output-format:
     description: >
-      `human` (default) — coloured summary printed to the log.
-      `json`  — machine-readable JSON written to `padlock-results.json`.
-      `sarif` — SARIF 2.1.0 written to `padlock-results.sarif` and optionally
-                uploaded to GitHub Code Scanning.
+      `human`    (default) — coloured summary printed to the log.
+      `json`     — machine-readable JSON written to `padlock-results.json`.
+      `sarif`    — SARIF 2.1.0 written to `padlock-results.sarif` and optionally
+                   uploaded to GitHub Code Scanning.
+      `markdown` — GFM report appended to the GitHub Actions step summary
+                   (`$GITHUB_STEP_SUMMARY`) so findings appear on the workflow
+                   summary page without leaving the Actions UI.
     default: 'human'
 
   upload-sarif:
@@ -142,6 +145,8 @@ runs:
           padlock analyze --sarif "${PATHS[@]}" > padlock-results.sarif
         elif [ "$FORMAT" = "json" ]; then
           cp /tmp/padlock-results.json padlock-results.json
+        elif [ "$FORMAT" = "markdown" ]; then
+          padlock analyze --markdown "${PATHS[@]}" >> "$GITHUB_STEP_SUMMARY" || true
         else
           padlock analyze "${PATHS[@]}" || true
         fi

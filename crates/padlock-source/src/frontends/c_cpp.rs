@@ -670,7 +670,7 @@ fn extract_identifier(source: &str, node: Node<'_>) -> Option<String> {
 
 pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_c::language())?;
+    parser.set_language(&tree_sitter_c::LANGUAGE.into())?;
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
@@ -681,7 +681,7 @@ pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<St
 
 pub fn parse_cpp(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_cpp::language())?;
+    parser.set_language(&tree_sitter_cpp::LANGUAGE.into())?;
     let tree = parser
         .parse(source, None)
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;

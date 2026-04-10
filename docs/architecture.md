@@ -10,8 +10,8 @@ padlock is a Cargo workspace of six crates. The data flows in one direction:
          ▼
   ┌──────────────┐   ┌──────────────┐
   │padlock-source│   │padlock-dwarf │
-  │ (C/C++/Rust/ │   │ (DWARF/PDB   │
-  │  Go source)  │   │  binaries)   │
+  │ (C/C++/Rust/ │   │ (DWARF/PDB/  │
+  │  Go/Zig src) │   │  BTF bins)   │
   └──────┬───────┘   └──────┬───────┘
          └────────┬──────────┘
                   ▼
@@ -32,6 +32,7 @@ padlock is a Cargo workspace of six crates. The data flows in one direction:
          │padlock-output  │
          │ terminal / JSON│
          │ SARIF / diff   │
+         │ Markdown (GFM) │
          └────────────────┘
                   │
                   ▼
@@ -62,7 +63,7 @@ Central dependency for all other crates. Contains:
   - `find_padding(layout)` — returns all `PaddingGap` objects between fields
   - `optimal_order(layout)` — returns fields sorted by descending alignment
 
-- **`arch.rs`** — `ArchConfig` constants for each supported target (pointer size, cache line size). Statics: `X86_64_SYSV`, `AARCH64`, `AARCH64_APPLE`, `WASM32`, `RISCV64`.
+- **`arch.rs`** — `ArchConfig` constants for each supported target (pointer size, cache line size). Statics: `X86_64_SYSV`, `AARCH64`, `AARCH64_APPLE`, `WASM32`, `RISCV64`. `with_overrides(base, cache_line_size, word_size)` creates a heap-leaked `&'static ArchConfig` with user-supplied overrides, used by `--cache-line-size` / `--word-size` CLI flags.
 
 - **`findings.rs`** — `Finding` enum, `StructReport` (includes `num_fields`, `num_holes`, source location), `Report` (includes `analyzed_paths`). `Report::from_layouts` is the single entry point that runs all passes and returns the full report.
 
@@ -86,6 +87,7 @@ Source analysis backend. No compiler invoked — sizes are approximated from a b
   - `c_cpp.rs` — tree-sitter-c / tree-sitter-cpp parser. Walks the AST, extracts `struct_specifier` and `type_definition` nodes, simulates layout with `simulate_layout`. Handles C primitive types, C++ qualified types (`std::mutex`), template types (`std::atomic<T>`), unions. **Bit-field structs are skipped entirely** (`is_bitfield_type` detects `:N` suffixes; any struct with a bitfield member returns `None`) — bit-field packing cannot be accurately modelled without a compiler. Detects `__attribute__((packed))` on struct/class nodes: sets `is_packed = true` and simulates packed layout (no inter-field alignment padding, struct alignment forced to 1). Extracts `GUARDED_BY(mu)` / `__attribute__((guarded_by(mu)))` / `PT_GUARDED_BY(mu)` from field source text and sets `AccessPattern::Concurrent { guard }` directly. Sets `source_line` from the struct node's `start_position().row + 1`.
   - `rust.rs` — syn + `proc-macro2` (with `span-locations` feature) parser. Detects `#[repr(C)]` and `#[repr(packed)]`; uses `syn::visit` to walk item structs. **Generic struct definitions (`struct Foo<T>`) are skipped** — layout is unknowable without concrete type arguments. `primitive_size_align` covers all Rust primitives plus common stdlib types: `Vec`/`String` (3×pointer), `Box`/`Arc`/`Rc` (1×pointer), all `AtomicXxx` (exact sizes), `PhantomData` (0), `Duration` (16B), and more — generic type arguments are stripped before lookup so `Vec<T>` correctly resolves as `Vec`. Reads explicit guard attributes per field: `#[lock_protected_by = "mu"]`, `#[protected_by = "mu"]`, `#[guarded_by("mu")]`, `#[guarded_by(mu)]`, `#[pt_guarded_by(...)]` — sets `AccessPattern::Concurrent { guard }` before the heuristic pass runs. Sets `source_line` from `ident.span().start().line`.
   - `go.rs` — tree-sitter-go parser. Maps Go built-in types; handles `sync.Mutex`, `sync.RWMutex`, and imported type names. **`interface{}` and `any` are treated as two-word fat pointers** (16 bytes on 64-bit), matching the Go runtime representation (type pointer + data pointer). Reads trailing line comments for guard annotation: `// padlock:guard=mu`, `// guarded_by: mu`, `// +checklocksprotects:mu` (gVisor-style). Sets `source_line` from the `type_declaration` node's `start_position().row + 1`.
+  - `zig.rs` — tree-sitter-zig parser. Walks `variable_declaration` → `struct_declaration` → `container_field` nodes. Handles regular, `packed`, and `extern` struct modifiers. Resolves built-in types (`u8`–`u128`, `i8`–`i128`, `f16`–`f128`, `usize`, `isize`, `bool`, `void`), pointer types (`*T`), optional types (`?T`), slices (`[]T` as two words), arrays (`[N]T` as N × element size), and error unions (`E!T` as two words). Concurrency heuristics: `std.Thread.Mutex`, `std.Thread.RwLock`, `std.atomic.Value`, `Atomic`. Field type source text is preserved in `TypeInfo::Primitive { name }` for fix generation (`const Name = struct { ... };` rewrite).
 
 - **`concurrency.rs`** — Heuristic pass: annotates `Field.access` to `Concurrent` for known synchronisation types (`Mutex<T>`, `std::mutex`, `sync.Mutex`, `AtomicU64`, etc.). Runs after the frontend; skips fields already set to non-`Unknown` (i.e. those with explicit guard annotations). Uses field name as guard proxy so type-name-detected fields with different names get different guard identifiers for false-sharing detection.
 
@@ -99,6 +101,8 @@ Binary analysis backend.
 
 - **`reader.rs`** — Reads DWARF debug information from ELF/Mach-O binaries (via `gimli` + `object`). Extracts `DW_TAG_structure_type` entries and their `DW_TAG_member` children into `padlock-core` IR. **Bit-field members** (those carrying `DW_AT_bit_size`) are silently skipped — they share byte offsets and cannot be represented in the byte-level IR without losing accuracy.
 - **`extractor.rs`** — `Extractor::extract_all` drives the DWARF walk. `extract_field` maps each `DW_TAG_member` to a `Field`; fields with `DW_AT_bit_size` are dropped. `detect_arch` maps the ELF/Mach-O machine code to an `ArchConfig` (Apple Mach-O AArch64 maps to `AARCH64_APPLE` with 128-byte cache lines).
+
+- **`btf.rs`** — Pure-Rust parser for the BPF Type Format (BTF) embedded in Linux eBPF object files as a `.BTF` ELF section. `extract_from_btf(btf_data, arch)` parses the 24-byte `btf_header`, the type section, and the string section. Handles all stable BTF kinds: `INT`, `PTR`, `ARRAY`, `STRUCT`, `UNION`, `ENUM`, `TYPEDEF`, `VOLATILE`, `CONST`, `RESTRICT`, `FLOAT`, `ENUM64`. Gracefully skips modern kinds (`FUNC`, `FUNC_PROTO`, `VAR`, `DATASEC`, `DECL_TAG`, `TYPE_TAG`, `FWD`) without aborting the parse — subsequent types in the section are still processed. Bitfield members are represented as synthetic storage-unit fields (e.g. `flags__bits: u32`) at the storage unit's byte offset; consecutive bitfields sharing a storage unit produce a single synthetic field (deduplication by `covered_until` tracking). Packed struct detection via size comparison: if `total_size < natural_aligned_size`, `is_packed` is set. When a `.BTF` section is detected in `padlock-cli/src/paths.rs`, this parser is used instead of the DWARF extractor.
 
 - **`pdb.rs`** — Reads PDB files (Windows) via the `pdb` crate. Extracts struct and class type records.
 
@@ -115,6 +119,7 @@ Output formatters. All functions take `padlock-core` types as input.
 - **`json.rs`** — Serialises `Report` to JSON via `serde_json`.
 - **`sarif.rs`** — Emits SARIF 2.1.0 (`sarifVersion`, `runs[0].results`) for GitHub/GitLab code-scanning integration.
 - **`diff.rs`** — Renders a unified diff of current vs optimal field order using `similar::TextDiff`.
+- **`markdown.rs`** — `to_markdown(report: &Report) -> String` emits a GitHub-Flavored Markdown report. Uses score emoji (✅ score=100, ⚠️ score≥60, ❌ otherwise), severity emoji (🔴 High, 🟡 Medium, 🔵 Low), and a GFM table per finding. Designed for use with `$GITHUB_STEP_SUMMARY` in GitHub Actions workflows.
 
 ---
 
@@ -125,7 +130,7 @@ Two binaries. Wires all other crates together.
 - **`main.rs`** — `clap` derive API; subcommand dispatch for `padlock`. `--version` flag auto-populated from `Cargo.toml`. Subcommands: `analyze`, `list`, `diff`, `fix`, `report`, `watch`, `explain`, `check`.
 - **`filter.rs`** — `FilterArgs` (shared CLI flags: `--filter`, `--exclude`, `--min-holes`, `--min-size`, `--packable`, `--sort-by`) and `SortBy` enum. Applies pre-analysis layout filtering and post-analysis report sorting.
 - **`paths.rs`** — `collect_layouts` (loads layouts from multiple paths, expands directories) and `walk_source_files` (recursive directory walker, skips `target/`, `.git/`, etc.).
-- **`commands/analyze.rs`** — Collects layouts from all paths, applies config + CLI filters, runs `Report::from_layouts`, dispatches to the right formatter.
+- **`commands/analyze.rs`** — Collects layouts from all paths, applies config + CLI filters, runs `Report::from_layouts`, dispatches to the right formatter. Supports `--markdown` (calls `padlock_output::to_markdown`), `--cache-line-size`, and `--word-size` (calls `padlock_core::arch::with_overrides` to build a custom `&'static ArchConfig`).
 - **`commands/list.rs`** — Prints a summary table of all structs (size, fields, holes, wasted bytes, score, location). Accepts filter and sort flags.
 - **`commands/diff.rs`** — Accepts multiple paths/dirs, applies `--filter`, calls `padlock_output::render_diff` per layout.
 - **`commands/fix.rs`** — Accepts multiple paths/dirs, applies `--filter`, shows reorder diff and (non-dry-run) writes `.bak` backup then rewrites in-place.

@@ -6,7 +6,7 @@
 
 **The lint pass for struct memory layout** — catches padding waste, false sharing, and cache locality problems at the source level, before they cost you at runtime.
 
-Supports C, C++, Rust, and Go. Ranks findings by impact, generates reorder suggestions, flags concurrency risks. CLI-first and CI-ready.
+Supports C, C++, Rust, Go, and Zig. Ranks findings by impact, generates reorder suggestions, flags concurrency risks. CLI-first and CI-ready.
 
 ```
 $ padlock analyze src/connection.rs
@@ -54,7 +54,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Explicit guard annotation** | `#[lock_protected_by]`, `GUARDED_BY()`, `// padlock:guard=` — no more type-name guessing |
 | **Locality** | Flags hot/cold field interleaving that hurts cache utilisation |
 | **Scoring** | Each struct gets a 0–100 score (100 = no issues) |
-| **Multi-language** | C, C++, Rust, Go source; compiled binaries via DWARF/PDB |
+| **Multi-language** | C, C++, Rust, Go, Zig source; compiled binaries via DWARF/PDB/BTF |
 | **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64 |
 | **CI-ready** | SARIF output, `action.yml`, exit-code gating on high-severity findings |
 | **`cargo padlock`** | Cargo subcommand — builds your project then analyses the binary |
@@ -145,12 +145,15 @@ padlock analyze mylib.pdb                 # Windows PDB
 Flags:
 - `--json` — emit JSON
 - `--sarif` — emit SARIF 2.1.0 for CI tooling / GitHub code scanning
+- `--markdown` — emit a GitHub-Flavored Markdown report (useful with `$GITHUB_STEP_SUMMARY`)
 - `--filter <PATTERN>` — include only structs whose names match this regex
 - `--exclude <PATTERN>` — exclude structs whose names match this regex
 - `--min-holes <N>` — only structs with ≥ N padding gaps
 - `--min-size <N>` — only structs with total size ≥ N bytes
 - `--packable` — only structs that have a reorder suggestion
 - `--sort-by score|size|waste|name` — sort order (default: score, worst first)
+- `--cache-line-size <N>` — override the assumed cache-line size in bytes (default: 64, or 128 on Apple Silicon). Useful for comparing performance across architectures or analysing structs for embedded targets with non-standard cache geometries.
+- `--word-size <N>` — override pointer/word size in bytes (e.g. `--word-size 4` for 32-bit targets). Affects all pointer-sized fields.
 
 ---
 
@@ -419,12 +422,14 @@ Each struct receives a score from 0 (worst) to 100 (perfect packing, no concurre
 
 ## Language Support
 
-| Language | Source Analysis | Binary (DWARF) |
+| Language | Source Analysis | Binary (DWARF/BTF) |
 |---|---|---|
 | C | ✓ | ✓ |
 | C++ | ✓ | ✓ |
 | Rust | ✓ | ✓ |
 | Go | ✓ | ✓ |
+| Zig | ✓ | via DWARF |
+| eBPF (BTF) | — | ✓ (`.BTF` ELF section) |
 
 **Notes on source analysis:**
 - Source analysis is approximate — no compiler is invoked; field sizes come from a built-in type table.

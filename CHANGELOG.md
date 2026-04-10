@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.6.1] — 2026-04-10
+
+### Changed
+- VS Code extension version aligned to `0.6.1` to match the Rust crates
+
 ## [0.6.0] — 2026-04-10
 
 ### Added

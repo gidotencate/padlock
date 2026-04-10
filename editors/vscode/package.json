@@ -2,7 +2,7 @@
   "name": "padlock",
   "displayName": "padlock",
   "description": "The lint pass for struct memory layout — finds padding waste, false sharing, and cache locality problems in C, C++, Rust, and Go.",
-  "version": "0.5.5",
+  "version": "0.6.1",
   "publisher": "gidotencate",
   "icon": "icon.png",
   "license": "MIT OR Apache-2.0",
@@ -13,8 +13,19 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Linters"],
-  "keywords": ["rust", "c", "cpp", "go", "memory", "layout", "padding", "performance"],
+  "categories": [
+    "Linters"
+  ],
+  "keywords": [
+    "rust",
+    "c",
+    "cpp",
+    "go",
+    "memory",
+    "layout",
+    "padding",
+    "performance"
+  ],
   "activationEvents": [
     "onLanguage:rust",
     "onLanguage:c",
@@ -56,7 +67,11 @@
         },
         "padlock.severity": {
           "type": "string",
-          "enum": ["high", "medium", "low"],
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ],
           "enumDescriptions": [
             "Show only High-severity findings (padding waste ≥30%, false sharing)",
             "Show High and Medium findings",
@@ -67,7 +82,9 @@
         },
         "padlock.extraArgs": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Extra arguments passed to every padlock analyze invocation (e.g. [\"--min-size\", \"16\"])."
         }

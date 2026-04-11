@@ -309,10 +309,19 @@ impl<'ast> Visit<'ast> for StructVisitor {
 
         // Discriminant size: smallest integer that fits the variant count.
         // Rust defaults to isize but uses the minimal repr in practice.
-        let disc_size: usize = if n_variants <= 256 { 1 } else if n_variants <= 65536 { 2 } else { 4 };
+        let disc_size: usize = if n_variants <= 256 {
+            1
+        } else if n_variants <= 65536 {
+            2
+        } else {
+            4
+        };
 
         // Check if all variants are unit (C-like enum, no payload)
-        let all_unit = node.variants.iter().all(|v| matches!(v.fields, Fields::Unit));
+        let all_unit = node
+            .variants
+            .iter()
+            .all(|v| matches!(v.fields, Fields::Unit));
 
         if all_unit {
             // Pure discriminant — no payload storage
@@ -727,7 +736,10 @@ struct Concrete { a: u32, b: u64 }
     #[test]
     fn unit_enum_with_many_variants_uses_u16_discriminant() {
         // Build an enum with 300 variants (> 256)
-        let variants: String = (0..300).map(|i| format!("V{i}")).collect::<Vec<_>>().join(", ");
+        let variants: String = (0..300)
+            .map(|i| format!("V{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let src = format!("enum Big {{ {variants} }}");
         let layouts = parse_rust(&src, &X86_64_SYSV).unwrap();
         let l = &layouts[0];

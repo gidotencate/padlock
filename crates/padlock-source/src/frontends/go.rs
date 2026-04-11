@@ -461,7 +461,10 @@ type Derived struct {
 }
 "#;
         let layouts = parse_go(src, &X86_64_SYSV).unwrap();
-        let derived = layouts.iter().find(|l| l.name == "Derived").expect("Derived");
+        let derived = layouts
+            .iter()
+            .find(|l| l.name == "Derived")
+            .expect("Derived");
         // Must have a field named "Base"
         assert!(
             derived.fields.iter().any(|f| f.name == "Base"),
@@ -500,9 +503,16 @@ type Outer struct {
         use crate::{SourceLanguage, parse_source_str};
         let layouts = parse_source_str(src, &SourceLanguage::Go, &X86_64_SYSV).unwrap();
         let outer = layouts.iter().find(|l| l.name == "Outer").expect("Outer");
-        let inner_field = outer.fields.iter().find(|f| f.name == "Inner").expect("Inner field");
+        let inner_field = outer
+            .fields
+            .iter()
+            .find(|f| f.name == "Inner")
+            .expect("Inner field");
         // Inner struct is 16 bytes (two int64s)
-        assert_eq!(inner_field.size, 16, "embedded Inner field should be resolved to 16 bytes");
+        assert_eq!(
+            inner_field.size, 16,
+            "embedded Inner field should be resolved to 16 bytes"
+        );
     }
 
     #[test]
@@ -523,7 +533,11 @@ type Outer struct {
         let src = "package p\ntype S struct { external.Type\nX int32 }";
         let layouts = parse_go(src, &X86_64_SYSV).unwrap();
         let l = layouts.iter().find(|l| l.name == "S").expect("S");
-        let emb = l.fields.iter().find(|f| f.name == "Type").expect("Type field");
+        let emb = l
+            .fields
+            .iter()
+            .find(|f| f.name == "Type")
+            .expect("Type field");
         // Falls back to pointer size (8 on x86_64) since type is unknown
         assert_eq!(emb.size, 8);
     }

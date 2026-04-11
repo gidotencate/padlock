@@ -1285,7 +1285,10 @@ struct alignas(64) CacheLine {
 };
 "#;
         let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
-        let l = layouts.iter().find(|l| l.name == "CacheLine").expect("CacheLine");
+        let l = layouts
+            .iter()
+            .find(|l| l.name == "CacheLine")
+            .expect("CacheLine");
         assert_eq!(l.align, 64);
         assert_eq!(l.total_size % 64, 0);
     }
@@ -1312,7 +1315,10 @@ class alignas(32) Aligned {
 };
 "#;
         let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
-        let l = layouts.iter().find(|l| l.name == "Aligned").expect("Aligned");
+        let l = layouts
+            .iter()
+            .find(|l| l.name == "Aligned")
+            .expect("Aligned");
         assert_eq!(l.align, 32);
         assert_eq!(l.total_size % 32, 0);
     }
@@ -1329,4 +1335,3 @@ class alignas(32) Aligned {
         assert_eq!(l.total_size, 8); // int(4) + char(1) + 3 pad
     }
 }
-

@@ -259,13 +259,25 @@ pub fn extract_c_field_chunks(body: &str) -> Vec<(String, String)> {
             b'"' => {
                 i += 1;
                 while i < bytes.len() {
-                    if bytes[i] == b'\\' { i += 2; continue; }
-                    if bytes[i] == b'"' { i += 1; break; }
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
                     i += 1;
                 }
             }
-            b'<' | b'(' | b'[' | b'{' => { depth += 1; i += 1; }
-            b'>' | b')' | b']' | b'}' => { depth = (depth - 1).max(0); i += 1; }
+            b'<' | b'(' | b'[' | b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'>' | b')' | b']' | b'}' => {
+                depth = (depth - 1).max(0);
+                i += 1;
+            }
             b';' if depth == 0 => {
                 i += 1;
                 let chunk = &body[chunk_start..i];
@@ -276,7 +288,9 @@ pub fn extract_c_field_chunks(body: &str) -> Vec<(String, String)> {
                 }
                 chunk_start = i;
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
     result
@@ -303,7 +317,10 @@ fn c_field_name_from_chunk(chunk: &str) -> Option<String> {
         stripped
     };
     // Strip pointer declarators at the end
-    let stripped = stripped.trim_start_matches('*').trim_end_matches('*').trim();
+    let stripped = stripped
+        .trim_start_matches('*')
+        .trim_end_matches('*')
+        .trim();
 
     // The last whitespace-separated token is the field name
     let last = stripped.split_whitespace().next_back()?;
@@ -324,12 +341,42 @@ fn c_field_name_from_chunk(chunk: &str) -> Option<String> {
 fn is_c_keyword(s: &str) -> bool {
     matches!(
         s,
-        "const" | "volatile" | "restrict" | "unsigned" | "signed" | "short" | "long"
-            | "int" | "char" | "float" | "double" | "void" | "struct" | "union" | "enum"
-            | "typedef" | "extern" | "static" | "inline" | "auto" | "register" | "bool"
-            | "_Bool" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "int8_t"
-            | "int16_t" | "int32_t" | "int64_t" | "size_t" | "ssize_t" | "ptrdiff_t"
-            | "uintptr_t" | "intptr_t"
+        "const"
+            | "volatile"
+            | "restrict"
+            | "unsigned"
+            | "signed"
+            | "short"
+            | "long"
+            | "int"
+            | "char"
+            | "float"
+            | "double"
+            | "void"
+            | "struct"
+            | "union"
+            | "enum"
+            | "typedef"
+            | "extern"
+            | "static"
+            | "inline"
+            | "auto"
+            | "register"
+            | "bool"
+            | "_Bool"
+            | "uint8_t"
+            | "uint16_t"
+            | "uint32_t"
+            | "uint64_t"
+            | "int8_t"
+            | "int16_t"
+            | "int32_t"
+            | "int64_t"
+            | "size_t"
+            | "ssize_t"
+            | "ptrdiff_t"
+            | "uintptr_t"
+            | "intptr_t"
     )
 }
 
@@ -359,7 +406,9 @@ fn go_field_name_from_line(line: &str) -> Option<String> {
     };
     let first = code.split_whitespace().next()?;
     let name = first.trim_end_matches(',');
-    if name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+    if name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
         && !name.is_empty()
     {
         // Use unqualified name for qualified embedded types (e.g. sync.Mutex → Mutex)
@@ -383,19 +432,35 @@ pub fn extract_zig_field_chunks(body: &str) -> Vec<(String, String)> {
     while i < bytes.len() {
         match bytes[i] {
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
             }
             b'"' => {
                 i += 1;
                 while i < bytes.len() {
-                    if bytes[i] == b'\\' { i += 2; continue; }
-                    if bytes[i] == b'"' { i += 1; break; }
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
                     i += 1;
                 }
             }
-            b'<' | b'(' | b'[' => { depth += 1; i += 1; }
-            b'>' | b')' | b']' => { depth = (depth - 1).max(0); i += 1; }
-            b'{' | b'}' => { i += 1; }
+            b'<' | b'(' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'>' | b')' | b']' => {
+                depth = (depth - 1).max(0);
+                i += 1;
+            }
+            b'{' | b'}' => {
+                i += 1;
+            }
             b',' if depth == 0 => {
                 i += 1;
                 let chunk = &body[chunk_start..i];
@@ -404,7 +469,9 @@ pub fn extract_zig_field_chunks(body: &str) -> Vec<(String, String)> {
                 }
                 chunk_start = i;
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
     let tail = body[chunk_start..].trim();
@@ -465,12 +532,17 @@ fn try_source_aware_rust(layout: &StructLayout, struct_source: &str) -> Option<S
         return None;
     }
 
-    let chunk_map: std::collections::HashMap<&str, &str> =
-        chunks.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+    let chunk_map: std::collections::HashMap<&str, &str> = chunks
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.as_str()))
+        .collect();
 
     let optimal = optimal_order(layout);
     // Verify all optimal fields have chunks; if any is missing, fall back
-    if optimal.iter().any(|f| !chunk_map.contains_key(f.name.as_str())) {
+    if optimal
+        .iter()
+        .any(|f| !chunk_map.contains_key(f.name.as_str()))
+    {
         return None;
     }
 
@@ -510,11 +582,16 @@ fn try_source_aware_c(layout: &StructLayout, struct_source: &str) -> Option<Stri
         return None;
     }
 
-    let chunk_map: std::collections::HashMap<&str, &str> =
-        chunks.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+    let chunk_map: std::collections::HashMap<&str, &str> = chunks
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.as_str()))
+        .collect();
 
     let optimal = optimal_order(layout);
-    if optimal.iter().any(|f| !chunk_map.contains_key(f.name.as_str())) {
+    if optimal
+        .iter()
+        .any(|f| !chunk_map.contains_key(f.name.as_str()))
+    {
         return None;
     }
 
@@ -553,11 +630,16 @@ fn try_source_aware_go(layout: &StructLayout, struct_source: &str) -> Option<Str
         return None;
     }
 
-    let chunk_map: std::collections::HashMap<&str, &str> =
-        chunks.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+    let chunk_map: std::collections::HashMap<&str, &str> = chunks
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.as_str()))
+        .collect();
 
     let optimal = optimal_order(layout);
-    if optimal.iter().any(|f| !chunk_map.contains_key(f.name.as_str())) {
+    if optimal
+        .iter()
+        .any(|f| !chunk_map.contains_key(f.name.as_str()))
+    {
         return None;
     }
 
@@ -596,11 +678,16 @@ fn try_source_aware_zig(layout: &StructLayout, struct_source: &str) -> Option<St
         return None;
     }
 
-    let chunk_map: std::collections::HashMap<&str, &str> =
-        chunks.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+    let chunk_map: std::collections::HashMap<&str, &str> = chunks
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.as_str()))
+        .collect();
 
     let optimal = optimal_order(layout);
-    if optimal.iter().any(|f| !chunk_map.contains_key(f.name.as_str())) {
+    if optimal
+        .iter()
+        .any(|f| !chunk_map.contains_key(f.name.as_str()))
+    {
         return None;
     }
 
@@ -750,7 +837,12 @@ pub fn find_go_struct_span(source: &str, struct_name: &str) -> Option<std::ops::
 /// source when possible; IR-based generation is used as a fallback.
 /// Replacements are applied back-to-front so byte offsets remain valid.
 pub fn apply_fixes_c(source: &str, layouts: &[&StructLayout]) -> String {
-    apply_fixes_with_source(source, layouts, find_c_struct_span, generate_c_fix_from_source)
+    apply_fixes_with_source(
+        source,
+        layouts,
+        find_c_struct_span,
+        generate_c_fix_from_source,
+    )
 }
 
 /// Apply Rust struct reorderings in-place, returning the modified source.
@@ -768,7 +860,12 @@ pub fn apply_fixes_rust(source: &str, layouts: &[&StructLayout]) -> String {
 /// Apply Go struct reorderings in-place, returning the modified source.
 /// Preserves field tags and comments verbatim; falls back to IR-based generation.
 pub fn apply_fixes_go(source: &str, layouts: &[&StructLayout]) -> String {
-    apply_fixes_with_source(source, layouts, find_go_struct_span, generate_go_fix_from_source)
+    apply_fixes_with_source(
+        source,
+        layouts,
+        find_go_struct_span,
+        generate_go_fix_from_source,
+    )
 }
 
 /// Render a reordered Zig struct definition as source text.
@@ -1068,8 +1165,14 @@ mod tests {
         use padlock_core::arch::X86_64_SYSV;
         let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
         let fixed = apply_fixes_rust(src, &[&layouts[0]]);
-        assert!(fixed.contains("/// large field"), "doc comment for b must survive");
-        assert!(fixed.contains("/// small field"), "doc comment for a must survive");
+        assert!(
+            fixed.contains("/// large field"),
+            "doc comment for b must survive"
+        );
+        assert!(
+            fixed.contains("/// small field"),
+            "doc comment for a must survive"
+        );
         // The doc comment for b must appear before the doc comment for a
         assert!(
             fixed.find("large field").unwrap() < fixed.find("small field").unwrap(),
@@ -1091,7 +1194,10 @@ mod tests {
         use padlock_core::arch::X86_64_SYSV;
         let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
         let fixed = apply_fixes_rust(src, &[&layouts[0]]);
-        assert!(fixed.contains("#[serde(skip)]"), "serde attribute on a must survive");
+        assert!(
+            fixed.contains("#[serde(skip)]"),
+            "serde attribute on a must survive"
+        );
         assert!(
             fixed.contains("#[serde(rename = \"big\")]"),
             "serde attribute on b must survive"
@@ -1105,8 +1211,14 @@ mod tests {
         use padlock_core::arch::X86_64_SYSV;
         let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
         let fixed = apply_fixes_rust(src, &[&layouts[0]]);
-        assert!(fixed.contains("pub(crate) b: u64"), "pub(crate) on b must be preserved");
-        assert!(fixed.contains("pub(crate) a: u8"), "pub(crate) on a must be preserved");
+        assert!(
+            fixed.contains("pub(crate) b: u64"),
+            "pub(crate) on b must be preserved"
+        );
+        assert!(
+            fixed.contains("pub(crate) a: u8"),
+            "pub(crate) on a must be preserved"
+        );
     }
 
     #[test]
@@ -1131,12 +1243,7 @@ mod tests {
 
     #[test]
     fn go_fix_preserves_field_tags() {
-        let src = concat!(
-            "type S struct {\n",
-            "\ta uint8\n",
-            "\tb uint64\n",
-            "}\n"
-        );
+        let src = concat!("type S struct {\n", "\ta uint8\n", "\tb uint64\n", "}\n");
         use crate::parse_source_str;
         use padlock_core::arch::X86_64_SYSV;
         let layouts = parse_source_str(src, &crate::SourceLanguage::Go, &X86_64_SYSV).unwrap();

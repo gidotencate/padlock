@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.7.1] — 2026-04-11
+
+### Fixed
+- `cargo fmt`: reformatted `fixgen.rs` (compact `match` arms expanded to block style), `zig.rs` (long iterator chains split across lines, blank line removed before `#[test]`), and `c_cpp.rs` to satisfy `rustfmt` in CI
+
 ## [0.7.0] — 2026-04-11
 
 ### Added

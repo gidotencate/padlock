@@ -222,8 +222,16 @@ fn parse_union_declaration(
     }
 
     // Union layout: all fields at offset 0; total = max field size rounded to alignment.
-    let max_size = raw_fields.iter().map(|(_, _, sz, _)| *sz).max().unwrap_or(0);
-    let max_align = raw_fields.iter().map(|(_, _, _, al)| *al).max().unwrap_or(1);
+    let max_size = raw_fields
+        .iter()
+        .map(|(_, _, sz, _)| *sz)
+        .max()
+        .unwrap_or(0);
+    let max_align = raw_fields
+        .iter()
+        .map(|(_, _, _, al)| *al)
+        .max()
+        .unwrap_or(1);
     let total_size = if max_align > 0 {
         max_size.next_multiple_of(max_align)
     } else {
@@ -252,7 +260,13 @@ fn parse_union_declaration(
     // Its size is the smallest integer type that holds all variant indices.
     if is_tagged {
         let n = fields.len();
-        let tag_size: usize = if n <= 256 { 1 } else if n <= 65536 { 2 } else { 4 };
+        let tag_size: usize = if n <= 256 {
+            1
+        } else if n <= 65536 {
+            2
+        } else {
+            4
+        };
         fields.push(Field {
             name: "__tag".to_string(),
             ty: TypeInfo::Primitive {
@@ -435,7 +449,6 @@ mod tests {
     use super::*;
     use padlock_core::arch::X86_64_SYSV;
 
-
     #[test]
     fn parse_simple_zig_struct() {
         let src = "const Point = struct { x: u32, y: u32 };";
@@ -553,7 +566,11 @@ mod tests {
         let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
         let l = &layouts[0];
         for field in &l.fields {
-            assert_eq!(field.offset, 0, "union field '{}' should be at offset 0", field.name);
+            assert_eq!(
+                field.offset, 0,
+                "union field '{}' should be at offset 0",
+                field.name
+            );
         }
     }
 
@@ -614,6 +631,10 @@ mod tests {
         let src = "const U = union { a: u8, b: u64 };";
         let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
         let gaps = padlock_core::ir::find_padding(&layouts[0]);
-        assert!(gaps.is_empty(), "unions should have no padding gaps: {:?}", gaps);
+        assert!(
+            gaps.is_empty(),
+            "unions should have no padding gaps: {:?}",
+            gaps
+        );
     }
 }

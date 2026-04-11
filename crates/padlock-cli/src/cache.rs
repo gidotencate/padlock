@@ -85,10 +85,10 @@ impl ParseCache {
         if !self.dirty {
             return;
         }
-        if let Some(dir) = self.cache_path.parent() {
-            if std::fs::create_dir_all(dir).is_err() {
-                return;
-            }
+        if let Some(dir) = self.cache_path.parent()
+            && std::fs::create_dir_all(dir).is_err()
+        {
+            return;
         }
         if let Ok(json) = serde_json::to_string(&self.store) {
             let _ = std::fs::write(&self.cache_path, json);

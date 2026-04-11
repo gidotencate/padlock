@@ -94,7 +94,7 @@ pub fn render_explain(layout: &StructLayout) -> String {
         let field_cache_line = field.offset / cache_line;
 
         // Insert a cache-line boundary marker when entering a new cache line.
-        if last_cache_line.map_or(true, |prev| field_cache_line > prev) {
+        if last_cache_line.is_none_or(|prev| field_cache_line > prev) {
             if last_cache_line.is_some() {
                 // Not the first cache line: insert a separator row.
                 rows.push(Row::CacheLine {

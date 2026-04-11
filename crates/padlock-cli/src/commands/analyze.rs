@@ -8,16 +8,25 @@ use crate::config::Config;
 use crate::filter::{FailSeverity, FilterArgs};
 use crate::paths::collect_layouts;
 
-pub fn run(
-    paths: &[PathBuf],
-    json: bool,
-    sarif: bool,
-    markdown: bool,
-    cache_line_size: Option<usize>,
-    word_size: Option<usize>,
-    fail_on_severity: Option<FailSeverity>,
-    filter: &FilterArgs,
-) -> anyhow::Result<()> {
+/// Output and arch options for the `analyze` subcommand.
+pub struct AnalyzeOpts {
+    pub json: bool,
+    pub sarif: bool,
+    pub markdown: bool,
+    pub cache_line_size: Option<usize>,
+    pub word_size: Option<usize>,
+    pub fail_on_severity: Option<FailSeverity>,
+}
+
+pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow::Result<()> {
+    let AnalyzeOpts {
+        json,
+        sarif,
+        markdown,
+        cache_line_size,
+        word_size,
+        fail_on_severity,
+    } = opts;
     // Load config by searching upward from the first supplied path.
     let cfg = Config::for_path(
         paths

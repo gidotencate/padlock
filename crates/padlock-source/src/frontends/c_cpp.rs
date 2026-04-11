@@ -668,12 +668,15 @@ fn parse_alignas_value(source: &str, node: Node<'_>) -> Option<usize> {
 ///
 /// Returns `None` if the declaration is not an anonymous nested struct/union
 /// (the caller should fall through to `parse_field_declaration`).
+type RawField = (String, String, Option<String>, Option<usize>);
+
+#[allow(clippy::only_used_in_recursion)]
 fn parse_anonymous_nested(
     source: &str,
     node: Node<'_>,
     arch: &'static ArchConfig,
     parent_is_union: bool,
-) -> Option<Vec<(String, String, Option<String>, Option<usize>)>> {
+) -> Option<Vec<RawField>> {
     // Find a struct_specifier or union_specifier child.
     for i in 0..node.child_count() {
         let child = node.child(i)?;
@@ -700,7 +703,7 @@ fn parse_anonymous_nested(
         }
 
         let body = body_node?;
-        let mut nested_raw: Vec<(String, String, Option<String>, Option<usize>)> = Vec::new();
+        let mut nested_raw: Vec<RawField> = Vec::new();
 
         for j in 0..body.child_count() {
             let inner = body.child(j)?;

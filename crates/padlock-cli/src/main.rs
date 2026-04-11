@@ -178,12 +178,14 @@ fn main() -> anyhow::Result<()> {
             filter,
         } => commands::analyze::run(
             &paths,
-            json,
-            sarif,
-            markdown,
-            cache_line_size,
-            word_size,
-            fail_on_severity,
+            commands::analyze::AnalyzeOpts {
+                json,
+                sarif,
+                markdown,
+                cache_line_size,
+                word_size,
+                fail_on_severity,
+            },
             &filter,
         ),
 
@@ -209,7 +211,18 @@ fn main() -> anyhow::Result<()> {
             paths,
             json,
             filter,
-        } => commands::analyze::run(&paths, json, false, false, None, None, None, &filter),
+        } => commands::analyze::run(
+            &paths,
+            commands::analyze::AnalyzeOpts {
+                json,
+                sarif: false,
+                markdown: false,
+                cache_line_size: None,
+                word_size: None,
+                fail_on_severity: None,
+            },
+            &filter,
+        ),
 
         Commands::Watch { path, json } => commands::watch::run(&path, json),
 

@@ -193,10 +193,11 @@ fn repr_align(attrs: &[syn::Attribute]) -> Option<usize> {
             if after.starts_with('(') {
                 let inner = after.trim_start_matches('(');
                 let num_str: String = inner.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(n) = num_str.parse::<usize>() {
-                    if n > 0 && n.is_power_of_two() {
-                        return Some(n);
-                    }
+                if let Ok(n) = num_str.parse::<usize>()
+                    && n > 0
+                    && n.is_power_of_two()
+                {
+                    return Some(n);
                 }
             }
         }
@@ -238,10 +239,10 @@ fn simulate_rust_layout(
     }
 
     // Apply repr(align(N)): raise minimum alignment and add trailing padding.
-    if let Some(fa) = forced_align {
-        if fa > struct_align {
-            struct_align = fa;
-        }
+    if let Some(fa) = forced_align
+        && fa > struct_align
+    {
+        struct_align = fa;
     }
 
     if !packed && struct_align > 0 {

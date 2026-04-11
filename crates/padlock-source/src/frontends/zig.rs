@@ -156,6 +156,7 @@ fn parse_variable_declaration(
     let source_line = node.start_position().row as u32 + 1;
     let mut name: Option<String> = None;
     let mut struct_node: Option<Node> = None;
+    let mut union_node: Option<Node> = None;
 
     for i in 0..node.child_count() {
         let child = node.child(i)?;
@@ -167,13 +168,127 @@ fn parse_variable_declaration(
                 }
             }
             "struct_declaration" => struct_node = Some(child),
+            "union_declaration" => union_node = Some(child),
             _ => {}
         }
     }
 
     let name = name?;
-    let struct_node = struct_node?;
-    parse_struct_declaration(source, struct_node, name, arch, source_line)
+    if let Some(sn) = struct_node {
+        parse_struct_declaration(source, sn, name, arch, source_line)
+    } else if let Some(un) = union_node {
+        parse_union_declaration(source, un, name, arch, source_line)
+    } else {
+        None
+    }
+}
+
+/// Parse a Zig `union { ... }` or `union(enum) { ... }` declaration.
+///
+/// Layout rules:
+/// - All fields share the same storage (offset 0), total = max(field sizes).
+/// - Tagged unions add a synthetic `__tag` discriminant field; its size is
+///   the smallest integer that covers the variant count.
+/// - The struct is emitted with `is_union = true`.
+fn parse_union_declaration(
+    source: &str,
+    node: Node<'_>,
+    name: String,
+    arch: &'static ArchConfig,
+    source_line: u32,
+) -> Option<StructLayout> {
+    let mut is_tagged = false;
+    let mut raw_fields: Vec<(String, String, usize, usize)> = Vec::new();
+
+    for i in 0..node.child_count() {
+        let child = node.child(i)?;
+        match child.kind() {
+            // `union(enum)` — `enum` keyword is a direct child
+            "enum" => is_tagged = true,
+            // `union(SomeEnum)` — identifier naming the explicit tag type
+            // We detect this by seeing an identifier inside the `(...)` group.
+            // Mark it as tagged regardless of the tag type.
+            "container_field" => {
+                if let Some(f) = parse_container_field(source, child, arch, false) {
+                    raw_fields.push(f);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if raw_fields.is_empty() {
+        return None;
+    }
+
+    // Union layout: all fields at offset 0; total = max field size rounded to alignment.
+    let max_size = raw_fields.iter().map(|(_, _, sz, _)| *sz).max().unwrap_or(0);
+    let max_align = raw_fields.iter().map(|(_, _, _, al)| *al).max().unwrap_or(1);
+    let total_size = if max_align > 0 {
+        max_size.next_multiple_of(max_align)
+    } else {
+        max_size
+    };
+
+    let mut fields: Vec<Field> = raw_fields
+        .into_iter()
+        .map(|(fname, type_text, size, align)| Field {
+            name: fname,
+            ty: TypeInfo::Primitive {
+                name: type_text,
+                size,
+                align,
+            },
+            offset: 0,
+            size,
+            align,
+            source_file: None,
+            source_line: None,
+            access: padlock_core::ir::AccessPattern::Unknown,
+        })
+        .collect();
+
+    // Tagged union: add a synthetic `__tag` discriminant field.
+    // Its size is the smallest integer type that holds all variant indices.
+    if is_tagged {
+        let n = fields.len();
+        let tag_size: usize = if n <= 256 { 1 } else if n <= 65536 { 2 } else { 4 };
+        fields.push(Field {
+            name: "__tag".to_string(),
+            ty: TypeInfo::Primitive {
+                name: format!("u{}", tag_size * 8),
+                size: tag_size,
+                align: tag_size,
+            },
+            offset: total_size, // tag lives after the union payload
+            size: tag_size,
+            align: tag_size,
+            source_file: None,
+            source_line: None,
+            access: padlock_core::ir::AccessPattern::Unknown,
+        });
+    }
+
+    let struct_align = max_align; // tag alignment is usually smaller than payload
+
+    let final_size = if is_tagged {
+        let tag_size = fields.last().map(|f| f.size).unwrap_or(0);
+        (total_size + tag_size).next_multiple_of(struct_align.max(1))
+    } else {
+        total_size
+    };
+
+    Some(StructLayout {
+        name,
+        total_size: final_size,
+        align: struct_align,
+        fields,
+        source_file: None,
+        source_line: Some(source_line),
+        arch,
+        is_packed: false,
+        is_union: true,
+    })
 }
 
 fn parse_struct_declaration(
@@ -289,7 +404,9 @@ fn parse_container_field(
         }
     }
 
-    let name = field_name?;
+    // Discard fields with empty names — tree-sitter-zig emits a zero-length
+    // identifier node for `union {}` (empty union body), which is not a real field.
+    let name = field_name.filter(|n| !n.is_empty())?;
     let ty = type_text.unwrap_or_else(|| "anyopaque".to_string());
     let (mut size, align) = size_align.unwrap_or((arch.pointer_size, arch.pointer_size));
 
@@ -317,6 +434,7 @@ pub fn parse_zig(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<
 mod tests {
     use super::*;
     use padlock_core::arch::X86_64_SYSV;
+
 
     #[test]
     fn parse_simple_zig_struct() {
@@ -406,5 +524,96 @@ mod tests {
         let src = "const S = struct { buf: [4]u32 };";
         let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
         assert_eq!(layouts[0].fields[0].size, 16); // 4 * 4
+    }
+
+    // ── union / tagged union ──────────────────────────────────────────────────
+
+    #[test]
+    fn zig_bare_union_parsed_as_union() {
+        let src = "const U = union { a: u8, b: u32 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let l = &layouts[0];
+        assert_eq!(l.name, "U");
+        assert!(l.is_union, "union should have is_union=true");
+    }
+
+    #[test]
+    fn zig_bare_union_total_size_is_max_field() {
+        // a: u8 (1B), b: u32 (4B) → max = 4B, aligned to 4
+        let src = "const U = union { a: u8, b: u32 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.total_size, 4);
+    }
+
+    #[test]
+    fn zig_union_all_fields_at_offset_zero() {
+        let src = "const U = union { a: u8, b: u64 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        for field in &l.fields {
+            assert_eq!(field.offset, 0, "union field '{}' should be at offset 0", field.name);
+        }
+    }
+
+    #[test]
+    fn zig_tagged_union_has_tag_field() {
+        let src = "const T = union(enum) { ok: u32, err: void };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert!(
+            l.fields.iter().any(|f| f.name == "__tag"),
+            "tagged union should have a synthetic __tag field"
+        );
+    }
+
+    #[test]
+    fn zig_tagged_union_size_includes_tag() {
+        // ok: u32 (4B), err: void (0B) → payload = 4B, tag = 1B (2 variants ≤ 256)
+        // total = (4 + 1).next_multiple_of(4) = 8B
+        let src = "const T = union(enum) { ok: u32, err: void };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        // payload (4B) + tag (1B) → 5B → rounded to align 4 = 8B
+        assert_eq!(l.total_size, 8);
+    }
+
+    #[test]
+    fn zig_union_with_largest_field_u64() {
+        // a: u8 (1B), b: u64 (8B), c: u32 (4B) → max = 8B, align = 8
+        let src = "const U = union { a: u8, b: u64, c: u32 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.total_size, 8);
+        assert_eq!(l.align, 8);
+    }
+
+    #[test]
+    fn zig_struct_and_union_in_same_file() {
+        let src = "const S = struct { x: u32 };\nconst U = union { a: u8, b: u32 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 2);
+        assert!(layouts.iter().any(|l| l.name == "S" && !l.is_union));
+        assert!(layouts.iter().any(|l| l.name == "U" && l.is_union));
+    }
+
+    // ── bad weather: unions ───────────────────────────────────────────────────
+
+    #[test]
+    fn zig_empty_union_returns_none() {
+        // Empty union body → no layout produced
+        let src = "const E = union {};";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert!(layouts.is_empty(), "empty union should produce no layout");
+    }
+
+    #[test]
+    fn zig_union_no_padding_finding() {
+        // Unions should never report inter-field padding (all fields at offset 0)
+        let src = "const U = union { a: u8, b: u64 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        let gaps = padlock_core::ir::find_padding(&layouts[0]);
+        assert!(gaps.is_empty(), "unions should have no padding gaps: {:?}", gaps);
     }
 }

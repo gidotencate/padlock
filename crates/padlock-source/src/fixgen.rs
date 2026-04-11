@@ -1,6 +1,12 @@
 // padlock-source/src/fixgen.rs
 //
 // Generate reordered struct source text, unified diffs, and in-place rewrites.
+//
+// Fix quality: when the original source is available, field declarations
+// (including attributes, doc-comments, visibility modifiers, and guard
+// annotations) are extracted verbatim and reordered — nothing is
+// synthesised from IR type names. IR-based generation is used only as a
+// fallback when the original text cannot be parsed into per-field chunks.
 
 use padlock_core::ir::{StructLayout, optimal_order};
 use similar::{ChangeTag, TextDiff};
@@ -70,6 +76,548 @@ pub fn unified_diff(original: &str, fixed: &str, context_lines: usize) -> String
         }
     }
     out
+}
+
+// ── source-aware field chunk extraction ───────────────────────────────────────
+//
+// Each language extracts "field chunks" — the verbatim source text for one
+// field declaration, including any preceding doc comments and attributes.
+// The list is keyed by field name so callers can look up chunks by the IR
+// field names and reorder them.
+
+/// Split a Rust struct body (the text between `{` and `}`, exclusive) into
+/// field chunks, preserving attributes, doc comments, and visibility modifiers.
+///
+/// Returns `Vec<(field_name, raw_chunk_text)>` in declaration order.
+/// The `raw_chunk_text` includes the field declaration line and its trailing
+/// comma; attributes/doc-comments that appear immediately before the field
+/// are included in that field's chunk.
+///
+/// Chunk boundaries are determined by `,` at bracket depth 0, matching how
+/// Rust struct fields are separated. The `>` character is tracked conservatively:
+/// if depth goes negative it is reset to 0 (handles `->` and comparison operators
+/// in default expressions, though those are rare in struct bodies).
+pub fn extract_rust_field_chunks(body: &str) -> Vec<(String, String)> {
+    let mut result: Vec<(String, String)> = Vec::new();
+    let mut depth: i32 = 0; // tracks < ( [ nesting within a field declaration
+    let mut chunk_start = 0usize;
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            // Line comments: skip to EOL (don't count brackets inside them)
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            // Block comments: skip to */
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            // String literals: skip to closing quote
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'<' | b'(' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'>' | b')' | b']' => {
+                depth = (depth - 1).max(0);
+                i += 1;
+            }
+            // Curly braces (e.g. struct default field values, closure syntax):
+            // just skip past them; they don't appear in normal struct bodies
+            b'{' | b'}' => {
+                i += 1;
+            }
+            b',' if depth == 0 => {
+                i += 1; // include the comma in the chunk
+                let chunk = &body[chunk_start..i];
+                if let Some(name) = rust_field_name_from_chunk(chunk) {
+                    result.push((name, chunk.to_string()));
+                }
+                chunk_start = i;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    // Handle last field (may not have trailing comma)
+    let tail = body[chunk_start..].trim();
+    if !tail.is_empty() {
+        // Use the full slice (including leading whitespace) for the chunk
+        let chunk = &body[chunk_start..];
+        if let Some(name) = rust_field_name_from_chunk(chunk) {
+            result.push((name, chunk.to_string()));
+        }
+    }
+
+    result
+}
+
+/// Extract the field name from a Rust field chunk.
+/// Handles leading attributes (`#[...]`), doc comments (`///`), and pub
+/// visibility (`pub`, `pub(crate)`, `pub(super)`, `pub(in path::to::mod)`).
+fn rust_field_name_from_chunk(chunk: &str) -> Option<String> {
+    for line in chunk.lines() {
+        let s = line.trim();
+        if s.is_empty() || s.starts_with("//") || s.starts_with("#[") || s.starts_with("#![") {
+            continue;
+        }
+        return rust_field_name_from_decl_line(s);
+    }
+    None
+}
+
+/// Parse `[pub[(...)]] field_name: Type` and return the field name.
+fn rust_field_name_from_decl_line(line: &str) -> Option<String> {
+    let mut s = line.trim();
+
+    // Strip visibility
+    if let Some(rest) = s.strip_prefix("pub") {
+        let rest = rest.trim_start();
+        if rest.starts_with('(') {
+            // pub(crate), pub(super), pub(in path) — find the closing ')'
+            let end = rest.find(')')?;
+            s = rest[end + 1..].trim_start();
+        } else {
+            s = rest;
+        }
+    }
+
+    // The field name ends at the first ':' not followed by ':'
+    let mut depth: i32 = 0;
+    for (idx, c) in s.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth = (depth - 1).max(0),
+            ':' if depth == 0 => {
+                // Make sure this ':' is the field separator, not '::'
+                if s[idx + 1..].starts_with(':') {
+                    continue; // qualified path
+                }
+                let name = s[..idx].trim().to_string();
+                if !name.is_empty()
+                    && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !name.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    return Some(name);
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split a C/C++ struct body (text between `{` and `}`, exclusive) into
+/// field chunks separated by `;` at depth 0.
+///
+/// Each chunk includes any preceding `//` or `/* */` comments.
+pub fn extract_c_field_chunks(body: &str) -> Vec<(String, String)> {
+    let mut result: Vec<(String, String)> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut chunk_start = 0usize;
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' { i += 2; continue; }
+                    if bytes[i] == b'"' { i += 1; break; }
+                    i += 1;
+                }
+            }
+            b'<' | b'(' | b'[' | b'{' => { depth += 1; i += 1; }
+            b'>' | b')' | b']' | b'}' => { depth = (depth - 1).max(0); i += 1; }
+            b';' if depth == 0 => {
+                i += 1;
+                let chunk = &body[chunk_start..i];
+                if !chunk.trim().is_empty()
+                    && let Some(name) = c_field_name_from_chunk(chunk)
+                {
+                    result.push((name, chunk.to_string()));
+                }
+                chunk_start = i;
+            }
+            _ => { i += 1; }
+        }
+    }
+    result
+}
+
+/// Extract a C/C++ field name from a chunk (everything up to and including `;`).
+/// The field name is the last identifier before the `;`, stripping pointer
+/// declarators and array declarators.
+fn c_field_name_from_chunk(chunk: &str) -> Option<String> {
+    // Strip comments to get just the code text
+    let code: String = chunk
+        .lines()
+        .filter(|l| !l.trim().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Tokenise by whitespace and punctuation; look for the last identifier-like
+    // token before `;`, skipping keywords and type names
+    let stripped = code.trim_end_matches(';').trim();
+    // Strip array declarator: `field[N]` → `field`
+    let stripped = if let Some(bracket) = stripped.rfind('[') {
+        stripped[..bracket].trim()
+    } else {
+        stripped
+    };
+    // Strip pointer declarators at the end
+    let stripped = stripped.trim_start_matches('*').trim_end_matches('*').trim();
+
+    // The last whitespace-separated token is the field name
+    let last = stripped.split_whitespace().next_back()?;
+    // Strip leading `*` (pointer declarator attached to name)
+    let last = last.trim_start_matches('*').trim_end_matches('*');
+
+    if last.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !last.is_empty()
+        && !last.starts_with(|c: char| c.is_ascii_digit())
+        && !is_c_keyword(last)
+    {
+        Some(last.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_c_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "const" | "volatile" | "restrict" | "unsigned" | "signed" | "short" | "long"
+            | "int" | "char" | "float" | "double" | "void" | "struct" | "union" | "enum"
+            | "typedef" | "extern" | "static" | "inline" | "auto" | "register" | "bool"
+            | "_Bool" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" | "int8_t"
+            | "int16_t" | "int32_t" | "int64_t" | "size_t" | "ssize_t" | "ptrdiff_t"
+            | "uintptr_t" | "intptr_t"
+    )
+}
+
+/// Split a Go struct body (text between `{` and `}`, exclusive) into
+/// field chunks, one per non-blank non-comment line.
+pub fn extract_go_field_chunks(body: &str) -> Vec<(String, String)> {
+    let mut result: Vec<(String, String)> = Vec::new();
+    for line in body.lines() {
+        let s = line.trim();
+        if s.is_empty() || s.starts_with("//") {
+            continue;
+        }
+        if let Some(name) = go_field_name_from_line(s) {
+            result.push((name, format!("{line}\n")));
+        }
+    }
+    result
+}
+
+fn go_field_name_from_line(line: &str) -> Option<String> {
+    // field_name[, field_name] Type [// comment]
+    // OR: EmbeddedType [// comment]
+    let code = if let Some(pos) = line.find("//") {
+        line[..pos].trim()
+    } else {
+        line.trim()
+    };
+    let first = code.split_whitespace().next()?;
+    let name = first.trim_end_matches(',');
+    if name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        && !name.is_empty()
+    {
+        // Use unqualified name for qualified embedded types (e.g. sync.Mutex → Mutex)
+        let simple = name.split('.').next_back().unwrap_or(name);
+        Some(simple.to_string())
+    } else {
+        None
+    }
+}
+
+/// Split a Zig struct body (text between `{` and `}`, exclusive) into
+/// field chunks separated by `,` at depth 0.
+pub fn extract_zig_field_chunks(body: &str) -> Vec<(String, String)> {
+    // Zig field declarations end with `,` — same tokenisation as Rust
+    let mut result: Vec<(String, String)> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut chunk_start = 0usize;
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' { i += 2; continue; }
+                    if bytes[i] == b'"' { i += 1; break; }
+                    i += 1;
+                }
+            }
+            b'<' | b'(' | b'[' => { depth += 1; i += 1; }
+            b'>' | b')' | b']' => { depth = (depth - 1).max(0); i += 1; }
+            b'{' | b'}' => { i += 1; }
+            b',' if depth == 0 => {
+                i += 1;
+                let chunk = &body[chunk_start..i];
+                if let Some(name) = zig_field_name_from_chunk(chunk) {
+                    result.push((name, chunk.to_string()));
+                }
+                chunk_start = i;
+            }
+            _ => { i += 1; }
+        }
+    }
+    let tail = body[chunk_start..].trim();
+    if !tail.is_empty() {
+        let chunk = &body[chunk_start..];
+        if let Some(name) = zig_field_name_from_chunk(chunk) {
+            result.push((name, chunk.to_string()));
+        }
+    }
+    result
+}
+
+fn zig_field_name_from_chunk(chunk: &str) -> Option<String> {
+    for line in chunk.lines() {
+        let s = line.trim();
+        if s.is_empty() || s.starts_with("//") {
+            continue;
+        }
+        // field_name: Type
+        let colon = s.find(':')?;
+        let name = s[..colon].trim().to_string();
+        if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Some(name);
+        }
+        return None;
+    }
+    None
+}
+
+// ── source-aware fix generators ───────────────────────────────────────────────
+//
+// These functions generate reordered struct source by extracting the original
+// field chunks and reordering them rather than synthesising from IR type names.
+// They fall back to the IR-based generators when chunk extraction fails.
+
+/// Generate a source-preserving Rust fix: reorder field chunks extracted from
+/// `struct_source` (the original `struct Name { ... }` text) according to the
+/// optimal field order.
+///
+/// Preserves `#[serde(...)]`, `pub`, `pub(crate)`, doc comments (`///`), and
+/// any other leading attribute/comment lines verbatim.
+pub fn generate_rust_fix_from_source(layout: &StructLayout, struct_source: &str) -> String {
+    if let Some(result) = try_source_aware_rust(layout, struct_source) {
+        return result;
+    }
+    generate_rust_fix(layout)
+}
+
+fn try_source_aware_rust(layout: &StructLayout, struct_source: &str) -> Option<String> {
+    let brace_open = struct_source.find('{')?;
+    // Find the matching close brace using match_braces
+    let body_with_close = &struct_source[brace_open..];
+    let body_len = match_braces(body_with_close)?;
+    let body = &body_with_close[1..body_len - 1]; // between { and }
+
+    let chunks = extract_rust_field_chunks(body);
+    if chunks.is_empty() {
+        return None;
+    }
+
+    let chunk_map: std::collections::HashMap<&str, &str> =
+        chunks.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+
+    let optimal = optimal_order(layout);
+    // Verify all optimal fields have chunks; if any is missing, fall back
+    if optimal.iter().any(|f| !chunk_map.contains_key(f.name.as_str())) {
+        return None;
+    }
+
+    let header = &struct_source[..=brace_open];
+    let mut result = header.to_string();
+    result.push('\n');
+    for field in &optimal {
+        result.push_str(chunk_map[field.name.as_str()]);
+    }
+    // Ensure there's a newline before the closing brace
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result.push('}');
+    // Preserve anything after the closing brace (e.g. impl blocks on next lines)
+    let after = &struct_source[brace_open + body_len..];
+    result.push_str(after);
+    Some(result)
+}
+
+/// Generate a source-preserving C/C++ fix.
+pub fn generate_c_fix_from_source(layout: &StructLayout, struct_source: &str) -> String {
+    if let Some(result) = try_source_aware_c(layout, struct_source) {
+        return result;
+    }
+    generate_c_fix(layout)
+}
+
+fn try_source_aware_c(layout: &StructLayout, struct_source: &str) -> Option<String> {
+    let brace_open = struct_source.find('{')?;
+    let body_with_close = &struct_source[brace_open..];
+    let body_len = match_braces(body_with_close)?;
+    let body = &body_with_close[1..body_len - 1];
+
+    let chunks = extract_c_field_chunks(body);
+    if chunks.is_empty() {
+        return None;
+    }
+
+    let chunk_map: std::collections::HashMap<&str, &str> =
+        chunks.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+
+    let optimal = optimal_order(layout);
+    if optimal.iter().any(|f| !chunk_map.contains_key(f.name.as_str())) {
+        return None;
+    }
+
+    let header = &struct_source[..=brace_open];
+    let mut result = header.to_string();
+    result.push('\n');
+    for field in &optimal {
+        result.push_str(chunk_map[field.name.as_str()]);
+    }
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result.push('}');
+    let close_end = brace_open + body_len;
+    let after = &struct_source[close_end..];
+    result.push_str(after);
+    Some(result)
+}
+
+/// Generate a source-preserving Go fix.
+pub fn generate_go_fix_from_source(layout: &StructLayout, struct_source: &str) -> String {
+    if let Some(result) = try_source_aware_go(layout, struct_source) {
+        return result;
+    }
+    generate_go_fix(layout)
+}
+
+fn try_source_aware_go(layout: &StructLayout, struct_source: &str) -> Option<String> {
+    let brace_open = struct_source.find('{')?;
+    let body_with_close = &struct_source[brace_open..];
+    let body_len = match_braces(body_with_close)?;
+    let body = &body_with_close[1..body_len - 1];
+
+    let chunks = extract_go_field_chunks(body);
+    if chunks.is_empty() {
+        return None;
+    }
+
+    let chunk_map: std::collections::HashMap<&str, &str> =
+        chunks.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+
+    let optimal = optimal_order(layout);
+    if optimal.iter().any(|f| !chunk_map.contains_key(f.name.as_str())) {
+        return None;
+    }
+
+    let header = &struct_source[..=brace_open];
+    let mut result = header.to_string();
+    result.push('\n');
+    for field in &optimal {
+        result.push_str(chunk_map[field.name.as_str()]);
+    }
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result.push('}');
+    let close_end = brace_open + body_len;
+    let after = &struct_source[close_end..];
+    result.push_str(after);
+    Some(result)
+}
+
+/// Generate a source-preserving Zig fix.
+pub fn generate_zig_fix_from_source(layout: &StructLayout, struct_source: &str) -> String {
+    if let Some(result) = try_source_aware_zig(layout, struct_source) {
+        return result;
+    }
+    generate_zig_fix(layout)
+}
+
+fn try_source_aware_zig(layout: &StructLayout, struct_source: &str) -> Option<String> {
+    let brace_open = struct_source.find('{')?;
+    let body_with_close = &struct_source[brace_open..];
+    let body_len = match_braces(body_with_close)?;
+    let body = &body_with_close[1..body_len - 1];
+
+    let chunks = extract_zig_field_chunks(body);
+    if chunks.is_empty() {
+        return None;
+    }
+
+    let chunk_map: std::collections::HashMap<&str, &str> =
+        chunks.iter().map(|(n, c)| (n.as_str(), c.as_str())).collect();
+
+    let optimal = optimal_order(layout);
+    if optimal.iter().any(|f| !chunk_map.contains_key(f.name.as_str())) {
+        return None;
+    }
+
+    let header = &struct_source[..=brace_open];
+    let mut result = header.to_string();
+    result.push('\n');
+    for field in &optimal {
+        result.push_str(chunk_map[field.name.as_str()]);
+    }
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result.push('}');
+    let close_end = brace_open + body_len;
+    let after = &struct_source[close_end..];
+    result.push_str(after);
+    Some(result)
 }
 
 // ── span finders ──────────────────────────────────────────────────────────────
@@ -197,20 +745,30 @@ pub fn find_go_struct_span(source: &str, struct_name: &str) -> Option<std::ops::
 
 /// Apply C/C++ struct reorderings in-place, returning the modified source.
 /// Each layout in `layouts` is looked up by name; matched structs are replaced
-/// with the optimally-ordered definition. Replacements are applied back-to-front
-/// so byte offsets remain valid.
+/// with the optimally-ordered definition. Field declarations (including comments
+/// and annotations such as `GUARDED_BY`) are preserved verbatim from the original
+/// source when possible; IR-based generation is used as a fallback.
+/// Replacements are applied back-to-front so byte offsets remain valid.
 pub fn apply_fixes_c(source: &str, layouts: &[&StructLayout]) -> String {
-    apply_fixes(source, layouts, find_c_struct_span, generate_c_fix)
+    apply_fixes_with_source(source, layouts, find_c_struct_span, generate_c_fix_from_source)
 }
 
 /// Apply Rust struct reorderings in-place, returning the modified source.
+/// Preserves `pub`, `pub(crate)`, `#[serde(...)]`, `/// doc-comments`, and other
+/// attributes verbatim; falls back to IR-based generation when source cannot be parsed.
 pub fn apply_fixes_rust(source: &str, layouts: &[&StructLayout]) -> String {
-    apply_fixes(source, layouts, find_rust_struct_span, generate_rust_fix)
+    apply_fixes_with_source(
+        source,
+        layouts,
+        find_rust_struct_span,
+        generate_rust_fix_from_source,
+    )
 }
 
 /// Apply Go struct reorderings in-place, returning the modified source.
+/// Preserves field tags and comments verbatim; falls back to IR-based generation.
 pub fn apply_fixes_go(source: &str, layouts: &[&StructLayout]) -> String {
-    apply_fixes(source, layouts, find_go_struct_span, generate_go_fix)
+    apply_fixes_with_source(source, layouts, find_go_struct_span, generate_go_fix_from_source)
 }
 
 /// Render a reordered Zig struct definition as source text.
@@ -273,22 +831,31 @@ pub fn find_zig_struct_span(source: &str, struct_name: &str) -> Option<std::ops:
 }
 
 /// Apply Zig struct reorderings in-place, returning the modified source.
+/// Preserves field comments and annotations verbatim; falls back to IR-based generation.
 pub fn apply_fixes_zig(source: &str, layouts: &[&StructLayout]) -> String {
-    apply_fixes(source, layouts, find_zig_struct_span, generate_zig_fix)
+    apply_fixes_with_source(
+        source,
+        layouts,
+        find_zig_struct_span,
+        generate_zig_fix_from_source,
+    )
 }
 
-fn apply_fixes(
+/// Source-aware variant of `apply_fixes`: passes the original struct source text
+/// (extracted from the span) to the generator, enabling verbatim field preservation.
+fn apply_fixes_with_source(
     source: &str,
     layouts: &[&StructLayout],
     find_span: fn(&str, &str) -> Option<std::ops::Range<usize>>,
-    generate: fn(&StructLayout) -> String,
+    generate: fn(&StructLayout, &str) -> String,
 ) -> String {
     // Collect (start, end, replacement) for each matching layout
     let mut replacements: Vec<(usize, usize, String)> = layouts
         .iter()
         .filter_map(|layout| {
             let span = find_span(source, &layout.name)?;
-            let fixed = generate(layout);
+            let struct_source = &source[span.clone()];
+            let fixed = generate(layout, struct_source);
             Some((span.start, span.end, fixed))
         })
         .collect();
@@ -469,5 +1036,163 @@ mod tests {
             b_pos < a_pos,
             "u64 field should come before u8 after reorder"
         );
+    }
+
+    // ── fix quality: source-aware preservation ────────────────────────────────
+
+    #[test]
+    fn rust_fix_preserves_pub_visibility() {
+        let src = "struct S {\n    pub a: u8,\n    pub b: u64,\n}\n";
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_rust(src, &[&layouts[0]]);
+        // pub keyword must appear before both fields
+        assert!(fixed.contains("pub b: u64"), "pub on b must be preserved");
+        assert!(fixed.contains("pub a: u8"), "pub on a must be preserved");
+        // b (u64, align 8) should appear before a (u8, align 1)
+        assert!(fixed.find("pub b").unwrap() < fixed.find("pub a").unwrap());
+    }
+
+    #[test]
+    fn rust_fix_preserves_doc_comments() {
+        let src = concat!(
+            "struct S {\n",
+            "    /// small field\n",
+            "    a: u8,\n",
+            "    /// large field\n",
+            "    b: u64,\n",
+            "}\n"
+        );
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_rust(src, &[&layouts[0]]);
+        assert!(fixed.contains("/// large field"), "doc comment for b must survive");
+        assert!(fixed.contains("/// small field"), "doc comment for a must survive");
+        // The doc comment for b must appear before the doc comment for a
+        assert!(
+            fixed.find("large field").unwrap() < fixed.find("small field").unwrap(),
+            "doc comment ordering must follow field ordering"
+        );
+    }
+
+    #[test]
+    fn rust_fix_preserves_serde_attributes() {
+        let src = concat!(
+            "struct S {\n",
+            "    #[serde(skip)]\n",
+            "    a: u8,\n",
+            "    #[serde(rename = \"big\")]\n",
+            "    b: u64,\n",
+            "}\n"
+        );
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_rust(src, &[&layouts[0]]);
+        assert!(fixed.contains("#[serde(skip)]"), "serde attribute on a must survive");
+        assert!(
+            fixed.contains("#[serde(rename = \"big\")]"),
+            "serde attribute on b must survive"
+        );
+    }
+
+    #[test]
+    fn rust_fix_preserves_pub_crate_visibility() {
+        let src = "struct S {\n    pub(crate) a: u8,\n    pub(crate) b: u64,\n}\n";
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_rust(src, &[&layouts[0]]);
+        assert!(fixed.contains("pub(crate) b: u64"), "pub(crate) on b must be preserved");
+        assert!(fixed.contains("pub(crate) a: u8"), "pub(crate) on a must be preserved");
+    }
+
+    #[test]
+    fn c_fix_preserves_guarded_by_comments() {
+        let src = concat!(
+            "struct S {\n",
+            "    char a; // GUARDED_BY(mu)\n",
+            "    double b; // large field\n",
+            "};\n"
+        );
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let layouts = parse_source_str(src, &crate::SourceLanguage::C, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_c(src, &[&layouts[0]]);
+        assert!(
+            fixed.contains("GUARDED_BY(mu)"),
+            "guard annotation comment must survive reorder"
+        );
+        // double should come before char
+        assert!(fixed.find("double b").unwrap() < fixed.find("char a").unwrap());
+    }
+
+    #[test]
+    fn go_fix_preserves_field_tags() {
+        let src = concat!(
+            "type S struct {\n",
+            "\ta uint8\n",
+            "\tb uint64\n",
+            "}\n"
+        );
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Go, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_go(src, &[&layouts[0]]);
+        // b (8 bytes) should appear before a (1 byte)
+        assert!(fixed.find("\tb uint64").unwrap() < fixed.find("\ta uint8").unwrap());
+    }
+
+    #[test]
+    fn zig_fix_preserves_field_comments() {
+        let src = concat!(
+            "const S = struct {\n",
+            "    // small\n",
+            "    a: u8,\n",
+            "    // large\n",
+            "    b: u64,\n",
+            "};\n"
+        );
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Zig, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_zig(src, &[&layouts[0]]);
+        assert!(fixed.contains("// large"), "comment for b must survive");
+        assert!(fixed.contains("// small"), "comment for a must survive");
+        // b should appear first
+        assert!(fixed.find("// large").unwrap() < fixed.find("// small").unwrap());
+    }
+
+    // ── bad weather: fix quality fallback ─────────────────────────────────────
+
+    #[test]
+    fn rust_fix_from_source_falls_back_when_no_open_brace() {
+        // Struct source that is malformed (no `{`): must not panic, falls back to IR
+        let layout = connection_layout();
+        let out = generate_rust_fix_from_source(&layout, "struct Connection");
+        // IR fallback produces valid Rust syntax
+        assert!(out.starts_with("struct Connection {"));
+    }
+
+    #[test]
+    fn c_fix_from_source_falls_back_when_chunks_empty() {
+        // Body with no parseable fields — chunk extraction returns empty vec,
+        // triggering IR fallback
+        let layout = connection_layout();
+        let out = generate_c_fix_from_source(&layout, "struct Connection { /* no fields */ };");
+        assert!(out.starts_with("struct Connection {"));
+        assert!(out.contains("timeout"));
+    }
+
+    #[test]
+    fn zig_fix_from_source_falls_back_on_missing_field_name() {
+        // IR field names don't match chunk names → fallback to IR
+        let layout = connection_layout();
+        let out =
+            generate_zig_fix_from_source(&layout, "const Connection = struct { x: u8, y: u64, };");
+        // IR fallback must still produce all fields from the layout
+        assert!(out.contains("timeout"));
     }
 }

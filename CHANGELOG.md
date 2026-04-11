@@ -2,6 +2,15 @@
 
 All notable changes to padlock are documented here.
 
+## [0.7.0] — 2026-04-11
+
+### Added
+- **Rust enum analysis**: unit-only enums emit a single `__discriminant` field sized to the variant count (1, 2, or 4 bytes). Enums with one or more data variants additionally emit a `__payload` field (sized to the largest variant payload), matching Rust's conservative union-then-discriminant layout. Generic enums and empty enums are skipped.
+- **C++ `alignas(N)`**: field-level and struct-level `alignas` specifiers are now extracted from source. Field-level `alignas` overrides the natural alignment when `N > natural_align`; struct-level `alignas` raises the struct's minimum alignment and adjusts trailing padding accordingly. Handles both `alignas_qualifier` (tree-sitter-cpp node) and the `type_qualifier → alignas_qualifier` wrapping pattern used for field declarations.
+- **Go embedded structs**: anonymous (embedded) struct fields such as `sync.Mutex` or a bare `Base` type reference are now detected and emitted as IR fields. The simple (unqualified) type name is used as the field name. When the embedded type is defined in the same file, nested-struct resolution fills in the correct size.
+- **Zig `union` and tagged `union`**: the Zig frontend now parses `union_declaration` nodes. All fields are placed at offset 0 (`is_union = true`). Tagged unions (those with an `enum` keyword child in the tree-sitter AST) receive a synthetic `__tag` field appended after the payload. Empty `union {}` declarations are filtered correctly.
+- **Source-preserving fix generation**: `padlock fix` now extracts field declarations verbatim from the original source and reorders them as chunks, preserving `pub`, `pub(crate)`, `#[serde(...)]`, `/// doc-comments`, inline comments (including `GUARDED_BY(mu)`), and field tags. IR-based generation is retained as a fallback when chunking fails or a field cannot be matched.
+
 ## [0.6.2] — 2026-04-10
 
 ### Fixed

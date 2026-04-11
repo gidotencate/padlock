@@ -60,6 +60,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **`cargo padlock`** | Cargo subcommand — builds your project then analyses the binary |
 | **Compile-time assertions** | `#[padlock::assert_no_padding]` / `#[padlock::assert_size(N)]` proc macros |
 | **Watch mode** | `padlock watch <path>` re-analyses on every file change |
+| **Source-preserving fixes** | `padlock fix` reorders field chunks verbatim, keeping `pub`, `#[serde(...)]`, `/// doc-comments`, and guard annotations intact |
 
 ---
 
@@ -433,7 +434,7 @@ Each struct receives a score from 0 (worst) to 100 (perfect packing, no concurre
 
 **Notes on source analysis:**
 - Source analysis is approximate — no compiler is invoked; field sizes come from a built-in type table.
-- C++ `alignas(N)` field annotations are not modeled in source analysis; use binary (DWARF) analysis for accurate C++ layout with alignment overrides.
+- C++ `alignas(N)` field and struct-level annotations are extracted from source and applied to field alignment and struct trailing padding. For the most precise layout (e.g. complex template instantiations), binary (DWARF) analysis remains the authoritative path.
 
 ### Rust repr support
 
@@ -446,7 +447,7 @@ Rust's memory layout depends on which `repr` is in effect. padlock handles each 
 | `repr(packed)` / `repr(packed(n))` | No padding, fields may be unaligned | Accurate for waste | Reorder suggestions suppressed — packing is intentional; note that unaligned field references can cause UB |
 | `repr(align(n))` | Minimum alignment forced | Partial | Source frontend infers standard field sizes; struct-level forced alignment not modeled — use binary analysis |
 | `repr(transparent)` | Same as inner field | Accurate | Single-field wrapper; padding findings correctly suppressed |
-| `repr(u*)` / `repr(i*)` | Enum discriminant size | N/A | Applies to enums, not structs; padlock does not analyze enums |
+| `repr(u*)` / `repr(i*)` | Enum discriminant size | Approximate | Applies to enums; padlock models the discriminant size and (for data enums) a synthetic payload field; exact niched layouts are not modeled |
 
 **Key points for Rust:**
 

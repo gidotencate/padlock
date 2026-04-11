@@ -229,6 +229,7 @@ fn collect_field_declarations(
     out: &mut Vec<(String, String, Option<String>)>,
 ) {
     // field_declaration: field_identifier+ type [comment]
+    // OR embedded type (anonymous field): TypeName [comment]
     let mut field_names: Vec<String> = Vec::new();
     let mut ty_text: Option<String> = None;
 
@@ -245,13 +246,23 @@ fn collect_field_declarations(
         }
     }
 
-    if let Some(ty) = ty_text {
-        // Check for trailing guard comment on this field's line
-        let guard =
-            trailing_comment_on_line(source, node).and_then(|c| extract_guard_from_go_comment(&c));
-        for name in field_names {
-            out.push((name, ty.clone(), guard.clone()));
+    let guard =
+        trailing_comment_on_line(source, node).and_then(|c| extract_guard_from_go_comment(&c));
+
+    if !field_names.is_empty() {
+        if let Some(ty) = ty_text {
+            // Normal named fields
+            for name in field_names {
+                out.push((name, ty.clone(), guard.clone()));
+            }
         }
+    } else if let Some(ty) = ty_text {
+        // Embedded (anonymous) field: `sync.Mutex` or `Base`.
+        // Go field name is the unqualified type name.
+        // The nested-struct resolution pass in lib.rs will later fill in
+        // the correct size/align from other parsed struct layouts.
+        let simple_name = ty.split('.').next_back().unwrap_or(&ty).to_string();
+        out.push((simple_name, ty, guard));
     }
 }
 
@@ -435,5 +446,85 @@ type Safe struct {
         assert_eq!(l.fields[0].size, 16);
         assert_eq!(l.fields[1].offset, 16);
         assert_eq!(l.total_size, 24);
+    }
+
+    // ── embedded struct support ───────────────────────────────────────────────
+
+    #[test]
+    fn embedded_struct_field_uses_type_name_as_field_name() {
+        // `Base` is an embedded field — Go uses the type name as the field name.
+        let src = r#"package p
+type Base struct { X int32 }
+type Derived struct {
+    Base
+    Y int32
+}
+"#;
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let derived = layouts.iter().find(|l| l.name == "Derived").expect("Derived");
+        // Must have a field named "Base"
+        assert!(
+            derived.fields.iter().any(|f| f.name == "Base"),
+            "embedded field should be named 'Base'"
+        );
+    }
+
+    #[test]
+    fn embedded_qualified_type_uses_unqualified_name() {
+        // `sync.Mutex` embedded — field name should be "Mutex"
+        let src = r#"package p
+type Safe struct {
+    sync.Mutex
+    Value int64
+}
+"#;
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Safe").expect("Safe");
+        assert!(
+            l.fields.iter().any(|f| f.name == "Mutex"),
+            "embedded sync.Mutex should produce field named 'Mutex'"
+        );
+    }
+
+    #[test]
+    fn embedded_field_has_non_zero_size_from_resolution() {
+        // After lib.rs nested-struct resolution, Base's size should be filled in.
+        // We test via parse_source_str which triggers resolution.
+        let src = r#"package p
+type Inner struct { A int64; B int64 }
+type Outer struct {
+    Inner
+    C int32
+}
+"#;
+        use crate::{SourceLanguage, parse_source_str};
+        let layouts = parse_source_str(src, &SourceLanguage::Go, &X86_64_SYSV).unwrap();
+        let outer = layouts.iter().find(|l| l.name == "Outer").expect("Outer");
+        let inner_field = outer.fields.iter().find(|f| f.name == "Inner").expect("Inner field");
+        // Inner struct is 16 bytes (two int64s)
+        assert_eq!(inner_field.size, 16, "embedded Inner field should be resolved to 16 bytes");
+    }
+
+    #[test]
+    fn struct_with_no_embedded_fields_unaffected() {
+        let src = "package p\ntype S struct { A int32; B int64 }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields.len(), 2);
+        assert_eq!(l.fields[0].name, "A");
+        assert_eq!(l.fields[1].name, "B");
+    }
+
+    // ── bad weather: embedded fields ──────────────────────────────────────────
+
+    #[test]
+    fn embedded_unknown_type_falls_back_to_pointer_size() {
+        // If the embedded type is not defined in the file, size = pointer_size
+        let src = "package p\ntype S struct { external.Type\nX int32 }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").expect("S");
+        let emb = l.fields.iter().find(|f| f.name == "Type").expect("Type field");
+        // Falls back to pointer size (8 on x86_64) since type is unknown
+        assert_eq!(emb.size, 8);
     }
 }

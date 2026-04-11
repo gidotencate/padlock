@@ -173,7 +173,7 @@ struct alignas(64) StatsPadded {
 **Limitations**
 
 - Source analysis cannot evaluate compile-time constant expressions (e.g. `[u8; 64 - size_of::<T>()]`), so padded structs may still be flagged if the padding field is opaque.
-- C++ `alignas` field annotations are not modeled in source analysis; use binary (DWARF) analysis for accurate layout with alignment overrides.
+- C++ `alignas` is extracted and applied in source analysis (field-level and struct-level). For the most precise layout with complex templates or dependent `alignas` expressions, binary (DWARF) analysis remains the authoritative path.
 
 ---
 

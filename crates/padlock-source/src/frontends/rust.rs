@@ -7,7 +7,7 @@
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
 use quote::ToTokens;
-use syn::{Fields, ItemStruct, Type, visit::Visit};
+use syn::{Fields, ItemEnum, ItemStruct, Type, visit::Visit};
 
 // ── attribute guard extraction ────────────────────────────────────────────────
 
@@ -292,6 +292,143 @@ impl<'ast> Visit<'ast> for StructVisitor {
 
         self.layouts.push(layout);
     }
+
+    fn visit_item_enum(&mut self, node: &'ast ItemEnum) {
+        syn::visit::visit_item_enum(self, node);
+
+        // Skip generic enums (layout depends on unknown type arguments)
+        if !node.generics.params.is_empty() {
+            return;
+        }
+
+        let name = node.ident.to_string();
+        let n_variants = node.variants.len();
+        if n_variants == 0 {
+            return;
+        }
+
+        // Discriminant size: smallest integer that fits the variant count.
+        // Rust defaults to isize but uses the minimal repr in practice.
+        let disc_size: usize = if n_variants <= 256 { 1 } else if n_variants <= 65536 { 2 } else { 4 };
+
+        // Check if all variants are unit (C-like enum, no payload)
+        let all_unit = node.variants.iter().all(|v| matches!(v.fields, Fields::Unit));
+
+        if all_unit {
+            // Pure discriminant — no payload storage
+            let layout = StructLayout {
+                name,
+                total_size: disc_size,
+                align: disc_size,
+                fields: vec![Field {
+                    name: "__discriminant".to_string(),
+                    ty: TypeInfo::Primitive {
+                        name: format!("u{}", disc_size * 8),
+                        size: disc_size,
+                        align: disc_size,
+                    },
+                    offset: 0,
+                    size: disc_size,
+                    align: disc_size,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                }],
+                source_file: None,
+                source_line: Some(node.ident.span().start().line as u32),
+                arch: self.arch,
+                is_packed: false,
+                is_union: false,
+            };
+            self.layouts.push(layout);
+            return;
+        }
+
+        // Data enum: find the maximum variant payload size and alignment.
+        let mut max_payload_size = 0usize;
+        let mut max_payload_align = 1usize;
+
+        for variant in &node.variants {
+            let var_fields: Vec<(String, Type)> = match &variant.fields {
+                Fields::Named(nf) => nf
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let n = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                        (n, f.ty.clone())
+                    })
+                    .collect(),
+                Fields::Unnamed(uf) => uf
+                    .unnamed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (format!("_{i}"), f.ty.clone()))
+                    .collect(),
+                Fields::Unit => vec![],
+            };
+
+            if !var_fields.is_empty() {
+                let var_layout = simulate_rust_layout(String::new(), &var_fields, false, self.arch);
+                if var_layout.total_size > max_payload_size {
+                    max_payload_size = var_layout.total_size;
+                }
+                max_payload_align = max_payload_align.max(var_layout.align);
+            }
+        }
+
+        // Conservative model: payload first at offset 0, discriminant immediately after.
+        // Rust's actual layout is compiler-controlled (niche optimisation etc.);
+        // this model gives a safe upper-bound for padding analysis.
+        let payload_align = max_payload_align.max(1);
+        let disc_offset = max_payload_size;
+        let total_before_pad = disc_offset + disc_size;
+        let total_align = payload_align.max(disc_size);
+        let total_size = total_before_pad.next_multiple_of(total_align);
+
+        let mut fields: Vec<Field> = Vec::new();
+        if max_payload_size > 0 {
+            fields.push(Field {
+                name: "__payload".to_string(),
+                ty: TypeInfo::Opaque {
+                    name: format!("largest_variant_payload ({}B)", max_payload_size),
+                    size: max_payload_size,
+                    align: payload_align,
+                },
+                offset: 0,
+                size: max_payload_size,
+                align: payload_align,
+                source_file: None,
+                source_line: None,
+                access: AccessPattern::Unknown,
+            });
+        }
+        fields.push(Field {
+            name: "__discriminant".to_string(),
+            ty: TypeInfo::Primitive {
+                name: format!("u{}", disc_size * 8),
+                size: disc_size,
+                align: disc_size,
+            },
+            offset: disc_offset,
+            size: disc_size,
+            align: disc_size,
+            source_file: None,
+            source_line: None,
+            access: AccessPattern::Unknown,
+        });
+
+        self.layouts.push(StructLayout {
+            name,
+            total_size,
+            align: total_align,
+            fields,
+            source_file: None,
+            source_line: Some(node.ident.span().start().line as u32),
+            arch: self.arch,
+            is_packed: false,
+            is_union: false,
+        });
+    }
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -571,5 +708,109 @@ struct Concrete { a: u32, b: u64 }
         let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
         assert_eq!(layouts.len(), 1);
         assert_eq!(layouts[0].name, "Concrete");
+    }
+
+    // ── enum data variant support ─────────────────────────────────────────────
+
+    #[test]
+    fn unit_enum_is_just_discriminant() {
+        let src = "enum Color { Red, Green, Blue }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let l = &layouts[0];
+        assert_eq!(l.name, "Color");
+        assert_eq!(l.total_size, 1); // 3 variants → u8 discriminant
+        assert_eq!(l.fields.len(), 1);
+        assert_eq!(l.fields[0].name, "__discriminant");
+    }
+
+    #[test]
+    fn unit_enum_with_many_variants_uses_u16_discriminant() {
+        // Build an enum with 300 variants (> 256)
+        let variants: String = (0..300).map(|i| format!("V{i}")).collect::<Vec<_>>().join(", ");
+        let src = format!("enum Big {{ {variants} }}");
+        let layouts = parse_rust(&src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.total_size, 2); // needs u16
+        assert_eq!(l.fields[0].size, 2);
+    }
+
+    #[test]
+    fn data_enum_total_size_covers_largest_variant() {
+        // Quit: no payload; Move: {x: i32, y: i32} = 8B; Write: String = 24B
+        // Max payload = 24B (String), disc = 1B → total = 32B (aligned to 8)
+        let src = r#"
+enum Message {
+    Quit,
+    Move { x: i32, y: i32 },
+    Write(String),
+}
+"#;
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.name, "Message");
+        // __payload (24B, align 8) + __discriminant (1B) → padded to 32B
+        assert_eq!(l.total_size, 32);
+        assert_eq!(l.fields.len(), 2);
+        let payload = l.fields.iter().find(|f| f.name == "__payload").unwrap();
+        assert_eq!(payload.size, 24); // String = 3×pointer
+    }
+
+    #[test]
+    fn generic_enum_is_skipped() {
+        let src = "enum Wrapper<T> { Some(T), None }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.is_empty(),
+            "generic enums should be skipped; got {:?}",
+            layouts.iter().map(|l| &l.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_enum_is_skipped() {
+        let src = "enum Never {}";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(layouts.is_empty());
+    }
+
+    #[test]
+    fn enum_with_only_unit_variants_has_no_payload_field() {
+        let src = "enum Dir { North, South, East, West }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(!layouts[0].fields.iter().any(|f| f.name == "__payload"));
+    }
+
+    #[test]
+    fn data_enum_and_sibling_struct_both_parsed() {
+        let src = r#"
+enum Status { Ok, Err(u32) }
+struct Conn { port: u16, status: u32 }
+"#;
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 2);
+        assert!(layouts.iter().any(|l| l.name == "Status"));
+        assert!(layouts.iter().any(|l| l.name == "Conn"));
+    }
+
+    // ── bad weather: enums ────────────────────────────────────────────────────
+
+    #[test]
+    fn enum_with_only_zero_sized_variants_has_payload_size_zero() {
+        // All unit variants → treated as unit enum, total = disc_size
+        let src = "enum E { A, B }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.total_size, 1);
+    }
+
+    #[test]
+    fn enum_mixed_unit_and_data_includes_max_payload() {
+        // Mix: unit variant + data variant; payload comes from data variant
+        let src = "enum E { Nothing, Data(u64) }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        let payload = l.fields.iter().find(|f| f.name == "__payload").unwrap();
+        assert_eq!(payload.size, 8); // u64
     }
 }

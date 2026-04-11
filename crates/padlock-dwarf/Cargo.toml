@@ -10,7 +10,7 @@ categories.workspace  = true
 readme                = "README.md"
 
 [dependencies]
-padlock-core = { path = "../padlock-core", version = "0.8.0" }
+padlock-core = { path = "../padlock-core", version = "0.8.1" }
 anyhow       = "1"
 gimli        = "0.29"
 object       = { version = "0.39", features = ["read"] }

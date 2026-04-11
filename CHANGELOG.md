@@ -2,6 +2,16 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.1] — 2026-04-11
+
+### Fixed
+- `cargo clippy --workspace -- -D warnings` now passes cleanly. Fixes:
+  - `explain.rs`: `map_or(true, …)` → `is_none_or(…)`
+  - `rust.rs`: two nested `if`/`if-let` blocks collapsed to let-chain form
+  - `c_cpp.rs`: `parse_anonymous_nested` return type aliased to `RawField` (was `type_complexity`); `#[allow(clippy::only_used_in_recursion)]` on the `arch` parameter that threads through the recursive call
+  - `cache.rs`: nested `if let Some(dir)` / `if err` collapsed to let-chain
+  - `commands/analyze.rs`: 8-argument `run` refactored — output and arch options moved into `AnalyzeOpts` struct, bringing the function back under the 7-argument limit
+
 ## [0.8.0] — 2026-04-11
 
 ### Added

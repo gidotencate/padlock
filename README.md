@@ -65,6 +65,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Severity CI gate** | `--fail-on-severity medium\|low` exits non-zero when any finding meets or exceeds the threshold |
 | **Parallel parsing** | Directory walks parse source files in parallel (rayon), with an on-disk mtime cache (`.padlock-cache/`) to skip unchanged files on repeat runs |
 | **Cache-line boundaries** | `padlock explain` inserts a visual separator row each time a field crosses into a new 64-byte (or 128-byte) cache line |
+| **VS Code extension** | Findings in the Problems panel on save, status bar health score, hover popups, quick-fix lightbulb, and diff-preview fix-all |
 
 ---
 
@@ -758,6 +759,22 @@ pre-commit:
       glob: "*.{c,cpp,h,rs,go}"
       run: padlock analyze {staged_files} --fail-on-severity high
 ```
+
+---
+
+## VS Code Extension
+
+Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=gidotencate.padlock) or search for **padlock** in the Extensions panel.
+
+Requires `padlock` on your `PATH` (`cargo install padlock-cli`).
+
+- **Problems panel** — findings appear automatically on file save for Rust, C, C++, Go, and Zig files.
+- **Status bar** — live health score and letter grade (`$(lock) 67 D`) for the active file; yellow when High findings are present.
+- **Hover** — hover over a struct definition line to see score bar, wasted bytes, and each finding.
+- **Quick-fix lightbulb** — `ReorderSuggestion` diagnostics offer an in-place fix for the struct or a diff-preview fix for the whole file.
+- **`padlock: Fix all (preview)`** — opens the VS Code diff editor before writing any changes; saves a `.bak` backup on apply.
+
+See [editors/vscode/README.md](editors/vscode/README.md) for the full extension documentation.
 
 ---
 

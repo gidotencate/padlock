@@ -61,6 +61,10 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Compile-time assertions** | `#[padlock::assert_no_padding]` / `#[padlock::assert_size(N)]` proc macros |
 | **Watch mode** | `padlock watch <path>` re-analyses on every file change |
 | **Source-preserving fixes** | `padlock fix` reorders field chunks verbatim, keeping `pub`, `#[serde(...)]`, `/// doc-comments`, and guard annotations intact |
+| **Project health summary** | `padlock summary` shows aggregate score, severity bar chart, worst files, and worst structs in one terminal screen |
+| **Severity CI gate** | `--fail-on-severity medium\|low` exits non-zero when any finding meets or exceeds the threshold |
+| **Parallel parsing** | Directory walks parse source files in parallel (rayon), with an on-disk mtime cache (`.padlock-cache/`) to skip unchanged files on repeat runs |
+| **Cache-line boundaries** | `padlock explain` inserts a visual separator row each time a field crosses into a new 64-byte (or 128-byte) cache line |
 
 ---
 
@@ -111,11 +115,18 @@ padlock analyze src/ --json
 # Output SARIF for CI
 padlock analyze myfile.cpp --sarif > padlock.sarif
 
+# Project health summary (score, severity chart, worst files/structs)
+padlock summary src/
+padlock summary src/ --top 10
+
 # Show field-reordering diff
 padlock diff src/
 
 # Show what fix would do (without writing)
 padlock fix src/ --dry-run
+
+# Stricter CI gate: fail on medium-severity or worse
+padlock analyze src/ --fail-on-severity medium
 
 # List all structs with sizes, holes, and scores
 padlock list src/ --sort-by waste
@@ -155,6 +166,43 @@ Flags:
 - `--sort-by score|size|waste|name` — sort order (default: score, worst first)
 - `--cache-line-size <N>` — override the assumed cache-line size in bytes (default: 64, or 128 on Apple Silicon). Useful for comparing performance across architectures or analysing structs for embedded targets with non-standard cache geometries.
 - `--word-size <N>` — override pointer/word size in bytes (e.g. `--word-size 4` for 32-bit targets). Affects all pointer-sized fields.
+- `--fail-on-severity high|medium|low` — exit non-zero when any finding meets or exceeds this severity. `high` is the default CI gate (same as exit-on-high-finding behaviour); `medium` and `low` tighten the gate further.
+
+---
+
+### `padlock summary <path>… [--top N]`
+
+Shows a single-screen project health overview: aggregate weighted score + letter grade, severity bar chart, the N worst files, and the N worst structs. Designed for large codebases where `analyze` output is too verbose.
+
+```
+$ padlock summary src/
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Score   61 / 100   D    42 structs · 9 files · 384B wasted
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  🔴 High     ████████░░░░░░░░░░░░    14  (33%)
+  🟡 Medium   ████░░░░░░░░░░░░░░░░     7  (16%)
+  🔵 Low      ██░░░░░░░░░░░░░░░░░░     4  (10%)
+  ✅ Clean    ██████░░░░░░░░░░░░░░    17  (40%)
+
+  Worst files                              score    High   wasted
+  ────────────────────────────────────────────────────────────────────
+  src/network/connection.rs                   33       2     96B
+  src/stats/metrics.rs                        42       1    128B
+
+  Worst structs                   score   location
+  ────────────────────────────────────────────────────────────────────
+  Connection                         33   src/network/connection.rs:12
+  Stats                              42   src/stats/metrics.rs:8
+
+  Run `padlock analyze src/network/connection.rs` for full detail.
+```
+
+Flags:
+- `--top <N>` — number of worst files and structs to show (default: 5)
+- `--cache-line-size <N>` / `--word-size <N>` — arch overrides
+- `--filter` / `--exclude` — same pattern filters as `analyze`
 
 ---
 

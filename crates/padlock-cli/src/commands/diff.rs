@@ -57,7 +57,7 @@ fn expand_to_source_files(paths: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
             files.push(path.clone());
         } else {
             anyhow::bail!(
-                "diff only works on source files (.c, .cpp, .rs, .go) or directories; got {}",
+                "diff only works on source files (.c, .cpp, .rs, .go, .zig) or directories; got {}",
                 path.display()
             );
         }

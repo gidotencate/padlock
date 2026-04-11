@@ -85,11 +85,14 @@ fn fix_file(path: &Path, dry_run: bool, re: Option<&regex::Regex>) -> anyhow::Re
                     .map(|r| source[r].to_string()),
             };
 
+        let struct_src = old_text.as_deref().unwrap_or("");
         let new_text = match lang {
-            SourceLanguage::C | SourceLanguage::Cpp => fixgen::generate_c_fix(layout),
-            SourceLanguage::Rust => fixgen::generate_rust_fix(layout),
-            SourceLanguage::Go => fixgen::generate_go_fix(layout),
-            SourceLanguage::Zig => fixgen::generate_zig_fix(layout),
+            SourceLanguage::C | SourceLanguage::Cpp => {
+                fixgen::generate_c_fix_from_source(layout, struct_src)
+            }
+            SourceLanguage::Rust => fixgen::generate_rust_fix_from_source(layout, struct_src),
+            SourceLanguage::Go => fixgen::generate_go_fix_from_source(layout, struct_src),
+            SourceLanguage::Zig => fixgen::generate_zig_fix_from_source(layout, struct_src),
         };
 
         let diff_base = old_text.as_deref().unwrap_or(&source);
@@ -137,7 +140,8 @@ fn expand_to_source_files(paths: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
             files.push(path.clone());
         } else {
             anyhow::bail!(
-                "fix only works on source files (.c, .cpp, .rs, .go, .zig) or directories; got {}",
+                "fix only works on source files (.c, .cpp, .rs, .go, .zig) or \
+                 directories; got {}",
                 path.display()
             );
         }

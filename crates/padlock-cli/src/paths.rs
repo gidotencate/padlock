@@ -15,15 +15,18 @@
 use std::path::{Path, PathBuf};
 
 use padlock_core::ir::StructLayout;
+use rayon::prelude::*;
 
 /// Collect StructLayouts from a list of paths and return them together with
 /// the list of paths that were actually analyzed (for reporting purposes).
 ///
-/// Directories are expanded recursively. Errors from individual files are
-/// printed as warnings and skipped.
+/// Directories are expanded recursively and parsed in parallel.  Source files
+/// are served from an on-disk mtime cache when possible, skipping unchanged
+/// files.  Errors from individual files are printed as warnings and skipped.
 pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, Vec<String>)> {
     let mut all_layouts: Vec<StructLayout> = Vec::new();
     let mut analyzed: Vec<String> = Vec::new();
+    let mut cache = crate::cache::ParseCache::load();
 
     for path in paths {
         if path.is_dir() {
@@ -36,18 +39,59 @@ pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, 
                 continue;
             }
             let arch = padlock_dwarf::reader::detect_arch_from_host();
-            for file in files {
-                match padlock_source::parse_source(&file, arch) {
-                    Ok(layouts) => {
-                        analyzed.push(file.display().to_string());
-                        all_layouts.extend(layouts);
+
+            // Partition files into cache hits and misses.
+            let mut hits: Vec<(PathBuf, Vec<StructLayout>)> = Vec::new();
+            let mut misses: Vec<PathBuf> = Vec::new();
+            for file in &files {
+                if let Some(cached) = cache.get(file) {
+                    hits.push((file.clone(), cached));
+                } else {
+                    misses.push(file.clone());
+                }
+            }
+
+            // Parse cache-miss files in parallel.
+            let miss_results: Vec<_> = misses
+                .par_iter()
+                .map(|file| {
+                    let r = padlock_source::parse_source(file, arch);
+                    (file.clone(), r)
+                })
+                .collect();
+
+            // Store new results in cache.
+            for (file, result) in &miss_results {
+                if let Ok(layouts) = result {
+                    cache.insert(file, layouts.clone());
+                }
+            }
+
+            // Merge hits and misses back in original file order.
+            for file in &files {
+                if let Some((_, layouts)) = hits.iter().find(|(f, _)| f == file) {
+                    analyzed.push(file.display().to_string());
+                    all_layouts.extend(layouts.clone());
+                } else if let Some((_, result)) = miss_results.iter().find(|(f, _)| f == file) {
+                    match result {
+                        Ok(layouts) => {
+                            analyzed.push(file.display().to_string());
+                            all_layouts.extend(layouts.clone());
+                        }
+                        Err(e) => eprintln!("padlock: warning: {}: {e}", file.display()),
                     }
-                    Err(e) => eprintln!("padlock: warning: {}: {e}", file.display()),
                 }
             }
         } else if padlock_source::detect_language(path).is_some() {
             let arch = padlock_dwarf::reader::detect_arch_from_host();
-            let layouts = padlock_source::parse_source(path, arch)?;
+            // Try cache for single source files too.
+            let layouts = if let Some(cached) = cache.get(path) {
+                cached
+            } else {
+                let layouts = padlock_source::parse_source(path, arch)?;
+                cache.insert(path, layouts.clone());
+                layouts
+            };
             analyzed.push(path.display().to_string());
             all_layouts.extend(layouts);
         } else {
@@ -65,6 +109,9 @@ pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, 
             all_layouts.extend(layouts);
         }
     }
+
+    // Persist updated cache entries.
+    cache.flush();
 
     Ok((all_layouts, analyzed))
 }

@@ -29,6 +29,17 @@ pub fn generate_c_fix(layout: &StructLayout) -> String {
 /// Render a reordered Rust struct definition as source text.
 pub fn generate_rust_fix(layout: &StructLayout) -> String {
     let optimal = optimal_order(layout);
+    // Detect tuple struct: all field names are `_N` (digit-only suffix)
+    let is_tuple = optimal
+        .iter()
+        .all(|f| f.name.starts_with('_') && f.name[1..].chars().all(|c| c.is_ascii_digit()));
+    if is_tuple {
+        let types: Vec<String> = optimal
+            .iter()
+            .map(|f| field_type_name(f).to_string())
+            .collect();
+        return format!("struct {}({});\n", layout.name, types.join(", "));
+    }
     let mut out = format!("struct {} {{\n", layout.name);
     for field in &optimal {
         let ty = field_type_name(field);
@@ -521,6 +532,16 @@ pub fn generate_rust_fix_from_source(layout: &StructLayout, struct_source: &str)
 }
 
 fn try_source_aware_rust(layout: &StructLayout, struct_source: &str) -> Option<String> {
+    // Detect tuple struct: `struct Name(...)` — body delimited by parens not braces.
+    let is_tuple = layout
+        .fields
+        .iter()
+        .all(|f| f.name.starts_with('_') && f.name[1..].chars().all(|c| c.is_ascii_digit()));
+
+    if is_tuple {
+        return try_source_aware_rust_tuple(layout, struct_source);
+    }
+
     let brace_open = struct_source.find('{')?;
     // Find the matching close brace using match_braces
     let body_with_close = &struct_source[brace_open..];
@@ -561,6 +582,111 @@ fn try_source_aware_rust(layout: &StructLayout, struct_source: &str) -> Option<S
     let after = &struct_source[brace_open + body_len..];
     result.push_str(after);
     Some(result)
+}
+
+/// Source-aware fix for tuple structs: `struct Name(T0, T1, ...);`
+/// Field names are `_0`, `_1`, … matching the IR names.
+fn try_source_aware_rust_tuple(layout: &StructLayout, struct_source: &str) -> Option<String> {
+    let paren_open = struct_source.find('(')?;
+    let body_with_close = &struct_source[paren_open..];
+    // Find matching closing paren
+    let paren_len = match_parens(body_with_close)?;
+    let body = &body_with_close[1..paren_len - 1]; // between ( and )
+
+    // Split by `,` at depth 0 to get individual type chunks (in order)
+    let type_chunks = extract_tuple_type_chunks(body);
+    if type_chunks.is_empty() {
+        return None;
+    }
+
+    // The original chunks are in declaration order: chunk[0] → `_0`, etc.
+    // Build a map from index-name to the type chunk text.
+    let chunk_map: std::collections::HashMap<String, &str> = type_chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (format!("_{i}"), c.as_str()))
+        .collect();
+
+    let optimal = optimal_order(layout);
+    if optimal.iter().any(|f| !chunk_map.contains_key(&f.name)) {
+        return None;
+    }
+
+    // Reconstruct: preserve header up to and including `(`
+    let header = &struct_source[..=paren_open];
+    let mut result = header.to_string();
+    let reordered: Vec<&str> = optimal.iter().map(|f| chunk_map[&f.name]).collect();
+    result.push_str(&reordered.join(", "));
+    result.push(')');
+    // Preserve trailing `;` and anything after
+    let after = &struct_source[paren_open + paren_len..];
+    result.push_str(after);
+    Some(result)
+}
+
+/// Split a tuple struct body (text between `(` and `)`) by `,` at depth 0.
+fn extract_tuple_type_chunks(body: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut depth: i32 = 0;
+    let mut chunk_start = 0usize;
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'>' | b']' => {
+                depth = (depth - 1).max(0);
+                i += 1;
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = (depth - 1).max(0);
+                i += 1;
+            }
+            b',' if depth == 0 => {
+                let chunk = body[chunk_start..i].trim().to_string();
+                if !chunk.is_empty() {
+                    result.push(chunk);
+                }
+                i += 1;
+                chunk_start = i;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    let tail = body[chunk_start..].trim().to_string();
+    if !tail.is_empty() {
+        result.push(tail);
+    }
+    result
+}
+
+/// Find the matching `)` from the start of `s` (which must begin with `(`).
+/// Returns byte index one past the closing `)`.
+fn match_parens(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Generate a source-preserving C/C++ fix.

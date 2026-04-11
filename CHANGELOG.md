@@ -2,6 +2,18 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.0] — 2026-04-11
+
+### Added
+- **`padlock summary`**: project health overview that fits in one terminal screen. Shows aggregate weighted score with letter grade (A–F), a severity bar chart (High / Medium / Low / Clean), the N worst files grouped by source file (with per-file score, High-finding count, and total wasted bytes), and the N worst structs (by score then wasted bytes). Ends with a next-step hint: `Run 'padlock analyze <worst-file>' for full detail.` Supports `--top N` (default 5), `--cache-line-size`, `--word-size`, and the same `--filter` / `--exclude` flags as `analyze`.
+- **`--fail-on-severity high|medium|low`** flag on `padlock analyze`: exits non-zero when any finding meets or exceeds the specified severity. `medium` triggers on Medium and High; `low` triggers on any finding. Composable with `--fail-below` score threshold.
+- **`repr(align(N))` in Rust source**: the Rust frontend now parses `#[repr(align(N))]` on struct definitions. The effective alignment is raised to `N` (when `N > natural_align`); trailing padding is adjusted so the total size is a multiple of the new alignment. Exposed as a new `repr_align` helper in `padlock-source`.
+- **Rust tuple structs**: the Rust frontend now recognizes and parses tuple struct declarations (`struct Foo(u64, u8)`). Fields are named `_0`, `_1`, etc. Source-aware fix generation (`padlock fix`) reorders tuple fields inside the `(...)` body verbatim, preserving visibility modifiers and attribute annotations. IR-level fallback emits `struct Name(T0, T1, …);`.
+- **C/C++ anonymous nested structs/unions**: anonymous `struct`/`union` members inside outer `struct`/`union` declarations are now flattened into the parent layout, matching how the C/C++ compiler treats them. Named nested structs (used as field types) are still treated as opaque fields.
+- **Cache-line boundary markers in `explain`**: when a struct's fields span more than one cache line, `padlock explain` inserts a visual separator row (`╞── cache line N (offset O) ════╡`) at each boundary. Single-cache-line structs show no separator.
+- **Parallel file parsing**: directory walks now parse source files in parallel using `rayon`, significantly reducing wall-clock time on large codebases.
+- **On-disk parse cache**: unchanged source files are served from `.padlock-cache/layouts.json` (keyed by path + mtime) and skipped on repeat runs. The cache is silently invalidated on mtime change and ignored if corrupt. Binary and DWARF paths bypass the cache.
+
 ## [0.7.1] — 2026-04-11
 
 ### Fixed

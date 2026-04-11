@@ -10,8 +10,27 @@
 
 use anyhow::Context;
 use clap::{Args, ValueEnum};
-use padlock_core::findings::{Finding, Report};
+use padlock_core::findings::{Finding, Report, Severity};
 use padlock_core::ir::{StructLayout, find_padding};
+
+/// Severity level for the `--fail-on-severity` flag.
+#[derive(Clone, ValueEnum)]
+pub enum FailSeverity {
+    High,
+    Medium,
+    Low,
+}
+
+impl FailSeverity {
+    /// Returns true if `sev` meets or exceeds this threshold.
+    pub fn matches(&self, sev: &Severity) -> bool {
+        match self {
+            FailSeverity::High => matches!(sev, Severity::High),
+            FailSeverity::Medium => matches!(sev, Severity::High | Severity::Medium),
+            FailSeverity::Low => true,
+        }
+    }
+}
 
 /// How to order the output structs.
 #[derive(Clone, ValueEnum, Default)]
@@ -118,6 +137,29 @@ mod tests {
     use super::*;
     use padlock_core::findings::Report;
     use padlock_core::ir::test_fixtures::{connection_layout, packed_layout};
+
+    // ── FailSeverity::matches ─────────────────────────────────────────────────
+
+    #[test]
+    fn fail_severity_high_only_matches_high() {
+        assert!(FailSeverity::High.matches(&Severity::High));
+        assert!(!FailSeverity::High.matches(&Severity::Medium));
+        assert!(!FailSeverity::High.matches(&Severity::Low));
+    }
+
+    #[test]
+    fn fail_severity_medium_matches_high_and_medium() {
+        assert!(FailSeverity::Medium.matches(&Severity::High));
+        assert!(FailSeverity::Medium.matches(&Severity::Medium));
+        assert!(!FailSeverity::Medium.matches(&Severity::Low));
+    }
+
+    #[test]
+    fn fail_severity_low_matches_all() {
+        assert!(FailSeverity::Low.matches(&Severity::High));
+        assert!(FailSeverity::Low.matches(&Severity::Medium));
+        assert!(FailSeverity::Low.matches(&Severity::Low));
+    }
 
     fn args(
         filter: Option<&str>,

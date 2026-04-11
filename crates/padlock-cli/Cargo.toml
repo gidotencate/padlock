@@ -18,10 +18,10 @@ name = "cargo-padlock"
 path = "src/bin/cargo_padlock.rs"
 
 [dependencies]
-padlock-core   = { path = "../padlock-core",   version = "0.7.1" }
-padlock-dwarf  = { path = "../padlock-dwarf",  version = "0.7.1" }
-padlock-source = { path = "../padlock-source", version = "0.7.1" }
-padlock-output = { path = "../padlock-output", version = "0.7.1" }
+padlock-core   = { path = "../padlock-core",   version = "0.8.0" }
+padlock-dwarf  = { path = "../padlock-dwarf",  version = "0.8.0" }
+padlock-source = { path = "../padlock-source", version = "0.8.0" }
+padlock-output = { path = "../padlock-output", version = "0.8.0" }
 serde          = { version = "1", features = ["derive"] }
 serde_json     = "1"
 regex          = "1"
@@ -32,6 +32,7 @@ owo-colors     = "4"
 comfy-table    = "7"
 toml           = "1"
 notify         = { version = "6", features = ["macos_fsevent"] }
+rayon          = "1"
 
 [dev-dependencies]
 tempfile = "3"

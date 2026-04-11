@@ -30,12 +30,17 @@ cargo check
 # Lint
 cargo clippy
 
-# Format
+# Format (always run before committing — CI enforces this)
 cargo fmt
+cargo fmt --check   # verify clean
 
 # Run the CLI (after build)
 ./target/debug/padlock
 ```
+
+**Commit workflow**: `cargo fmt` → `cargo fmt --check` → `cargo clippy` → `cargo test` → commit. Skipping `cargo fmt` causes CI failures.
+
+**Version bumps** touch six files: `Cargo.toml` (workspace), `crates/padlock-{cli,dwarf,output,source}/Cargo.toml` (inter-crate dep versions), and `editors/vscode/package.json`.
 
 ## Crate architecture
 
@@ -49,8 +54,9 @@ This is a Cargo workspace with six crates:
 
 - **`padlock-dwarf`** — Binary analysis backend. Reads DWARF debug info (via `gimli` + `object`) and PDB files (via `pdb`) to extract struct layout data from compiled binaries. Produces `padlock-core` IR.
 
-- **`padlock-source`** — Source analysis backend. Parses source files using `syn` (Rust) and `tree-sitter` (C/C++/Go) to extract struct definitions. Also handles concurrency annotation detection (`concurrency.rs`) and fix generation (`fixgen.rs`).
+- **`padlock-source`** — Source analysis backend. Parses source files using `syn` (Rust) and `tree-sitter` (C/C++/Go/Zig) to extract struct definitions. Also handles concurrency annotation detection (`concurrency.rs`) and fix generation (`fixgen.rs`).
   - **Explicit guard annotations**: the Rust frontend reads `#[lock_protected_by = "mu"]`, `#[guarded_by("mu")]`, `#[protected_by = "mu"]`, `#[pt_guarded_by(...)]` on individual fields and sets `AccessPattern::Concurrent { guard }` directly — bypassing the heuristic type-name pass in `concurrency.rs` (which skips non-`Unknown` fields). The C/C++ frontend extracts `GUARDED_BY(mu)` / `__attribute__((guarded_by(mu)))` / `PT_GUARDED_BY(mu)` from field source text. The Go frontend reads `// padlock:guard=mu`, `// guarded_by: mu`, and `// +checklocksprotects:mu` (gVisor-style) as trailing line comments.
+  - **Fix generation** (`fixgen.rs`): two-layer design. Source-aware generators (`generate_*_fix_from_source`) extract verbatim field chunks from original source (preserving `pub`, attributes, doc-comments, guard annotations) and reorder them. IR-based generators (`generate_*_fix`) synthesise from type names and serve as fallback. `apply_fixes_with_source` passes the found struct text to the source-aware generator; `find_*_struct_span` locates struct byte ranges for in-place rewriting.
 
 - **`padlock-output`** — Output formatters: JSON, SARIF (for CI/tooling integration), human-readable summary, and diff format.
 
@@ -71,3 +77,6 @@ Source/binary input → (`padlock-dwarf` or `padlock-source`) → `padlock-core`
 - **Test fixtures**: `padlock-core` has a `test-helpers` feature that exposes `ir::test_fixtures` (e.g. `connection_layout()`, `packed_layout()`) for use in other crates: `cargo test -p padlock-core --features test-helpers`.
 - **`Report::from_layouts`** in `findings.rs` is the single entry point that runs all analysis passes and produces `StructReport` results with scored findings.
 - **Severity thresholds**: PaddingWaste ≥30% waste → High, ≥10% → Medium, <10% → Low. ReorderSuggestion savings ≥8 bytes → High, else Medium. FalseSharing is always High.
+- **Rust enums**: unit-only enums emit a `__discriminant` field; data enums additionally emit a `__payload` field (sized to the largest variant) before the discriminant. Generic and empty enums are skipped.
+- **Zig unions**: `union_declaration` nodes produce layouts with all fields at offset 0 (`is_union = true`). Tagged unions (`union(enum)`) get a synthetic `__tag` field after the payload. Empty `union {}` bodies produce a phantom tree-sitter node with an empty identifier — filtered by `parse_container_field` returning `None` for empty names.
+- **Tree-sitter AST discovery**: when adding support for a new node kind, the pattern is to write a temporary test that prints the AST (`node.to_sexp()`) for a representative source snippet, then remove the test after the node kinds are confirmed.

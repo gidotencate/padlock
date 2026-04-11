@@ -2,8 +2,28 @@
 
 pub use crate::arch::{ArchConfig, X86_64_SYSV};
 
+/// Serde helpers for serializing/deserializing `&'static ArchConfig` by name.
+mod arch_serde {
+    use crate::arch::{ArchConfig, arch_by_name};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(arch: &&'static ArchConfig, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(arch.name)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<&'static ArchConfig, D::Error> {
+        let name = String::deserialize(d)?;
+        arch_by_name(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown arch {name:?} in cache; \
+                 clear it with `rm -rf .padlock-cache`"
+            ))
+        })
+    }
+}
+
 /// The type of a single field. Recursive for nested structs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TypeInfo {
     Primitive {
         name: String,
@@ -50,7 +70,7 @@ impl TypeInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AccessPattern {
     Unknown,
     Concurrent {
@@ -61,7 +81,7 @@ pub enum AccessPattern {
     Padding,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Field {
     pub name: String,
     pub ty: TypeInfo,
@@ -74,7 +94,7 @@ pub struct Field {
 }
 
 /// One complete struct as read from DWARF or source and enriched by analysis.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StructLayout {
     pub name: String,
     pub total_size: usize,
@@ -82,6 +102,7 @@ pub struct StructLayout {
     pub fields: Vec<Field>,
     pub source_file: Option<String>,
     pub source_line: Option<u32>,
+    #[serde(with = "arch_serde")]
     pub arch: &'static ArchConfig,
     pub is_packed: bool,
     /// True when this layout was parsed from a C/C++ `union` declaration.

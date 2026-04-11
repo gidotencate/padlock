@@ -1,21 +1,21 @@
-// padlock-cli/src/commands/analyze.rs
+// padlock-cli/src/commands/summary.rs
+//
+// Project health summary command — shows aggregate score, severity distribution,
+// worst files, and worst structs across an entire codebase.
 
 use std::path::PathBuf;
 
 use padlock_core::findings::Report;
 
 use crate::config::Config;
-use crate::filter::{FailSeverity, FilterArgs};
+use crate::filter::FilterArgs;
 use crate::paths::collect_layouts;
 
 pub fn run(
     paths: &[PathBuf],
-    json: bool,
-    sarif: bool,
-    markdown: bool,
+    top: usize,
     cache_line_size: Option<usize>,
     word_size: Option<usize>,
-    fail_on_severity: Option<FailSeverity>,
     filter: &FilterArgs,
 ) -> anyhow::Result<()> {
     // Load config by searching upward from the first supplied path.
@@ -40,7 +40,7 @@ pub fn run(
         }
     }
 
-    // Apply --cache-line-size / --word-size overrides per layout.
+    // Apply --cache-line-size / --word-size overrides.
     if cache_line_size.is_some() || word_size.is_some() {
         for layout in &mut layouts {
             layout.arch =
@@ -48,7 +48,7 @@ pub fn run(
         }
     }
 
-    // Apply config ignore list, then CLI pre-filters (name, size, holes).
+    // Apply config ignore list, then CLI pre-filters.
     layouts.retain(|l| !cfg.is_ignored(&l.name));
     filter.apply_to_layouts(&mut layouts)?;
 
@@ -56,47 +56,22 @@ pub fn run(
     let mut report = Report::from_layouts(&layouts);
     report.analyzed_paths = analyzed;
 
-    // Apply config severity filter (respects per-struct overrides).
+    // Apply config severity filter.
     for sr in &mut report.structs {
         sr.findings
             .retain(|f| cfg.should_report_for(&sr.struct_name, f.severity()));
     }
 
-    // Apply post-analysis CLI filters (packable) and sort.
+    // Apply post-analysis CLI filters and sort.
     filter.apply_to_report(&mut report);
 
-    // Check fail_below score threshold (config-based, per-struct overrides).
-    let score_failed = report.structs.iter().any(|s| {
-        let threshold = cfg.fail_below_for(&s.struct_name);
-        threshold > 0 && s.score < threshold as f64
-    });
-
-    // Check --fail-on-severity threshold.
-    let severity_failed = if let Some(ref threshold) = fail_on_severity {
-        report
-            .structs
-            .iter()
-            .flat_map(|s| &s.findings)
-            .any(|f| threshold.matches(f.severity()))
-    } else {
-        false
-    };
-
-    let failed = score_failed || severity_failed;
-
-    if sarif {
-        println!("{}", padlock_output::to_sarif(&report)?);
-    } else if json {
-        println!("{}", padlock_output::to_json(&report)?);
-    } else if markdown {
-        print!("{}", padlock_output::to_markdown(&report));
-    } else {
-        print!("{}", padlock_output::render_report(&report));
-    }
-
-    if failed {
-        std::process::exit(1);
-    }
+    // Render and print.
+    let out =
+        padlock_output::render_project_summary(&padlock_output::project_summary::SummaryInput {
+            report: &report,
+            top,
+        });
+    print!("{out}");
 
     Ok(())
 }

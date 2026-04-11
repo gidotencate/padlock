@@ -60,7 +60,7 @@ pub fn render_explain(layout: &StructLayout) -> String {
     out.push_str(&divider);
     out.push('\n');
 
-    // Build rows: interleave fields with padding gaps
+    // Build rows: interleave fields with padding gaps and cache-line markers
     #[derive(Debug)]
     enum Row {
         Field {
@@ -75,16 +75,36 @@ pub fn render_explain(layout: &StructLayout) -> String {
             size: usize,
             trailing: bool,
         },
+        CacheLine {
+            line_number: usize,
+            offset: usize,
+        },
     }
 
+    let cache_line = layout.arch.cache_line_size;
     let mut rows: Vec<Row> = Vec::new();
     let gaps = find_padding(layout);
 
     let last_field_name = layout.fields.last().map(|f| f.name.as_str()).unwrap_or("");
 
-    // Index gaps by the field they follow (by after_field name).
-    // find_padding includes trailing padding as a gap after the last field.
+    // Track which cache lines have been crossed so we can insert markers.
+    let mut last_cache_line: Option<usize> = None;
+
     for field in &layout.fields {
+        let field_cache_line = field.offset / cache_line;
+
+        // Insert a cache-line boundary marker when entering a new cache line.
+        if last_cache_line.map_or(true, |prev| field_cache_line > prev) {
+            if last_cache_line.is_some() {
+                // Not the first cache line: insert a separator row.
+                rows.push(Row::CacheLine {
+                    line_number: field_cache_line,
+                    offset: field_cache_line * cache_line,
+                });
+            }
+            last_cache_line = Some(field_cache_line);
+        }
+
         let ty_name = type_name(&field.ty);
         rows.push(Row::Field {
             offset: field.offset,
@@ -104,6 +124,8 @@ pub fn render_explain(layout: &StructLayout) -> String {
         }
     }
 
+    // Cache-line separator row width matches the table inner width.
+    let cache_sep_inner = 8 + 1 + 6 + 1 + 7 + 1 + col_field + 3; // ─ count between outer │
     for row in &rows {
         match row {
             Row::Field {
@@ -138,6 +160,20 @@ pub fn render_explain(layout: &StructLayout) -> String {
                     "│ {:>6} │ {:>4} │ {:>5} │ {:<col_field$}│\n",
                     offset, size, "—", label
                 ));
+            }
+            Row::CacheLine {
+                line_number,
+                offset,
+            } => {
+                let label = format!("── cache line {line_number} (offset {offset}) ");
+                // Pad to fill the inner width with '═' characters.
+                let used = label.len();
+                let pad = if cache_sep_inner > used + 4 {
+                    "═".repeat(cache_sep_inner - used - 4)
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!("╞{label}{pad}╡\n"));
             }
         }
     }
@@ -270,6 +306,69 @@ mod tests {
         let out = render_explain(&layout);
         assert!(!out.contains("KB extra per 1K"));
         assert!(!out.contains("MB per 1M"));
+    }
+
+    #[test]
+    fn explain_shows_cache_line_separator_when_struct_spans_multiple_lines() {
+        use padlock_core::arch::X86_64_SYSV;
+        use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+        // Build a struct that spans two 64-byte cache lines
+        let big = StructLayout {
+            name: "Big".to_string(),
+            total_size: 128,
+            align: 8,
+            fields: vec![
+                Field {
+                    name: "a".to_string(),
+                    ty: TypeInfo::Primitive {
+                        name: "u8[60]".to_string(),
+                        size: 60,
+                        align: 1,
+                    },
+                    offset: 0,
+                    size: 60,
+                    align: 1,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "b".to_string(),
+                    ty: TypeInfo::Primitive {
+                        name: "u64".to_string(),
+                        size: 8,
+                        align: 8,
+                    },
+                    offset: 64,
+                    size: 8,
+                    align: 8,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+            ],
+            source_file: None,
+            source_line: None,
+            arch: &X86_64_SYSV,
+            is_packed: false,
+            is_union: false,
+        };
+        let out = render_explain(&big);
+        assert!(
+            out.contains("cache line 1"),
+            "must show cache line 1 separator: {out}"
+        );
+    }
+
+    #[test]
+    fn explain_no_cache_line_separator_for_small_struct() {
+        // Connection (24 bytes) fits in one cache line — no separator expected
+        let layout = connection_layout();
+        let out = render_explain(&layout);
+        assert!(
+            !out.contains("cache line 1"),
+            "single-cache-line struct must not show separator"
+        );
     }
 
     #[test]

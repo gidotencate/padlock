@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+pub mod cache;
 pub mod config;
 pub mod filter;
 pub mod paths;
@@ -14,6 +15,7 @@ mod commands {
     pub mod fix;
     pub mod list;
     pub mod report;
+    pub mod summary;
     pub mod watch;
 }
 mod output {
@@ -51,6 +53,30 @@ enum Commands {
         #[arg(long, value_name = "BYTES")]
         cache_line_size: Option<usize>,
         /// Override the pointer/word size in bytes (e.g. 4 for 32-bit targets)
+        #[arg(long, value_name = "BYTES")]
+        word_size: Option<usize>,
+        /// Exit with a non-zero status code if any finding meets or exceeds this severity
+        /// (high, medium, or low). Useful for stricter CI gates.
+        #[arg(long, value_name = "SEVERITY")]
+        fail_on_severity: Option<filter::FailSeverity>,
+        #[command(flatten)]
+        filter: filter::FilterArgs,
+    },
+
+    /// Show a project-level health summary: aggregate score, severity distribution,
+    /// worst files, and worst structs. Designed for large codebases where `analyze`
+    /// output is too verbose.
+    Summary {
+        /// Paths to analyze: source files, binaries, or directories
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Number of worst files and structs to show (default: 5)
+        #[arg(long, value_name = "N", default_value = "5")]
+        top: usize,
+        /// Override the cache-line size in bytes
+        #[arg(long, value_name = "BYTES")]
+        cache_line_size: Option<usize>,
+        /// Override the pointer/word size in bytes
         #[arg(long, value_name = "BYTES")]
         word_size: Option<usize>,
         #[command(flatten)]
@@ -148,6 +174,7 @@ fn main() -> anyhow::Result<()> {
             markdown,
             cache_line_size,
             word_size,
+            fail_on_severity,
             filter,
         } => commands::analyze::run(
             &paths,
@@ -156,8 +183,17 @@ fn main() -> anyhow::Result<()> {
             markdown,
             cache_line_size,
             word_size,
+            fail_on_severity,
             &filter,
         ),
+
+        Commands::Summary {
+            paths,
+            top,
+            cache_line_size,
+            word_size,
+            filter,
+        } => commands::summary::run(&paths, top, cache_line_size, word_size, &filter),
 
         Commands::List { paths, filter } => commands::list::run(&paths, &filter),
 
@@ -173,7 +209,7 @@ fn main() -> anyhow::Result<()> {
             paths,
             json,
             filter,
-        } => commands::analyze::run(&paths, json, false, false, None, None, &filter),
+        } => commands::analyze::run(&paths, json, false, false, None, None, None, &filter),
 
         Commands::Watch { path, json } => commands::watch::run(&path, json),
 

@@ -179,10 +179,36 @@ fn is_packed(attrs: &[syn::Attribute]) -> bool {
         .any(|a| a.path().is_ident("repr") && a.to_token_stream().to_string().contains("packed"))
 }
 
+/// Extract the alignment from `#[repr(align(N))]`. Returns `None` if not present.
+fn repr_align(attrs: &[syn::Attribute]) -> Option<usize> {
+    for attr in attrs {
+        if !attr.path().is_ident("repr") {
+            continue;
+        }
+        let ts = attr.to_token_stream().to_string();
+        // Look for `align ( N )` in the token stream string.
+        // The tokeniser adds spaces: "repr (align (64))" etc.
+        if let Some(start) = ts.find("align") {
+            let after = ts[start..].trim_start_matches("align").trim_start();
+            if after.starts_with('(') {
+                let inner = after.trim_start_matches('(');
+                let num_str: String = inner.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = num_str.parse::<usize>() {
+                    if n > 0 && n.is_power_of_two() {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn simulate_rust_layout(
     name: String,
     fields: &[(String, Type)],
     packed: bool,
+    forced_align: Option<usize>,
     arch: &'static ArchConfig,
 ) -> StructLayout {
     let mut offset = 0usize;
@@ -209,6 +235,13 @@ fn simulate_rust_layout(
             access: AccessPattern::Unknown,
         });
         offset += size;
+    }
+
+    // Apply repr(align(N)): raise minimum alignment and add trailing padding.
+    if let Some(fa) = forced_align {
+        if fa > struct_align {
+            struct_align = fa;
+        }
     }
 
     if !packed && struct_align > 0 {
@@ -248,6 +281,7 @@ impl<'ast> Visit<'ast> for StructVisitor {
 
         let name = node.ident.to_string();
         let packed = is_packed(&node.attrs);
+        let forced_align = repr_align(&node.attrs);
 
         // Collect (field_name, type, optional_guard)
         let fields: Vec<(String, Type, Option<String>)> = match &node.fields {
@@ -276,7 +310,7 @@ impl<'ast> Visit<'ast> for StructVisitor {
             .iter()
             .map(|(n, t, _)| (n.clone(), t.clone()))
             .collect();
-        let mut layout = simulate_rust_layout(name, &name_ty, packed, self.arch);
+        let mut layout = simulate_rust_layout(name, &name_ty, packed, forced_align, self.arch);
         layout.source_line = Some(node.ident.span().start().line as u32);
 
         // Apply explicit guard annotations; these take precedence over the
@@ -377,7 +411,8 @@ impl<'ast> Visit<'ast> for StructVisitor {
             };
 
             if !var_fields.is_empty() {
-                let var_layout = simulate_rust_layout(String::new(), &var_fields, false, self.arch);
+                let var_layout =
+                    simulate_rust_layout(String::new(), &var_fields, false, None, self.arch);
                 if var_layout.total_size > max_payload_size {
                     max_payload_size = var_layout.total_size;
                 }
@@ -824,5 +859,88 @@ struct Conn { port: u16, status: u32 }
         let l = &layouts[0];
         let payload = l.fields.iter().find(|f| f.name == "__payload").unwrap();
         assert_eq!(payload.size, 8); // u64
+    }
+
+    // ── repr(align(N)) ────────────────────────────────────────────────────────
+
+    #[test]
+    fn repr_align_raises_struct_alignment() {
+        let src = "#[repr(align(64))]\nstruct CacheLine { a: u8, b: u32 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(
+            l.align, 64,
+            "repr(align(64)) must set struct alignment to 64"
+        );
+        assert_eq!(l.total_size, 64, "size must be padded to 64 bytes");
+    }
+
+    #[test]
+    fn repr_align_does_not_shrink_natural_alignment() {
+        // repr(align(1)) on a struct whose natural align is 8 — must keep 8
+        let src = "#[repr(align(1))]\nstruct S { a: u64 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(
+            l.align, 8,
+            "natural align must not be reduced below repr(align)"
+        );
+    }
+
+    #[test]
+    fn repr_align_adds_trailing_padding() {
+        // u8 + u32 = 5 bytes natural, padded to 8 with align(8)
+        let src = "#[repr(align(8))]\nstruct S { a: u8, b: u32 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.total_size, 8);
+    }
+
+    #[test]
+    fn no_repr_align_has_natural_size() {
+        // Baseline: without repr(align), just natural padding
+        let src = "struct S { a: u8, b: u32 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        // a:1 + 3 pad + b:4 = 8; align=4
+        assert_eq!(l.total_size, 8);
+        assert_eq!(l.align, 4);
+    }
+
+    // ── tuple structs ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn tuple_struct_fields_named_by_index() {
+        let src = "struct Pair(u64, u8);";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].name, "_0");
+        assert_eq!(l.fields[1].name, "_1");
+    }
+
+    #[test]
+    fn tuple_struct_layout_follows_alignment() {
+        // u64 then u8: no padding before u64, 7 bytes trailing
+        let src = "struct S(u64, u8);";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].offset, 0);
+        assert_eq!(l.fields[0].size, 8);
+        assert_eq!(l.fields[1].offset, 8);
+        assert_eq!(l.fields[1].size, 1);
+        assert_eq!(l.total_size, 16);
+    }
+
+    #[test]
+    fn tuple_struct_with_padding_waste_detected() {
+        // u8 then u64: 7 bytes padding
+        let src = "struct S(u8, u64);";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].offset, 0); // u8 at 0
+        assert_eq!(l.fields[1].offset, 8); // u64 aligned to 8
+        assert_eq!(l.total_size, 16);
+        let gaps = padlock_core::ir::find_padding(l);
+        assert_eq!(gaps[0].bytes, 7);
     }
 }

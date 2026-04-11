@@ -2,6 +2,16 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.2] — 2026-04-12
+
+### Added (VS Code extension)
+- **Status bar health score**: the status bar now shows a live layout score (`$(lock) 67 D`) and letter grade (A–F) for the active file, weighted by struct size. Yellow warning background and `$(warning) N` count appear when High-severity findings are present. Spinner shown while analysis runs.
+- **Hover popup**: hovering over a struct definition line shows a markdown popup with score bar (`██████░░░░`), wasted bytes, and each finding with severity icon (🔴/🟡/🔵).
+- **Quick-fix lightbulb (CodeAction)**: `ReorderSuggestion` diagnostics now show a lightbulb (⚡) with two actions: reorder the specific struct in-place, or open the diff editor preview for the whole file.
+- **Fix all with diff preview** (`padlock: Fix all (preview)`): copies the file to a temp location, runs `padlock fix`, and opens the VS Code diff editor so you can review every reordering before applying. Clicking Apply writes the changes with a `.bak` backup.
+- Zig added to extension keywords, activation events, and README language table.
+- README updated with full documentation for all finding types, concurrent-field annotation syntax (Rust/C++/Go), and how the extension fits with the CLI and CI.
+
 ## [0.8.1] — 2026-04-11
 
 ### Fixed

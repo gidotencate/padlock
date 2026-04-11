@@ -1,4 +1,5 @@
 /target/
+.padlock-cache/
 
 # VS Code extension build output
 editors/vscode/out/

@@ -97,15 +97,15 @@ impl FilterArgs {
         // sort_by: apply config when the CLI value is still the default (Score).
         // We cannot distinguish "user said --sort-by score" from "not specified",
         // so config wins over the built-in default but loses to any explicit value.
-        if matches!(self.sort_by, SortBy::Score) {
-            if let Some(ref s) = cfg.sort_by {
-                self.sort_by = match s.to_ascii_lowercase().as_str() {
-                    "size" => SortBy::Size,
-                    "waste" => SortBy::Waste,
-                    "name" => SortBy::Name,
-                    _ => SortBy::Score,
-                };
-            }
+        if matches!(self.sort_by, SortBy::Score)
+            && let Some(ref s) = cfg.sort_by
+        {
+            self.sort_by = match s.to_ascii_lowercase().as_str() {
+                "size" => SortBy::Size,
+                "waste" => SortBy::Waste,
+                "name" => SortBy::Name,
+                _ => SortBy::Score,
+            };
         }
     }
 

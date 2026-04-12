@@ -922,10 +922,7 @@ fn parse_anonymous_nested(
     None
 }
 
-fn parse_field_declaration(
-    source: &str,
-    node: Node<'_>,
-) -> Option<(String, String, Option<String>, Option<usize>, u32)> {
+fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
     let mut ty_parts: Vec<String> = Vec::new();
     let mut field_name: Option<String> = None;
     // Bit-field width, e.g. `int flags : 3;` → Some("3")

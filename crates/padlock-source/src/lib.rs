@@ -458,4 +458,54 @@ mod tests {
             "Foo"
         ));
     }
+
+    // ── per-finding suppression integration ───────────────────────────────────
+
+    #[test]
+    fn per_finding_suppress_reorder_in_c() {
+        // The struct has padding waste (bool before u64) — without suppression
+        // this would produce PaddingWaste + ReorderSuggestion. With the annotation
+        // on the preceding line, only PaddingWaste should survive.
+        let src = "// padlock: ignore[ReorderSuggestion]\nstruct Foo { char a; long b; };";
+        let layouts = parse_source_str(src, &SourceLanguage::C, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].suppressed_findings, vec!["ReorderSuggestion"]);
+    }
+
+    #[test]
+    fn per_finding_suppress_multiple_kinds_in_c() {
+        let src =
+            "// padlock: ignore[PaddingWaste, ReorderSuggestion]\nstruct Bar { char a; long b; };";
+        let layouts = parse_source_str(src, &SourceLanguage::C, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(
+            layouts[0].suppressed_findings,
+            vec!["PaddingWaste", "ReorderSuggestion"]
+        );
+    }
+
+    #[test]
+    fn per_finding_suppress_in_rust() {
+        let src = "// padlock: ignore[FalseSharing]\nstruct Foo { x: u64, y: u64 }";
+        let layouts = parse_source_str(src, &SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].suppressed_findings, vec!["FalseSharing"]);
+    }
+
+    #[test]
+    fn per_finding_suppress_in_go() {
+        let src =
+            "package p\n// padlock: ignore[LocalityIssue]\ntype Foo struct { X int64; Y int64 }";
+        let layouts = parse_source_str(src, &SourceLanguage::Go, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].suppressed_findings, vec!["LocalityIssue"]);
+    }
+
+    #[test]
+    fn unannotated_struct_has_no_suppressed_findings() {
+        let src = "struct Clean { int x; int y; };";
+        let layouts = parse_source_str(src, &SourceLanguage::C, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert!(layouts[0].suppressed_findings.is_empty());
+    }
 }

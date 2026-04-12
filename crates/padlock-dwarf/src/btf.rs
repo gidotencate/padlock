@@ -465,6 +465,7 @@ impl<'a> BtfParser<'a> {
                     is_packed,
                     is_union: *is_union,
                     is_repr_rust: false,
+                    suppressed_findings: Vec::new(),
                 });
 
                 let _ = idx;

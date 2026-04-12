@@ -60,6 +60,19 @@ impl Finding {
             Finding::LocalityIssue { struct_name, .. } => struct_name,
         }
     }
+
+    /// The name of the finding variant as a string, used for per-finding suppression.
+    ///
+    /// Matches the variant names used in source annotations:
+    /// `"PaddingWaste"`, `"ReorderSuggestion"`, `"FalseSharing"`, `"LocalityIssue"`.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Finding::PaddingWaste { .. } => "PaddingWaste",
+            Finding::FalseSharing { .. } => "FalseSharing",
+            Finding::ReorderSuggestion { .. } => "ReorderSuggestion",
+            Finding::LocalityIssue { .. } => "LocalityIssue",
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -175,6 +188,17 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
         });
     }
 
+    // ── per-finding suppression ──────────────────────────────────────────────
+    // Drop any findings whose kind_name matches a suppression directive placed
+    // in the source file (e.g. `// padlock: ignore[ReorderSuggestion]`).
+    if !layout.suppressed_findings.is_empty() {
+        findings.retain(|f| {
+            !layout
+                .suppressed_findings
+                .contains(&f.kind_name().to_string())
+        });
+    }
+
     let score = scorer::score(layout);
 
     StructReport {
@@ -252,5 +276,38 @@ mod tests {
         let report = Report::from_layouts(&[connection_layout(), packed_layout()]);
         assert_eq!(report.total_structs, 2);
         assert_eq!(report.total_wasted_bytes, 10); // only Connection wastes bytes
+    }
+
+    #[test]
+    fn suppressed_finding_kind_not_in_report() {
+        let mut layout = connection_layout();
+        layout.suppressed_findings = vec!["ReorderSuggestion".to_string()];
+        let report = Report::from_layouts(&[layout]);
+        let sr = &report.structs[0];
+        // PaddingWaste should still appear
+        assert!(
+            sr.findings
+                .iter()
+                .any(|f| matches!(f, Finding::PaddingWaste { .. }))
+        );
+        // ReorderSuggestion must be suppressed
+        assert!(
+            !sr.findings
+                .iter()
+                .any(|f| matches!(f, Finding::ReorderSuggestion { .. }))
+        );
+    }
+
+    #[test]
+    fn suppressing_all_findings_yields_empty_findings() {
+        let mut layout = connection_layout();
+        layout.suppressed_findings = vec![
+            "PaddingWaste".to_string(),
+            "ReorderSuggestion".to_string(),
+            "FalseSharing".to_string(),
+            "LocalityIssue".to_string(),
+        ];
+        let report = Report::from_layouts(&[layout]);
+        assert!(report.structs[0].findings.is_empty());
     }
 }

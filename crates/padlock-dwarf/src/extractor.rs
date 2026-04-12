@@ -128,6 +128,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
             is_packed: false,
             is_union: false,
             is_repr_rust: false,
+            suppressed_findings: Vec::new(),
         }))
     }
 

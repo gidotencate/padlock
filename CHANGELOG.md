@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.7] — 2026-04-12
+
+### Added
+- **`padlock init`**: new subcommand that generates a `.padlock.toml` template in the current directory with all options commented out and documented. Errors if a `.padlock.toml` already exists.
+
 ## [0.8.6] — 2026-04-12
 
 ### Added

@@ -233,7 +233,7 @@ fn parse_union_declaration(
     source_line: u32,
 ) -> Option<StructLayout> {
     let mut is_tagged = false;
-    let mut raw_fields: Vec<(String, String, usize, usize)> = Vec::new();
+    let mut raw_fields: Vec<(String, String, usize, usize, u32)> = Vec::new();
 
     for i in 0..node.child_count() {
         let child = node.child(i)?;
@@ -259,12 +259,12 @@ fn parse_union_declaration(
     // Union layout: all fields at offset 0; total = max field size rounded to alignment.
     let max_size = raw_fields
         .iter()
-        .map(|(_, _, sz, _)| *sz)
+        .map(|(_, _, sz, _, _)| *sz)
         .max()
         .unwrap_or(0);
     let max_align = raw_fields
         .iter()
-        .map(|(_, _, _, al)| *al)
+        .map(|(_, _, _, al, _)| *al)
         .max()
         .unwrap_or(1);
     let total_size = if max_align > 0 {
@@ -275,7 +275,7 @@ fn parse_union_declaration(
 
     let mut fields: Vec<Field> = raw_fields
         .into_iter()
-        .map(|(fname, type_text, size, align)| Field {
+        .map(|(fname, type_text, size, align, field_line)| Field {
             name: fname,
             ty: TypeInfo::Primitive {
                 name: type_text,
@@ -286,7 +286,7 @@ fn parse_union_declaration(
             size,
             align,
             source_file: None,
-            source_line: None,
+            source_line: Some(field_line),
             access: padlock_core::ir::AccessPattern::Unknown,
         })
         .collect();
@@ -351,8 +351,8 @@ fn parse_struct_declaration(
 ) -> Option<StructLayout> {
     let mut is_packed = false;
     let mut is_extern = false;
-    // (field_name, type_text, size, align)
-    let mut raw_fields: Vec<(String, String, usize, usize)> = Vec::new();
+    // (field_name, type_text, size, align, source_line)
+    let mut raw_fields: Vec<(String, String, usize, usize, u32)> = Vec::new();
 
     for i in 0..node.child_count() {
         let child = node.child(i)?;
@@ -380,7 +380,7 @@ fn parse_struct_declaration(
     let mut struct_align = 1usize;
     let mut fields: Vec<Field> = Vec::new();
 
-    for (fname, type_text, size, align) in raw_fields {
+    for (fname, type_text, size, align, field_line) in raw_fields {
         let eff_align = if is_packed { 1 } else { align };
         if eff_align > 0 {
             offset = offset.next_multiple_of(eff_align);
@@ -397,7 +397,7 @@ fn parse_struct_declaration(
             size,
             align: eff_align,
             source_file: None,
-            source_line: None,
+            source_line: Some(field_line),
             access: padlock_core::ir::AccessPattern::Unknown,
         });
         offset += size;
@@ -424,13 +424,13 @@ fn parse_struct_declaration(
     })
 }
 
-/// Parse a `container_field` node and return `(name, type_text, size, align)`.
+/// Parse a `container_field` node and return `(name, type_text, size, align, source_line)`.
 fn parse_container_field(
     source: &str,
     node: Node<'_>,
     arch: &'static ArchConfig,
     is_packed: bool,
-) -> Option<(String, String, usize, usize)> {
+) -> Option<(String, String, usize, usize, u32)> {
     let mut field_name: Option<String> = None;
     let mut type_text: Option<String> = None;
     let mut size_align: Option<(usize, usize)> = None;
@@ -462,12 +462,13 @@ fn parse_container_field(
     let name = field_name.filter(|n| !n.is_empty())?;
     let ty = type_text.unwrap_or_else(|| "anyopaque".to_string());
     let (mut size, align) = size_align.unwrap_or((arch.pointer_size, arch.pointer_size));
+    let field_line = node.start_position().row as u32 + 1;
 
     if is_packed && size == 0 {
         size = 0; // void fields in packed structs stay 0
     }
 
-    Some((name, ty, size, align))
+    Some((name, ty, size, align, field_line))
 }
 
 // ── public API ────────────────────────────────────────────────────────────────

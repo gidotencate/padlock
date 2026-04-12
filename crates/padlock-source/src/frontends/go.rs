@@ -110,7 +110,7 @@ fn parse_struct_type(
     source_line: u32,
     decl_start_byte: usize,
 ) -> Option<StructLayout> {
-    let mut raw_fields: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut raw_fields: Vec<(String, String, Option<String>, u32)> = Vec::new();
 
     for i in 0..node.child_count() {
         let child = node.child(i)?;
@@ -133,7 +133,7 @@ fn parse_struct_type(
     let mut struct_align = 1usize;
     let mut fields: Vec<Field> = Vec::new();
 
-    for (fname, ty_name, guard) in raw_fields {
+    for (fname, ty_name, guard, field_line) in raw_fields {
         let (size, align) = go_type_size_align(&ty_name, arch);
         if align > 0 {
             offset = offset.next_multiple_of(align);
@@ -158,7 +158,7 @@ fn parse_struct_type(
             size,
             align,
             source_file: None,
-            source_line: None,
+            source_line: Some(field_line),
             access,
         });
         offset += size;
@@ -241,12 +241,13 @@ fn trailing_comment_on_line(source: &str, node: Node<'_>) -> Option<String> {
 fn collect_field_declarations(
     source: &str,
     node: Node<'_>,
-    out: &mut Vec<(String, String, Option<String>)>,
+    out: &mut Vec<(String, String, Option<String>, u32)>,
 ) {
     // field_declaration: field_identifier+ type [comment]
     // OR embedded type (anonymous field): TypeName [comment]
     let mut field_names: Vec<String> = Vec::new();
     let mut ty_text: Option<String> = None;
+    let field_line = node.start_position().row as u32 + 1;
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
@@ -268,7 +269,7 @@ fn collect_field_declarations(
         if let Some(ty) = ty_text {
             // Normal named fields
             for name in field_names {
-                out.push((name, ty.clone(), guard.clone()));
+                out.push((name, ty.clone(), guard.clone(), field_line));
             }
         }
     } else if let Some(ty) = ty_text {
@@ -277,7 +278,7 @@ fn collect_field_declarations(
         // The nested-struct resolution pass in lib.rs will later fill in
         // the correct size/align from other parsed struct layouts.
         let simple_name = ty.split('.').next_back().unwrap_or(&ty).to_string();
-        out.push((simple_name, ty, guard));
+        out.push((simple_name, ty, guard, field_line));
     }
 }
 

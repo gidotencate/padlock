@@ -390,8 +390,8 @@ fn parse_class_specifier(
     // Detect virtual methods: look for `virtual` keyword anywhere in body
     let has_virtual = contains_virtual_keyword(source, body);
 
-    // Collect declared fields: (field_name, type_text, guard, alignas_override)
-    let mut raw_fields: Vec<(String, String, Option<String>, Option<usize>)> = Vec::new();
+    // Collect declared fields: (field_name, type_text, guard, alignas_override, source_line)
+    let mut raw_fields: Vec<RawField> = Vec::new();
     for i in 0..body.child_count() {
         let Some(child) = body.child(i) else {
             continue;
@@ -399,8 +399,9 @@ fn parse_class_specifier(
         if child.kind() == "field_declaration" {
             if let Some(anon_fields) = parse_anonymous_nested(source, child, arch, false) {
                 raw_fields.extend(anon_fields);
-            } else if let Some((ty, fname, guard, al)) = parse_field_declaration(source, child) {
-                raw_fields.push((fname, ty, guard, al));
+            } else if let Some((ty, fname, guard, al, ln)) = parse_field_declaration(source, child)
+            {
+                raw_fields.push((fname, ty, guard, al, ln));
             }
         }
     }
@@ -446,7 +447,10 @@ fn parse_class_specifier(
     }
 
     // Skip classes with bit-field members (same reason as structs).
-    if raw_fields.iter().any(|(_, ty, _, _)| is_bitfield_type(ty)) {
+    if raw_fields
+        .iter()
+        .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
+    {
         eprintln!(
             "padlock: note: skipping '{class_name}' — contains bit-fields \
              (bit-field layout is compiler-controlled; use binary analysis for accurate results)"
@@ -455,7 +459,7 @@ fn parse_class_specifier(
     }
 
     // Declared member fields
-    for (fname, ty_name, guard, alignas) in raw_fields {
+    for (fname, ty_name, guard, alignas, field_line) in raw_fields {
         let (size, natural_align) = c_type_size_align(&ty_name, arch);
         let align = alignas.unwrap_or(natural_align);
         let access = if let Some(g) = guard {
@@ -477,7 +481,7 @@ fn parse_class_specifier(
             size,
             align,
             source_file: None,
-            source_line: None,
+            source_line: Some(field_line),
             access,
         });
     }
@@ -632,8 +636,7 @@ fn parse_struct_or_union_specifier(
     }
 
     let body = body_node?;
-    // (field_name, type_text, guard, alignas_override)
-    let mut raw_fields: Vec<(String, String, Option<String>, Option<usize>)> = Vec::new();
+    let mut raw_fields: Vec<RawField> = Vec::new();
 
     for i in 0..body.child_count() {
         let child = body.child(i)?;
@@ -643,8 +646,9 @@ fn parse_struct_or_union_specifier(
             // with no type_identifier (i.e. `struct { int x; int y; };`).
             if let Some(anon_fields) = parse_anonymous_nested(source, child, arch, is_union) {
                 raw_fields.extend(anon_fields);
-            } else if let Some((ty, fname, guard, al)) = parse_field_declaration(source, child) {
-                raw_fields.push((fname, ty, guard, al));
+            } else if let Some((ty, fname, guard, al, ln)) = parse_field_declaration(source, child)
+            {
+                raw_fields.push((fname, ty, guard, al, ln));
             }
         }
     }
@@ -656,7 +660,10 @@ fn parse_struct_or_union_specifier(
     // Bit-field packing is compiler-controlled and cannot be accurately modelled
     // without a compiler. Skip the entire struct to avoid producing wrong layout
     // data. Use `padlock analyze` on the compiled binary for accurate results.
-    if raw_fields.iter().any(|(_, ty, _, _)| is_bitfield_type(ty)) {
+    if raw_fields
+        .iter()
+        .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
+    {
         eprintln!(
             "padlock: note: skipping '{name}' — contains bit-fields \
              (bit-field layout is compiler-controlled; use binary analysis for accurate results)"
@@ -666,7 +673,7 @@ fn parse_struct_or_union_specifier(
 
     let mut fields: Vec<Field> = raw_fields
         .into_iter()
-        .map(|(fname, ty_name, guard, alignas)| {
+        .map(|(fname, ty_name, guard, alignas, field_line)| {
             let (size, natural_align) = c_type_size_align(&ty_name, arch);
             // alignas(N) on a field overrides its alignment requirement.
             let align = alignas.unwrap_or(natural_align);
@@ -689,7 +696,7 @@ fn parse_struct_or_union_specifier(
                 size,
                 align,
                 source_file: None,
-                source_line: None,
+                source_line: Some(field_line),
                 access,
             }
         })
@@ -846,7 +853,8 @@ fn parse_alignas_value(source: &str, node: Node<'_>) -> Option<usize> {
 ///
 /// Returns `None` if the declaration is not an anonymous nested struct/union
 /// (the caller should fall through to `parse_field_declaration`).
-type RawField = (String, String, Option<String>, Option<usize>);
+/// (field_name, type_text, guard, alignas_override, source_line_1based)
+type RawField = (String, String, Option<String>, Option<usize>, u32);
 
 #[allow(clippy::only_used_in_recursion)]
 fn parse_anonymous_nested(
@@ -889,9 +897,10 @@ fn parse_anonymous_nested(
                 // Recurse to handle doubly-nested anonymous structs.
                 if let Some(deeper) = parse_anonymous_nested(source, inner, arch, nested_is_union) {
                     nested_raw.extend(deeper);
-                } else if let Some((ty, fname, guard, al)) = parse_field_declaration(source, inner)
+                } else if let Some((ty, fname, guard, al, ln)) =
+                    parse_field_declaration(source, inner)
                 {
-                    nested_raw.push((fname, ty, guard, al));
+                    nested_raw.push((fname, ty, guard, al, ln));
                 }
             }
         }
@@ -916,7 +925,7 @@ fn parse_anonymous_nested(
 fn parse_field_declaration(
     source: &str,
     node: Node<'_>,
-) -> Option<(String, String, Option<String>, Option<usize>)> {
+) -> Option<(String, String, Option<String>, Option<usize>, u32)> {
     let mut ty_parts: Vec<String> = Vec::new();
     let mut field_name: Option<String> = None;
     // Bit-field width, e.g. `int flags : 3;` → Some("3")
@@ -1013,7 +1022,8 @@ fn parse_field_declaration(
     let guard = extract_guard_from_c_field_text(&attr_text)
         .or_else(|| extract_guard_from_c_field_text(&field_src));
 
-    Some((ty, fname, guard, alignas_override))
+    let line = node.start_position().row as u32 + 1;
+    Some((ty, fname, guard, alignas_override, line))
 }
 
 fn extract_identifier(source: &str, node: Node<'_>) -> Option<String> {
@@ -1452,6 +1462,17 @@ struct Flags {
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
         assert_eq!(layouts.len(), 1);
         assert_eq!(layouts[0].name, "Normal");
+    }
+
+    #[test]
+    fn c_struct_fields_have_source_lines() {
+        let src = "struct Point {\n    int x;\n    int y;\n};";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let fields = &layouts[0].fields;
+        // x is on line 2, y is on line 3
+        assert_eq!(fields[0].source_line, Some(2), "x should be line 2");
+        assert_eq!(fields[1].source_line, Some(3), "y should be line 3");
     }
 
     #[test]

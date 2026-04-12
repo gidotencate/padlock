@@ -38,7 +38,7 @@ cargo fmt --check   # verify clean
 ./target/debug/padlock
 ```
 
-**Commit workflow**: `cargo fmt` → `cargo fmt --check` → `cargo clippy` → `cargo test` → commit. Skipping `cargo fmt` causes CI failures.
+**Commit workflow**: `cargo fmt` → `cargo fmt --check` → `cargo clippy --workspace -- -D warnings` → `cargo test` → commit. Both `cargo fmt` and `cargo clippy -D warnings` are enforced by CI and will fail the build if skipped.
 
 **Version bumps** touch six files: `Cargo.toml` (workspace), `crates/padlock-{cli,dwarf,output,source}/Cargo.toml` (inter-crate dep versions), and `editors/vscode/package.json`.
 

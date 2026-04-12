@@ -127,6 +127,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
             arch: self.arch,
             is_packed: false,
             is_union: false,
+            is_repr_rust: false,
         }))
     }
 

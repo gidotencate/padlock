@@ -109,6 +109,13 @@ pub struct StructLayout {
     /// All fields share the same base offset (0); analysis suppresses reorder
     /// and padding findings that do not apply to unions.
     pub is_union: bool,
+    /// True when this is a Rust struct with `repr(Rust)` (i.e. no `#[repr(C)]`,
+    /// `#[repr(packed)]`, or `#[repr(transparent)]`). The compiler is free to
+    /// reorder fields and eliminate padding — padlock's findings describe
+    /// *declared-order* waste, which may not match the actual runtime layout.
+    /// Always `false` for DWARF/binary layouts (which are always accurate).
+    #[serde(default)]
+    pub is_repr_rust: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -254,6 +261,7 @@ pub mod test_fixtures {
             arch: &X86_64_SYSV,
             is_packed: false,
             is_union: false,
+            is_repr_rust: false,
         }
     }
 
@@ -312,6 +320,7 @@ pub mod test_fixtures {
             arch: &X86_64_SYSV,
             is_packed: false,
             is_union: false,
+            is_repr_rust: false,
         }
     }
 

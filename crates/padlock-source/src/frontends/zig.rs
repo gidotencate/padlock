@@ -333,6 +333,7 @@ fn parse_union_declaration(
         arch,
         is_packed: false,
         is_union: true,
+        is_repr_rust: false,
     })
 }
 
@@ -413,6 +414,7 @@ fn parse_struct_declaration(
         arch,
         is_packed,
         is_union: false,
+        is_repr_rust: false,
     })
 }
 

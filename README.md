@@ -491,7 +491,7 @@ Rust's memory layout depends on which `repr` is in effect. padlock handles each 
 
 | repr | Layout guarantee | padlock accuracy | Notes |
 |---|---|---|---|
-| `repr(Rust)` (default) | None — compiler may reorder | Approximate | Analyzes declaration order; use for finding issues to fix, not ABI verification |
+| `repr(Rust)` (default) | None — compiler may reorder | Approximate | Analyzes declaration order; output includes a caveat note. Use for finding issues to fix, not ABI verification |
 | `repr(C)` | C-compatible, declaration order | **Accurate** | Full analysis; best candidate for padding fixes |
 | `repr(packed)` / `repr(packed(n))` | No padding, fields may be unaligned | Accurate for waste | Reorder suggestions suppressed — packing is intentional; note that unaligned field references can cause UB |
 | `repr(align(n))` | Minimum alignment forced | Partial | Source frontend infers standard field sizes; struct-level forced alignment not modeled — use binary analysis |
@@ -542,84 +542,36 @@ The architecture is auto-detected from the host when analyzing source files. For
 
 ---
 
-## Real-World Findings: tokio 1.51
+## Real-World Findings
 
-Running padlock against the tokio async runtime source reveals real layout issues in production code:
+padlock run against popular open-source projects — layout issues that accumulate invisibly over time:
 
+| Project | Language | Version | Structs | Wasted | Notable finding |
+|---|---|---|---|---|---|
+| [tokio](https://tokio.rs) | Rust | 1.51.1 | 197 | 480B | `ReadyEvent` — 58% padding waste |
+| [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | `multiState` — 20% waste, saves 8B |
+| Go `net` + `database/sql` | Go | stdlib 1.22 | 607 | 1 236B | `sql.DB` — false sharing, score 53 |
+
+**Rust / tokio — `ReadyEvent`, 58% waste:**
 ```
-$ padlock analyze ~/.cargo/registry/src/.../tokio-1.51.1/src --sort-by waste --min-size 16
-Analyzed 373 files, 273 structs — 348 bytes wasted across all structs
-```
-
-### `ReadyEvent` — 58% padding waste
-
-```rust
-// tokio/src/runtime/io/driver.rs  (as written)
-pub(crate) struct ReadyEvent {
-    pub(super) tick:        u8,     // offset 0,  1 byte
-    //                              // 3 bytes padding
-    pub(crate) ready:       Ready,  // offset 4,  4 bytes
-    pub(super) is_shutdown: bool,   // offset 8,  1 byte
-    //                              // 15 bytes trailing padding
-}                                   // total: 24 bytes, 14 wasted (58%)
+[HIGH] Padding waste: 14B (58%) across 2 gap(s)
+[HIGH] Reorder fields to save 8B → 16B: ready, is_shutdown, tick  (~8 MB/1M instances)
+note: repr(Rust) — compiler may reorder fields; use binary analysis for actual layout
 ```
 
-padlock suggests reordering to eliminate the waste:
-
+**C / Redis — `multiState`, 20% waste** (layout is deterministic — no compiler reordering in C):
 ```
-[HIGH] Reorder fields to save 8B → 16B: ready, tick, is_shutdown
-```
-
-```rust
-// After reorder: 16 bytes, 6 bytes wasted → 37% (unavoidable trailing alignment)
-// With explicit packing possible to 6 bytes if repr(packed) is appropriate
-pub(crate) struct ReadyEvent {
-    pub(crate) ready:       Ready,  // offset 0, 4 bytes
-    pub(super) tick:        u8,     // offset 4, 1 byte
-    pub(super) is_shutdown: bool,   // offset 5, 1 byte
-}                                   // total: 8 bytes (no padding at all)
+[HIGH] Reorder fields to save 8B → 32B: argv_len_sums, commands, alloc_count, ...
 ```
 
-### `DirBuilder` — 44% padding waste
-
-```rust
-// tokio/src/fs/dir_builder.rs  (as written)
-pub struct DirBuilder {
-    recursive: bool,        // offset 0,  1 byte
-    //                      // 3 bytes padding
-    mode: Option<u32>,      // offset 4,  8 bytes
-}                           // total: 16 bytes, 7 wasted (44%)
+**Go / `database/sql.DB` — false sharing** (layout is deterministic — Go does not reorder fields):
 ```
-
+[HIGH]   False sharing: 3 cache-line conflict(s)
+[MEDIUM] Locality: hot [waitDuration, numClosed, mu] interleaved with cold [...]
 ```
-[HIGH] Padding waste: 7B (44%) across 1 gap(s)
-[HIGH] Reorder fields to save 4B → 12B: mode, recursive
-```
+`waitDuration` and `numClosed` are atomic counters updated on every query. They share a cache line with `mu` — under concurrent load, atomic writes invalidate the line that other goroutines need to lock.
 
-### `Builder` (runtime builder) — 12% waste, 16 bytes recoverable
-
-The runtime `Builder` struct (200 bytes, 27 fields) has 23 bytes of padding spread across 4 gaps — recoverable to 184 bytes by reordering, freeing a full cache line worth of space that every `tokio::runtime::Builder::new_multi_thread()` call allocates on the stack.
-
-> **Note on repr:** `ReadyEvent` and `DirBuilder` are plain `repr(Rust)` structs. The Rust compiler *may* reorder their fields and eliminate the waste automatically at compile time — but it is not required to, and the declared order is what you see in the source, what code reviewers read, and what controls the layout if the struct is ever given `repr(C)`. padlock surfaces these issues so you can fix them intentionally rather than depending on compiler luck.
-
-### `WorkerMetrics` — `repr(align(128))` done right
-
-Tokio's worker metrics use `#[repr(align(128))]` to prevent false sharing across scheduler threads:
-
-```rust
-#[repr(align(128))]
-pub(crate) struct WorkerMetrics {
-    pub(crate) busy_duration_total: MetricAtomicU64,
-    pub(crate) queue_depth:         MetricAtomicUsize,
-    thread_id:                      Mutex<Option<ThreadId>>,
-    pub(crate) park_count:          MetricAtomicU64,
-    // ...
-}
-```
-
-padlock correctly identifies this as a false-sharing concern at the source level (different atomic fields without guard separation), while the `repr(align(128))` at the struct level ensures each `WorkerMetrics` instance is on its own cache line at runtime. This is the recommended pattern: use `repr(align(64))` (or 128 on Apple/ARM big cores) on the struct rather than manual `[u8; N]` padding arrays.
-
-These are not bugs — they are the kind of low-level layout details that accumulate invisibly over time. padlock surfaces them before they become performance regressions.
+See **[docs/real-world-examples.md](docs/real-world-examples.md)** for full field-by-field layouts and fix examples for each language.
 
 ---
 
@@ -823,6 +775,7 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | C / C++ | GCC/Clang extensions: `__int128`, `_Float16`, `__fp16`, `__bf16`, `_Float128` | |
 | C / C++ | Character types: `wchar_t` (4B on POSIX), `char8_t`, `char16_t`, `char32_t` | |
 | C++ | vtable pointer injection for `virtual` classes, single/multiple inheritance base slots, `alignas(N)` on fields and structs | base-class sizes are approximate until nested-struct resolution |
+| C++ stdlib | `std::string`/`std::string_view`, `std::vector<T>`/`std::deque<T>`/`std::list<T>`, `std::map`/`std::set`/unordered variants, `std::unique_ptr`/`std::shared_ptr`/`std::weak_ptr`, `std::optional<T>` (recursive), `std::function`, `std::any`, `std::span<T>`, `std::error_code`, `std::atomic_flag` | sizes based on libstdc++ (GCC/Linux); libc++ (Clang) `std::string` is 24B, use binary analysis for exact values |
 | C / C++ | `__attribute__((packed))` structs and classes | no inter-field padding inserted; struct alignment set to 1 |
 | Rust | All primitive types (`u8`–`u128`, `i8`–`i128`, `f16`, `f32`, `f64`, `f128`, `usize`, `isize`, `char`, `bool`), `repr(C)`, `repr(packed)`, `repr(transparent)`, `repr(align(N))` | |
 | Rust stdlib | `Vec`, `String`, `Box`, `Arc`, `Rc`, all `AtomicXxx`, `PhantomData`, `Duration`, channels, smart pointers, all `NonZeroXxx` | size is independent of type parameter `T` |

@@ -200,6 +200,20 @@ fn is_packed(attrs: &[syn::Attribute]) -> bool {
         .any(|a| a.path().is_ident("repr") && a.to_token_stream().to_string().contains("packed"))
 }
 
+/// Returns `true` when the struct has no repr annotation that fixes the layout
+/// (`repr(C)`, `repr(packed)`, `repr(transparent)`).  A struct with only
+/// `repr(align(N))` still has an unspecified field order — the compiler may
+/// reorder fields freely — so it counts as `repr(Rust)` for warning purposes.
+fn is_repr_rust(attrs: &[syn::Attribute]) -> bool {
+    !attrs.iter().any(|a| {
+        if !a.path().is_ident("repr") {
+            return false;
+        }
+        let ts = a.to_token_stream().to_string();
+        ts.contains('C') || ts.contains("packed") || ts.contains("transparent")
+    })
+}
+
 /// Extract the alignment from `#[repr(align(N))]`. Returns `None` if not present.
 fn repr_align(attrs: &[syn::Attribute]) -> Option<usize> {
     for attr in attrs {
@@ -280,6 +294,7 @@ fn simulate_rust_layout(
         arch,
         is_packed: packed,
         is_union: false,
+        is_repr_rust: false, // callers override this after construction
     }
 }
 
@@ -334,6 +349,7 @@ impl<'ast> Visit<'ast> for StructVisitor {
             .collect();
         let mut layout = simulate_rust_layout(name, &name_ty, packed, forced_align, self.arch);
         layout.source_line = Some(node.ident.span().start().line as u32);
+        layout.is_repr_rust = is_repr_rust(&node.attrs);
 
         // Apply explicit guard annotations; these take precedence over the
         // heuristic type-name pass in concurrency.rs (which skips non-Unknown fields).
@@ -404,6 +420,7 @@ impl<'ast> Visit<'ast> for StructVisitor {
                 arch: self.arch,
                 is_packed: false,
                 is_union: false,
+                is_repr_rust: is_repr_rust(&node.attrs),
             };
             self.layouts.push(layout);
             return;
@@ -493,6 +510,7 @@ impl<'ast> Visit<'ast> for StructVisitor {
             arch: self.arch,
             is_packed: false,
             is_union: false,
+            is_repr_rust: is_repr_rust(&node.attrs),
         });
     }
 }
@@ -998,5 +1016,61 @@ struct Conn { port: u16, status: u32 }
         assert_eq!(l.fields[2].size, 1); // u8
         // Total: 8+4+1 = 13, padded to align(8) = 16
         assert_eq!(l.total_size, 16);
+    }
+
+    // ── repr(Rust) detection ──────────────────────────────────────────────────
+
+    #[test]
+    fn plain_struct_is_repr_rust() {
+        let src = "struct Foo { a: u64, b: u32 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(layouts[0].is_repr_rust, "plain struct should be repr(Rust)");
+    }
+
+    #[test]
+    fn repr_c_struct_is_not_repr_rust() {
+        let src = "#[repr(C)] struct Foo { a: u64, b: u32 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(
+            !layouts[0].is_repr_rust,
+            "repr(C) struct must not be repr(Rust)"
+        );
+    }
+
+    #[test]
+    fn repr_packed_struct_is_not_repr_rust() {
+        let src = "#[repr(packed)] struct Foo { a: u64, b: u32 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(
+            !layouts[0].is_repr_rust,
+            "repr(packed) struct must not be repr(Rust)"
+        );
+    }
+
+    #[test]
+    fn repr_transparent_struct_is_not_repr_rust() {
+        let src = "#[repr(transparent)] struct Wrapper(u64);";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(
+            !layouts[0].is_repr_rust,
+            "repr(transparent) struct must not be repr(Rust)"
+        );
+    }
+
+    #[test]
+    fn plain_enum_is_repr_rust() {
+        let src = "enum Color { Red, Green, Blue }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(layouts[0].is_repr_rust, "plain enum should be repr(Rust)");
+    }
+
+    #[test]
+    fn repr_c_enum_is_not_repr_rust() {
+        let src = "#[repr(C)] enum Dir { North, South }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(
+            !layouts[0].is_repr_rust,
+            "repr(C) enum must not be repr(Rust)"
+        );
     }
 }

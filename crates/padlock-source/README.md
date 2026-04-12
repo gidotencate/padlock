@@ -9,9 +9,10 @@ This crate parses source files without invoking a compiler, using tree-sitter (C
 | Language | Parser | Notes |
 |---|---|---|
 | C | tree-sitter-c | structs, unions, typedefs, bit-fields |
-| C++ | tree-sitter-cpp | classes, inheritance, vtable pointer, templates |
-| Rust | syn | `repr(C)`, `repr(packed)`, all field types |
+| C++ | tree-sitter-cpp | classes, inheritance, vtable pointer, templates; stdlib types (`std::string`, `std::vector`, `std::optional`, `std::shared_ptr`, …) |
+| Rust | syn | `repr(C)`, `repr(packed)`, `repr(align(N))`, all primitive types, `NonZeroXxx`, `f16`/`f128`; `repr(Rust)` structs emit a caveat note |
 | Go | tree-sitter-go | built-in types, `sync.Mutex`, slices, maps |
+| Zig | tree-sitter | structs, unions (bare + tagged), packed structs; C interop types, arbitrary-width integers |
 
 ## Concurrency annotation
 

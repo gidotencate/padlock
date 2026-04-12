@@ -103,6 +103,7 @@ mod tests {
             arch: &X86_64_SYSV,
             is_packed: false,
             is_union: false,
+            is_repr_rust: false,
         }
     }
 

@@ -33,24 +33,120 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         | "int8x16_t" | "uint8x16_t" | "int16x8_t" | "uint16x8_t" => return (16, 16),
         _ => {}
     }
-    // C++ standard library synchronisation types (Linux/glibc x86-64 defaults).
+    // C++ standard library types (Linux/glibc + libstdc++ defaults).
     // Sizes are platform-approximate; accuracy is "good enough" for cache-line
     // bucketing and false-sharing detection.
     match ty {
-        // Mutexes — all backed by pthread_mutex_t (40 bytes on Linux/glibc)
+        // ── Synchronisation ───────────────────────────────────────────────────
+        // pthread_mutex_t on Linux/glibc is 40 bytes.
         "std::mutex"
         | "std::recursive_mutex"
         | "std::timed_mutex"
         | "std::recursive_timed_mutex"
         | "pthread_mutex_t" => return (40, 8),
         "std::shared_mutex" | "std::shared_timed_mutex" => return (56, 8),
-        // Condition variables
         "std::condition_variable" | "pthread_cond_t" => return (48, 8),
-        // std::atomic<T> — same size as T; extract and recurse
+
+        // ── String / view ─────────────────────────────────────────────────────
+        // libstdc++ std::string: 32B (ptr + length + SSO buffer / capacity).
+        // libc++ (Clang): 24B. We use 32B (libstdc++ / GCC, dominant on Linux).
+        "std::string" | "std::wstring" | "std::u8string" | "std::u16string" | "std::u32string"
+        | "std::pmr::string" => return (32, 8),
+        // std::string_view / std::span<T>: pointer + length (2 words).
+        "std::string_view"
+        | "std::wstring_view"
+        | "std::u8string_view"
+        | "std::u16string_view"
+        | "std::u32string_view" => return (arch.pointer_size * 2, arch.pointer_size),
+
+        // ── Sequence containers ───────────────────────────────────────────────
+        // std::vector<T>: pointer + size + capacity = 3 words (24B on 64-bit).
+        // Size is independent of T.
+        ty if ty.starts_with("std::vector<") || ty == "std::vector" => {
+            return (arch.pointer_size * 3, arch.pointer_size);
+        }
+        // std::deque<T>: 80B on both libstdc++ and libc++ (64-bit Linux).
+        ty if ty.starts_with("std::deque<") || ty == "std::deque" => return (80, 8),
+        // std::list<T>: sentinel node pointer + size = 2 words + node pointers.
+        // libstdc++: 24B (size_t + two pointers). libc++: 24B.
+        ty if ty.starts_with("std::list<") || ty == "std::list" => {
+            return (arch.pointer_size * 3, arch.pointer_size);
+        }
+        // std::forward_list<T>: single pointer (head node).
+        ty if ty.starts_with("std::forward_list<") || ty == "std::forward_list" => {
+            return (arch.pointer_size, arch.pointer_size);
+        }
+        // std::array<T, N>: inline storage; size = N * sizeof(T).
+        // We cannot compute this without resolving T and N, so fall through.
+
+        // ── Associative / unordered containers ────────────────────────────────
+        // All map/set types: header node + size = ~48B (libstdc++) / ~40B (libc++).
+        // Use 48B as conservative approximation.
+        ty if ty.starts_with("std::map<")
+            || ty.starts_with("std::multimap<")
+            || ty.starts_with("std::set<")
+            || ty.starts_with("std::multiset<") =>
+        {
+            return (48, 8);
+        }
+        // std::unordered_map / unordered_set: bucket array pointer + size + load factor + etc.
+        // libstdc++: ~56B. libc++: ~72B. Use 56B.
+        ty if ty.starts_with("std::unordered_map<")
+            || ty.starts_with("std::unordered_multimap<")
+            || ty.starts_with("std::unordered_set<")
+            || ty.starts_with("std::unordered_multiset<") =>
+        {
+            return (56, 8);
+        }
+
+        // ── Smart pointers ────────────────────────────────────────────────────
+        // std::unique_ptr<T>: single pointer (deleter may be zero-sized via EBO).
+        ty if ty.starts_with("std::unique_ptr<") || ty == "std::unique_ptr" => {
+            return (arch.pointer_size, arch.pointer_size);
+        }
+        // std::shared_ptr<T> / std::weak_ptr<T>: object pointer + control block pointer.
+        ty if ty.starts_with("std::shared_ptr<")
+            || ty == "std::shared_ptr"
+            || ty.starts_with("std::weak_ptr<")
+            || ty == "std::weak_ptr" =>
+        {
+            return (arch.pointer_size * 2, arch.pointer_size);
+        }
+
+        // ── Type-erasure / utilities ──────────────────────────────────────────
+        // std::function<Sig>: 32B on libstdc++ and libc++ (64-bit Linux).
+        // Holds a functor pointer, a vtable pointer, and a small-functor buffer.
+        ty if ty.starts_with("std::function<") || ty == "std::function" => return (32, 8),
+        // std::any: 32B on libstdc++ (small-object buffer + vtable pointer).
+        "std::any" => return (32, 8),
+        // std::error_code / std::error_condition: pointer + int = 16B.
+        "std::error_code" | "std::error_condition" => return (16, 8),
+        // std::exception_ptr: single pointer.
+        "std::exception_ptr" => return (arch.pointer_size, arch.pointer_size),
+        // std::type_index: single pointer (wraps std::type_info*).
+        "std::type_index" => return (arch.pointer_size, arch.pointer_size),
+        // std::span<T>: pointer + length (2 words). Template arg irrelevant.
+        ty if ty.starts_with("std::span<") || ty == "std::span" => {
+            return (arch.pointer_size * 2, arch.pointer_size);
+        }
+        // std::optional<T>: sizeof(T) + 1B bool, padded to align(T).
+        // Recurse to resolve T then apply the formula.
+        ty if ty.starts_with("std::optional<") && ty.ends_with('>') => {
+            let inner = &ty["std::optional<".len()..ty.len() - 1];
+            let (t_size, t_align) = c_type_size_align(inner.trim(), arch);
+            let total = (t_size + 1).next_multiple_of(t_align.max(1));
+            return (total, t_align.max(1));
+        }
+
+        // ── Atomic ────────────────────────────────────────────────────────────
+        // std::atomic<T>: same size and alignment as T.
         ty if ty.starts_with("std::atomic<") && ty.ends_with('>') => {
             let inner = &ty[12..ty.len() - 1];
             return c_type_size_align(inner.trim(), arch);
         }
+        // std::atomic_flag: guaranteed 1B minimum, but often 4B in practice.
+        "std::atomic_flag" => return (4, 4),
+
         _ => {} // fall through to primitive types below
     }
     // Primitive / stdint / pointer types
@@ -202,6 +298,7 @@ fn simulate_layout(
         arch,
         is_packed: packed,
         is_union: false,
+        is_repr_rust: false,
     }
 }
 
@@ -234,6 +331,7 @@ fn simulate_union_layout(
         arch,
         is_packed: false,
         is_union: true,
+        is_repr_rust: false,
     }
 }
 
@@ -1186,6 +1284,7 @@ typedef struct {
             arch: &X86_64_SYSV,
             is_packed: false,
             is_union: false,
+            is_repr_rust: false,
         };
         assert!(padlock_core::analysis::false_sharing::has_false_sharing(
             &layout
@@ -1684,5 +1783,100 @@ struct NetHeader {
         assert_eq!(l.fields[0].size, 4); // __be32 src_ip
         assert_eq!(l.fields[2].size, 2); // __be16 src_port
         assert_eq!(l.fields[4].size, 1); // u8 protocol
+    }
+
+    // ── C++ stdlib type tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn cpp_string_is_32_bytes() {
+        assert_eq!(c_type_size_align("std::string", &X86_64_SYSV), (32, 8));
+        assert_eq!(c_type_size_align("std::wstring", &X86_64_SYSV), (32, 8));
+    }
+
+    #[test]
+    fn cpp_string_view_is_two_words() {
+        assert_eq!(c_type_size_align("std::string_view", &X86_64_SYSV), (16, 8));
+    }
+
+    #[test]
+    fn cpp_vector_is_24_bytes() {
+        assert_eq!(c_type_size_align("std::vector<int>", &X86_64_SYSV), (24, 8));
+        assert_eq!(
+            c_type_size_align("std::vector<uint64_t>", &X86_64_SYSV),
+            (24, 8)
+        );
+        // Size is independent of T
+        assert_eq!(
+            c_type_size_align("std::vector<std::string>", &X86_64_SYSV),
+            (24, 8)
+        );
+    }
+
+    #[test]
+    fn cpp_smart_pointers_correct_size() {
+        // unique_ptr: single pointer
+        assert_eq!(
+            c_type_size_align("std::unique_ptr<int>", &X86_64_SYSV),
+            (8, 8)
+        );
+        // shared_ptr / weak_ptr: two pointers
+        assert_eq!(
+            c_type_size_align("std::shared_ptr<int>", &X86_64_SYSV),
+            (16, 8)
+        );
+        assert_eq!(
+            c_type_size_align("std::weak_ptr<int>", &X86_64_SYSV),
+            (16, 8)
+        );
+    }
+
+    #[test]
+    fn cpp_optional_recursive_size() {
+        // std::optional<bool>: 1B (bool) + 1B (has_value flag) → 2B
+        assert_eq!(
+            c_type_size_align("std::optional<bool>", &X86_64_SYSV),
+            (2, 1)
+        );
+        // std::optional<int>: 4B + 1B → padded to 4B → 8B total? Let's check:
+        // t_size=4, t_align=4; (4+1).next_multiple_of(4) = 8
+        assert_eq!(
+            c_type_size_align("std::optional<int>", &X86_64_SYSV),
+            (8, 4)
+        );
+        // std::optional<double>: 8B + 1B → padded to 8B → 16B
+        assert_eq!(
+            c_type_size_align("std::optional<double>", &X86_64_SYSV),
+            (16, 8)
+        );
+    }
+
+    #[test]
+    fn cpp_function_is_32_bytes() {
+        assert_eq!(
+            c_type_size_align("std::function<void()>", &X86_64_SYSV),
+            (32, 8)
+        );
+        assert_eq!(
+            c_type_size_align("std::function<int(int)>", &X86_64_SYSV),
+            (32, 8)
+        );
+    }
+
+    #[test]
+    fn cpp_stdlib_struct_with_string_field() {
+        // A struct with std::string fields — used to get pointer-size (8B), now 32B
+        let src = r#"
+struct Config {
+    std::string name;
+    int         version;
+    bool        enabled;
+};
+"#;
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].size, 32); // std::string, not 8
+        // int at offset 32, bool at 36; total padded to 8-byte align = 40
+        assert_eq!(l.fields[1].offset, 32);
+        assert_eq!(l.fields[1].size, 4);
     }
 }

@@ -75,6 +75,9 @@ pub struct StructReport {
     pub wasted_bytes: usize,
     pub score: f64,
     pub findings: Vec<Finding>,
+    /// Mirrors `StructLayout::is_repr_rust`. When true, findings describe
+    /// declared-order waste; the compiler may have already eliminated it.
+    pub is_repr_rust: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -184,6 +187,7 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
         wasted_bytes: wasted,
         score,
         findings,
+        is_repr_rust: layout.is_repr_rust,
     }
 }
 

@@ -14,6 +14,8 @@ The compiler inserts invisible padding bytes between fields (and after the last 
 
 padlock simulates the platform's struct layout rules (C ABI / `repr(C)` for C and C++ source; `repr(C)` or declaration-order simulation for other languages) and computes the gap between every consecutive pair of fields.
 
+> **Note for Rust:** Structs and enums without an explicit `#[repr(C)]`, `#[repr(packed)]`, or `#[repr(transparent)]` attribute use `repr(Rust)` — the compiler is free to reorder fields at compile time. padlock analyses the declared field order and appends a caveat note to the output. The findings remain useful for identifying issues to fix intentionally (especially before adding `#[repr(C)]` for FFI). For compiler-accurate layout, run `padlock analyze` on the compiled binary.
+
 ```
 struct Connection {      offset  size  align
     is_active: bool       0      1     1

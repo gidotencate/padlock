@@ -2,6 +2,22 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.4] — 2026-04-12
+
+### Added
+- **C++ stdlib type sizes**: the C/C++ frontend now resolves sizes for common standard library types instead of falling back to pointer-size:
+  - `std::string` / `std::basic_string<char>` → 32B (libstdc++ layout)
+  - `std::string_view` / `std::basic_string_view<char>` → 2×pointer (ptr + length)
+  - `std::vector<T>` (any `T`) → 3×pointer (ptr + size + capacity)
+  - `std::deque<T>` → 80B; `std::list<T>` → 3×pointer
+  - `std::map<K,V>` / `std::set<T>` / `std::multimap` / `std::multiset` → 48B; unordered variants → 56B
+  - `std::unique_ptr<T>` → pointer; `std::shared_ptr<T>` / `std::weak_ptr<T>` → 2×pointer
+  - `std::optional<T>` → recursively resolved: `ceil(sizeof(T)+1)` rounded up to `alignof(T)`
+  - `std::function<Sig>` → 32B; `std::any` → 32B; `std::error_code` → 16B
+  - `std::span<T>` → 2×pointer; `std::atomic_flag` → 4B
+- **`repr(Rust)` caveat**: Rust structs and enums without `#[repr(C)]`, `#[repr(packed)]`, or `#[repr(transparent)]` now carry an `is_repr_rust` flag. Terminal `analyze` output appends a note that the compiler may have already reordered fields; the `explain` layout table shows `[repr(Rust) — compiler may reorder]` in the header. The `is_repr_rust` flag is also present in JSON/SARIF output (`#[serde(default)]` for backward compatibility).
+- Tests for all new C++ stdlib types and for `repr(Rust)` detection on structs and enums.
+
 ## [0.8.3] — 2026-04-12
 
 ### Added

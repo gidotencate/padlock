@@ -36,11 +36,16 @@ pub fn render_explain(layout: &StructLayout) -> String {
     };
     out.push_str(&format!("{}{}\n", layout.name, loc));
     out.push_str(&format!(
-        "{} bytes  align={}  fields={}{}\n",
+        "{} bytes  align={}  fields={}{}{}\n",
         layout.total_size,
         layout.align,
         layout.fields.len(),
         if layout.is_packed { "  [packed]" } else { "" },
+        if layout.is_repr_rust {
+            "  [repr(Rust) — compiler may reorder]"
+        } else {
+            ""
+        },
     ));
 
     // Table
@@ -352,6 +357,7 @@ mod tests {
             arch: &X86_64_SYSV,
             is_packed: false,
             is_union: false,
+            is_repr_rust: false,
         };
         let out = render_explain(&big);
         assert!(

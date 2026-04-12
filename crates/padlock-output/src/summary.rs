@@ -125,6 +125,13 @@ pub fn render_struct(sr: &StructReport, show_filename: bool) -> String {
         out.push_str("    (no issues found)\n");
     }
 
+    if sr.is_repr_rust && !sr.findings.is_empty() {
+        out.push_str(
+            "    note: repr(Rust) — compiler may reorder fields; \
+             use binary analysis for actual layout\n",
+        );
+    }
+
     out
 }
 

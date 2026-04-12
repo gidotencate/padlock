@@ -464,6 +464,7 @@ impl<'a> BtfParser<'a> {
                     arch: self.arch,
                     is_packed,
                     is_union: *is_union,
+                    is_repr_rust: false,
                 });
 
                 let _ = idx;

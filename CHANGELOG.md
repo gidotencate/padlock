@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.1] — 2026-04-12
+
+### Changed
+- **`padlock check` drift summary**: the terminal and JSON output of `padlock check` now always shows a `N new / M resolved / K unchanged` drift summary line. `resolved` counts both structs that improved significantly since the baseline and baseline structs that no longer appear in the current analysis (deleted/refactored). This gives CI logs a clear picture of baseline progress at a glance.
+
 ## [0.9.0] — 2026-04-12
 
 ### Added

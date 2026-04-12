@@ -322,15 +322,20 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
         let packed = is_packed(&node.attrs);
         let forced_align = repr_align(&node.attrs);
 
-        // Collect (field_name, type, optional_guard)
-        let fields: Vec<(String, Type, Option<String>)> = match &node.fields {
+        // Collect (field_name, type, optional_guard, source_line)
+        let fields: Vec<(String, Type, Option<String>, u32)> = match &node.fields {
             Fields::Named(nf) => nf
                 .named
                 .iter()
                 .map(|f| {
                     let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
                     let guard = extract_guard_from_attrs(&f.attrs);
-                    (fname, f.ty.clone(), guard)
+                    let line = f
+                        .ident
+                        .as_ref()
+                        .map(|i| i.span().start().line as u32)
+                        .unwrap_or(0);
+                    (fname, f.ty.clone(), guard, line)
                 })
                 .collect(),
             Fields::Unnamed(uf) => uf
@@ -339,7 +344,8 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
                 .enumerate()
                 .map(|(i, f)| {
                     let guard = extract_guard_from_attrs(&f.attrs);
-                    (format!("_{i}"), f.ty.clone(), guard)
+                    // Unnamed fields don't have an ident span; use 0 as a sentinel.
+                    (format!("_{i}"), f.ty.clone(), guard, 0u32)
                 })
                 .collect(),
             Fields::Unit => vec![],
@@ -347,7 +353,7 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
 
         let name_ty: Vec<(String, Type)> = fields
             .iter()
-            .map(|(n, t, _)| (n.clone(), t.clone()))
+            .map(|(n, t, _, _)| (n.clone(), t.clone()))
             .collect();
         let mut layout = simulate_rust_layout(name, &name_ty, packed, forced_align, self.arch);
         let struct_line = node.ident.span().start().line as u32;
@@ -356,9 +362,11 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
         layout.suppressed_findings =
             super::suppress::suppressed_from_source_line(self.source, struct_line);
 
-        // Apply explicit guard annotations; these take precedence over the
-        // heuristic type-name pass in concurrency.rs (which skips non-Unknown fields).
-        for (i, (_, _, guard)) in fields.iter().enumerate() {
+        // Apply explicit guard annotations and field source lines.
+        for (i, (_, _, guard, field_line)) in fields.iter().enumerate() {
+            if *field_line > 0 {
+                layout.fields[i].source_line = Some(*field_line);
+            }
             if let Some(g) = guard {
                 layout.fields[i].access = AccessPattern::Concurrent {
                     guard: Some(g.clone()),

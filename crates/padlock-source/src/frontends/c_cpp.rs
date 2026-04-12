@@ -447,6 +447,10 @@ fn parse_class_specifier(
 
     // Skip classes with bit-field members (same reason as structs).
     if raw_fields.iter().any(|(_, ty, _, _)| is_bitfield_type(ty)) {
+        eprintln!(
+            "padlock: note: skipping '{class_name}' — contains bit-fields \
+             (bit-field layout is compiler-controlled; use binary analysis for accurate results)"
+        );
         return None;
     }
 
@@ -653,6 +657,10 @@ fn parse_struct_or_union_specifier(
     // without a compiler. Skip the entire struct to avoid producing wrong layout
     // data. Use `padlock analyze` on the compiled binary for accurate results.
     if raw_fields.iter().any(|(_, ty, _, _)| is_bitfield_type(ty)) {
+        eprintln!(
+            "padlock: note: skipping '{name}' — contains bit-fields \
+             (bit-field layout is compiler-controlled; use binary analysis for accurate results)"
+        );
         return None;
     }
 
@@ -1453,6 +1461,20 @@ struct Flags {
         assert!(
             layouts.iter().all(|l| l.name != "Packed"),
             "C++ class with bitfields should be skipped"
+        );
+    }
+
+    #[test]
+    fn all_bitfield_struct_is_skipped() {
+        // Struct with ONLY bit-field members (no normal fields).
+        // raw_fields is non-empty but all entries carry the `:N` annotation,
+        // so the bit-field guard must still fire and skip the struct.
+        let src = "struct BitPacked { int x:4; int y:4; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.iter().all(|l| l.name != "BitPacked"),
+            "all-bitfield struct should be skipped; got {:?}",
+            layouts.iter().map(|l| &l.name).collect::<Vec<_>>()
         );
     }
 

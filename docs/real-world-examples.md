@@ -40,15 +40,15 @@ pub(crate) struct ReadyEvent {
 $ padlock explain tokio-1.51.1/src/runtime/io/driver.rs --filter ReadyEvent
 
 ReadyEvent  24 bytes  align=8  fields=3  [repr(Rust) — compiler may reorder]
-┌────────┬──────┬───────┬──────────────────┐
-│ offset │ size │ align │ field            │
-├────────┼──────┼───────┼──────────────────┤
-│      0 │    1 │     1 │ tick: u8         │
-│      1 │    7 │     — │ <padding>        │
-│      8 │    8 │     8 │ ready: Ready     │
-│     16 │    1 │     1 │ is_shutdown: bool│
-│     17 │    7 │     — │ <padding>(trail.)│
-└────────┴──────┴───────┴──────────────────┘
+┌────────┬──────┬───────┬────┬──────────────────┐
+│ offset │ size │ align │ CL │ field            │
+├────────┼──────┼───────┼────┼──────────────────┤
+│      0 │    1 │     1 │  0 │ tick: u8         │
+│      1 │    7 │     — │  0 │ <padding>        │
+│      8 │    8 │     8 │  0 │ ready: Ready     │
+│     16 │    1 │     1 │  0 │ is_shutdown: bool│
+│     17 │    7 │     — │  0 │ <padding>(trail.)│
+└────────┴──────┴───────┴────┴──────────────────┘
 14 bytes wasted (58%) — reorder: ready, is_shutdown, tick → 16 bytes
   ~8 KB extra per 1K instances · ~8 MB per 1M instances · ~125K extra cache lines/1M
 ```
@@ -124,18 +124,18 @@ typedef struct multiState {
 $ padlock explain redis-7.0.15/src/server.h --filter '^multiState$'
 
 multiState  40 bytes  align=8  fields=6
-┌────────┬──────┬───────┬──────────────────────┐
-│ offset │ size │ align │ field                │
-├────────┼──────┼───────┼──────────────────────┤
-│      0 │    8 │     8 │ commands: multiCmd * │
-│      8 │    4 │     4 │ count: int           │
-│     12 │    4 │     4 │ cmd_flags: int       │
-│     16 │    4 │     4 │ cmd_inv_flags: int   │
-│     20 │    4 │     — │ <padding>            │
-│     24 │    8 │     8 │ argv_len_sums: size_t│
-│     32 │    4 │     4 │ alloc_count: int     │
-│     36 │    4 │     — │ <padding> (trailing) │
-└────────┴──────┴───────┴──────────────────────┘
+┌────────┬──────┬───────┬────┬──────────────────────┐
+│ offset │ size │ align │ CL │ field                │
+├────────┼──────┼───────┼────┼──────────────────────┤
+│      0 │    8 │     8 │  0 │ commands: multiCmd * │
+│      8 │    4 │     4 │  0 │ count: int           │
+│     12 │    4 │     4 │  0 │ cmd_flags: int       │
+│     16 │    4 │     4 │  0 │ cmd_inv_flags: int   │
+│     20 │    4 │     — │  0 │ <padding>            │
+│     24 │    8 │     8 │  0 │ argv_len_sums: size_t│
+│     32 │    4 │     4 │  0 │ alloc_count: int     │
+│     36 │    4 │     — │  0 │ <padding> (trailing) │
+└────────┴──────┴───────┴────┴──────────────────────┘
 8 bytes wasted (20%) — reorder: argv_len_sums, commands, alloc_count, cmd_flags, cmd_inv_flags, count → 32 bytes
   ~8 KB extra per 1K instances · ~8 MB per 1M instances
 ```

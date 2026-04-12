@@ -64,14 +64,14 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Project health summary** | `padlock summary` shows aggregate score, severity bar chart, worst files, and worst structs in one terminal screen |
 | **Severity CI gate** | `--fail-on-severity medium\|low` exits non-zero when any finding meets or exceeds the threshold |
 | **Parallel parsing** | Directory walks parse source files in parallel (rayon), with an on-disk mtime cache (`.padlock-cache/`) to skip unchanged files on repeat runs |
-| **Cache-line boundaries** | `padlock explain` inserts a visual separator row each time a field crosses into a new 64-byte (or 128-byte) cache line |
+| **Cache-line visualization** | `padlock explain` adds a `CL` column (zero-indexed cache-line number per field/padding row) and inserts a separator row each time a field crosses into a new 64-byte (or 128-byte) cache line |
 | **VS Code extension** | Findings in the Problems panel on save, status bar health score, hover popups, quick-fix lightbulb, and diff-preview fix-all |
 
 ---
 
 ## Build
 
-Requires a Rust toolchain (1.75+).
+Requires a Rust toolchain (1.88+).
 
 ```bash
 git clone <repo>
@@ -282,20 +282,31 @@ $ padlock explain src/events.rs --filter ReadyEvent
 
 ReadyEvent  (src/events.rs:42)
 24 bytes  align=4  fields=3
-┌──────────┬──────┬───────┬────────────────────────────────────┐
-│   offset │ size │ align │ field                              │
-├──────────┼──────┼───────┼────────────────────────────────────┤
-│        0 │    1 │     1 │ tick: u8                           │
-│        1 │    3 │     — │ <padding>                          │
-│        4 │    4 │     4 │ ready: Ready                       │
-│        8 │    1 │     1 │ is_shutdown: bool                  │
-│        9 │   15 │     — │ <padding> (trailing)               │
-└──────────┴──────┴───────┴────────────────────────────────────┘
+┌────────┬──────┬───────┬────┬────────────────────────────────────┐
+│ offset │ size │ align │ CL │ field                              │
+├────────┼──────┼───────┼────┼────────────────────────────────────┤
+│      0 │    1 │     1 │  0 │ tick: u8                           │
+│      1 │    3 │     — │  0 │ <padding>                          │
+│      4 │    4 │     4 │  0 │ ready: Ready                       │
+│      8 │    1 │     1 │  0 │ is_shutdown: bool                  │
+│      9 │   15 │     — │  0 │ <padding> (trailing)               │
+└────────┴──────┴───────┴────┴────────────────────────────────────┘
 14 bytes wasted (58%) — reorder: ready, tick, is_shutdown → 8 bytes
   ~8 KB extra per 1K instances · ~8 MB per 1M instances · ~125K extra cache lines/1M (seq. scan)
 ```
 
 The impact line uses SI scaling: `savings × 1 000 ≈ KB`, `savings × 1 000 000 ≈ MB`. Cache-line estimates assume a sequential scan (64-byte lines). If the reorder also reduces the number of cache lines the struct spans per instance, an extra note is shown.
+
+---
+
+### `padlock init [--force]`
+
+Generates a `.padlock.toml` configuration file in the current directory with every supported option commented out and annotated. Use this when adopting padlock in an existing project to see all available settings at a glance.
+
+```bash
+padlock init               # writes .padlock.toml (fails if it already exists)
+padlock init --force       # overwrites an existing config
+```
 
 ---
 
@@ -315,6 +326,8 @@ A struct is a regression if:
 - Its worst finding severity increased (Low → Medium, Medium → High)
 - Its score dropped by more than 1 point
 - It is new (not in the baseline) and has at least one High finding
+
+Every run prints a drift summary: `N new / M resolved / K unchanged` — where *resolved* counts structs that improved significantly since the baseline or that no longer appear (deleted/refactored).
 
 Flags:
 - `--baseline FILE` — path to baseline JSON (default: `.padlock-baseline.json`)

@@ -38,7 +38,7 @@ GPL v3 makes sense if you want to ensure that anyone who ships a modified padloc
    # In workspace Cargo.toml:
    [workspace.package]
    version     = "0.1.0"
-   edition     = "2021"
+   edition     = "2024"
    license     = "MIT"
    repository  = "https://github.com/YOUR_USERNAME/padlock"
    description = "Struct memory layout analyzer for C, C++, Rust, and Go"
@@ -185,10 +185,14 @@ Before you publish to crates.io or announce the tool, consider addressing:
 | `#[assert_no_padding]` proc macro | High | Medium | Done |
 | GitHub Actions `action.yml` | High | Low | Done |
 | Rename CLI crate to `padlock-cli` (name conflict on crates.io) | Required | Low | Done |
-| In-place `fix` for all source languages | Medium | Medium | Done |
+| In-place `fix` for all source languages (C, C++, Rust, Go) | Medium | Medium | Done |
 | Nested struct size resolution | Medium | High | Done |
 | C++ inheritance / vtable padding | Medium | High | Done |
-| Configuration file (`.padlock.toml`) | Low | Medium | Done |
+| Configuration file (`.padlock.toml`) with filter/exclude/sort/severity keys | Low | Medium | Done |
+| `padlock init` — generate annotated `.padlock.toml` | Low | Low | Done |
+| `padlock check` — baseline/ratchet CI mode with drift summary | Medium | Medium | Done |
+| `padlock explain` — CL column showing cache-line per field | Low | Low | Done |
+| Field-level `source_line` in all frontends | Low | Low | Done |
 | Remove `libsource.a` from the repo (binary artifact) | Recommended | Low | Check before publish |
 | Resolve crate name conflict | Required for publish | Low | Done |
 

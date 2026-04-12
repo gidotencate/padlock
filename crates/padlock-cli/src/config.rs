@@ -50,6 +50,26 @@ pub struct Config {
     pub arch_override: Option<String>,
     /// Per-struct overrides keyed by exact struct name.
     pub struct_overrides: std::collections::HashMap<String, StructOverride>,
+
+    // ── filter defaults ───────────────────────────────────────────────────────
+    /// Include only structs whose names match this regex pattern.
+    /// CLI `--filter` overrides this when provided.
+    pub filter: Option<String>,
+    /// Exclude structs whose names match this regex pattern.
+    /// CLI `--exclude` overrides this when provided.
+    pub exclude: Option<String>,
+    /// Show only structs with total size >= N bytes.
+    /// CLI `--min-size` overrides this when provided.
+    pub min_size: Option<usize>,
+    /// Show only structs with at least N padding holes.
+    /// CLI `--min-holes` overrides this when provided.
+    pub min_holes: Option<usize>,
+    /// Default sort order for output: "score" | "size" | "waste" | "name".
+    /// CLI `--sort-by` overrides this when provided.
+    pub sort_by: Option<String>,
+    /// Exit non-zero when any finding meets this severity: "high" | "medium" | "low".
+    /// CLI `--fail-on-severity` overrides this when provided.
+    pub fail_on_severity: Option<Severity>,
 }
 
 impl Default for Config {
@@ -60,6 +80,12 @@ impl Default for Config {
             ignore: Vec::new(),
             arch_override: None,
             struct_overrides: std::collections::HashMap::new(),
+            filter: None,
+            exclude: None,
+            min_size: None,
+            min_holes: None,
+            sort_by: None,
+            fail_on_severity: None,
         }
     }
 }
@@ -144,12 +170,48 @@ impl Config {
             }
         }
 
+        let filter = padlock
+            .and_then(|p| p.get("filter"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        let exclude = padlock
+            .and_then(|p| p.get("exclude"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        let min_size = padlock
+            .and_then(|p| p.get("min_size"))
+            .and_then(|v| v.as_integer())
+            .map(|n| n.max(0) as usize);
+
+        let min_holes = padlock
+            .and_then(|p| p.get("min_holes"))
+            .and_then(|v| v.as_integer())
+            .map(|n| n.max(0) as usize);
+
+        let sort_by = padlock
+            .and_then(|p| p.get("sort_by"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        let fail_on_severity = padlock
+            .and_then(|p| p.get("fail_on_severity"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_severity);
+
         Some(Self {
             min_severity,
             fail_below,
             ignore,
             arch_override,
             struct_overrides,
+            filter,
+            exclude,
+            min_size,
+            min_holes,
+            sort_by,
+            fail_on_severity,
         })
     }
 
@@ -334,6 +396,40 @@ override = "aarch64"
         assert!(cfg.should_report(&Severity::High));
         assert!(!cfg.should_report(&Severity::Medium));
         assert!(!cfg.should_report(&Severity::Low));
+    }
+
+    #[test]
+    fn parse_filter_defaults() {
+        let content = r#"
+[padlock]
+filter            = "^Hot"
+exclude           = "^Generated"
+min_size          = 64
+min_holes         = 2
+sort_by           = "waste"
+fail_on_severity  = "high"
+"#;
+        let f = write_config(content);
+        let cfg = Config::load_file(f.path()).unwrap();
+        assert_eq!(cfg.filter.as_deref(), Some("^Hot"));
+        assert_eq!(cfg.exclude.as_deref(), Some("^Generated"));
+        assert_eq!(cfg.min_size, Some(64));
+        assert_eq!(cfg.min_holes, Some(2));
+        assert_eq!(cfg.sort_by.as_deref(), Some("waste"));
+        assert_eq!(cfg.fail_on_severity, Some(Severity::High));
+    }
+
+    #[test]
+    fn filter_defaults_absent_gives_none() {
+        let content = "[padlock]\nmin_severity = \"low\"\n";
+        let f = write_config(content);
+        let cfg = Config::load_file(f.path()).unwrap();
+        assert!(cfg.filter.is_none());
+        assert!(cfg.exclude.is_none());
+        assert!(cfg.min_size.is_none());
+        assert!(cfg.min_holes.is_none());
+        assert!(cfg.sort_by.is_none());
+        assert!(cfg.fail_on_severity.is_none());
     }
 
     #[test]

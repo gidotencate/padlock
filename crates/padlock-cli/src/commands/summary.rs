@@ -48,6 +48,10 @@ pub fn run(
         }
     }
 
+    // Merge config filter defaults; CLI flags take precedence.
+    let mut filter = filter.clone();
+    filter.apply_config_defaults(&cfg);
+
     // Apply config ignore list, then CLI pre-filters.
     layouts.retain(|l| !cfg.is_ignored(&l.name));
     filter.apply_to_layouts(&mut layouts)?;

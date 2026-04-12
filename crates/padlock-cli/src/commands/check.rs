@@ -70,6 +70,8 @@ pub fn run(
     filter: &FilterArgs,
 ) -> anyhow::Result<()> {
     let cfg = Config::for_path(paths.first().map(|p| p.as_path()).unwrap_or(Path::new(".")));
+    let mut filter = filter.clone();
+    filter.apply_config_defaults(&cfg);
 
     let (mut layouts, analyzed) = collect_layouts(paths)?;
     layouts.retain(|l| !cfg.is_ignored(&l.name));

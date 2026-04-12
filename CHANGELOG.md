@@ -2,6 +2,14 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.3] — 2026-04-12
+
+### Added
+- **`padlock explain` CL column**: the layout table now includes a `CL` column (zero-indexed
+  cache-line number) for every field and padding row, making it immediately clear which cache
+  line each piece of data occupies. Works alongside the existing cache-line separator rows that
+  mark boundaries between lines.
+
 ## [0.9.2] — 2026-04-12
 
 ### Added

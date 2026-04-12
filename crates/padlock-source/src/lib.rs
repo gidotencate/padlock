@@ -508,4 +508,47 @@ mod tests {
         assert_eq!(layouts.len(), 1);
         assert!(layouts[0].suppressed_findings.is_empty());
     }
+
+    // ── C++ inheritance base-size resolution ─────────────────────────────────
+
+    #[test]
+    fn cpp_inheritance_base_size_resolved_via_parse_source_str() {
+        // Base has two ints = 8 bytes. Derived inherits Base and adds one int.
+        // After resolve_nested_structs, __base_Base must be 8 bytes (not
+        // pointer-sized 8B by coincidence — we use a 4-byte base to verify).
+        let src = r#"
+class SmallBase { int x; };
+class BigDerived : public SmallBase { int a; int b; int c; };
+"#;
+        let layouts = parse_source_str(src, &SourceLanguage::Cpp, &X86_64_SYSV).unwrap();
+        let derived = layouts.iter().find(|l| l.name == "BigDerived").unwrap();
+        let base_field = derived
+            .fields
+            .iter()
+            .find(|f| f.name == "__base_SmallBase")
+            .unwrap();
+        // SmallBase is 4 bytes (single int, no padding), so after resolution
+        // the synthetic field must be 4 bytes, not 8 (pointer size).
+        assert_eq!(
+            base_field.size, 4,
+            "__base_SmallBase should be resolved to 4 bytes (sizeof SmallBase)"
+        );
+        // BigDerived total: 4 (base) + 4*3 (a,b,c) = 16 bytes
+        assert_eq!(derived.total_size, 16);
+    }
+
+    #[test]
+    fn cpp_multi_level_inheritance_resolved() {
+        let src = r#"
+class A { int x; };
+class B : public A { int y; };
+class C : public B { int z; };
+"#;
+        let layouts = parse_source_str(src, &SourceLanguage::Cpp, &X86_64_SYSV).unwrap();
+        let c = layouts.iter().find(|l| l.name == "C").unwrap();
+        // C has __base_B (which is 8 bytes: A(4)+y(4)) + z(4) = 12 bytes
+        let base_b = c.fields.iter().find(|f| f.name == "__base_B").unwrap();
+        assert_eq!(base_b.size, 8, "B is 8 bytes (A's int + B's int)");
+        assert_eq!(c.total_size, 12);
+    }
 }

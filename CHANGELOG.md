@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.0] — 2026-04-12
+
+### Added
+- **`.padlock.toml` filter defaults**: the config file now supports per-project filter defaults under `[padlock]`. CLI flags always take precedence; config values fill in fields not specified on the command line. New options: `filter` (regex include), `exclude` (regex exclude), `min_size` (minimum struct size in bytes), `min_holes` (minimum padding holes), `sort_by` (`score`|`size`|`waste`|`name`), `fail_on_severity` (`high`|`medium`|`low`). The `padlock init` template documents all new options.
+
 ## [0.8.9] — 2026-04-12
 
 ### Added

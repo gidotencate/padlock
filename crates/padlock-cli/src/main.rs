@@ -13,6 +13,7 @@ mod commands {
     pub mod diff;
     pub mod explain;
     pub mod fix;
+    pub mod init;
     pub mod list;
     pub mod report;
     pub mod summary;
@@ -145,6 +146,9 @@ enum Commands {
         filter: Option<String>,
     },
 
+    /// Generate a .padlock.toml configuration template in the current directory
+    Init,
+
     /// Compare current layout findings against a saved baseline; fail only on regressions
     Check {
         /// Paths to analyze: source files, binaries, or directories
@@ -196,6 +200,8 @@ fn main() -> anyhow::Result<()> {
             word_size,
             filter,
         } => commands::summary::run(&paths, top, cache_line_size, word_size, &filter),
+
+        Commands::Init => commands::init::run(),
 
         Commands::List { paths, filter } => commands::list::run(&paths, &filter),
 

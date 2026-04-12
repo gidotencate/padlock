@@ -60,11 +60,12 @@ fn parse_type_declaration(
     arch: &'static ArchConfig,
 ) -> Option<StructLayout> {
     let source_line = node.start_position().row as u32 + 1;
+    let decl_start_byte = node.start_byte();
     // type_declaration has a type_spec child
     for i in 0..node.child_count() {
         let child = node.child(i)?;
         if child.kind() == "type_spec" {
-            return parse_type_spec(source, child, arch, source_line);
+            return parse_type_spec(source, child, arch, source_line, decl_start_byte);
         }
     }
     None
@@ -75,6 +76,7 @@ fn parse_type_spec(
     node: Node<'_>,
     arch: &'static ArchConfig,
     source_line: u32,
+    decl_start_byte: usize,
 ) -> Option<StructLayout> {
     let mut name: Option<String> = None;
     let mut struct_node: Option<Node> = None;
@@ -90,7 +92,14 @@ fn parse_type_spec(
 
     let name = name?;
     let struct_node = struct_node?;
-    parse_struct_type(source, struct_node, name, arch, source_line)
+    parse_struct_type(
+        source,
+        struct_node,
+        name,
+        arch,
+        source_line,
+        decl_start_byte,
+    )
 }
 
 fn parse_struct_type(
@@ -99,6 +108,7 @@ fn parse_struct_type(
     name: String,
     arch: &'static ArchConfig,
     source_line: u32,
+    decl_start_byte: usize,
 ) -> Option<StructLayout> {
     let mut raw_fields: Vec<(String, String, Option<String>)> = Vec::new();
 
@@ -168,6 +178,10 @@ fn parse_struct_type(
         is_packed: false,
         is_union: false,
         is_repr_rust: false,
+        suppressed_findings: super::suppress::suppressed_from_preceding_source(
+            source,
+            decl_start_byte,
+        ),
     })
 }
 

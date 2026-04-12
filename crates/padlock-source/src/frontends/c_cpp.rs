@@ -299,6 +299,7 @@ fn simulate_layout(
         is_packed: packed,
         is_union: false,
         is_repr_rust: false,
+        suppressed_findings: Vec::new(),
     }
 }
 
@@ -332,6 +333,7 @@ fn simulate_union_layout(
         is_packed: false,
         is_union: true,
         is_repr_rust: false,
+        suppressed_findings: Vec::new(),
     }
 }
 
@@ -491,6 +493,9 @@ fn parse_class_specifier(
             layout.total_size = layout.total_size.next_multiple_of(al);
         }
     }
+
+    layout.suppressed_findings =
+        super::suppress::suppressed_from_preceding_source(source, node.start_byte());
 
     Some(layout)
 }
@@ -699,6 +704,9 @@ fn parse_struct_or_union_specifier(
             layout.total_size = layout.total_size.next_multiple_of(al);
         }
     }
+
+    layout.suppressed_findings =
+        super::suppress::suppressed_from_preceding_source(source, node.start_byte());
 
     Some(layout)
 }
@@ -1285,6 +1293,7 @@ typedef struct {
             is_packed: false,
             is_union: false,
             is_repr_rust: false,
+            suppressed_findings: Vec::new(),
         };
         assert!(padlock_core::analysis::false_sharing::has_false_sharing(
             &layout

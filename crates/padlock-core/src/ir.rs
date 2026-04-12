@@ -116,6 +116,16 @@ pub struct StructLayout {
     /// Always `false` for DWARF/binary layouts (which are always accurate).
     #[serde(default)]
     pub is_repr_rust: bool,
+    /// Finding kinds that are suppressed for this struct via a source annotation.
+    ///
+    /// Populated by source frontends when they encounter a suppression directive:
+    /// - Rust: `#[padlock_suppress = "ReorderSuggestion,FalseSharing"]`
+    /// - C/C++/Go/Zig: `// padlock: ignore[ReorderSuggestion,FalseSharing]`
+    ///
+    /// Values match the variant names of [`padlock_core::findings::Finding`]:
+    /// `"PaddingWaste"`, `"ReorderSuggestion"`, `"FalseSharing"`, `"LocalityIssue"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suppressed_findings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -262,6 +272,7 @@ pub mod test_fixtures {
             is_packed: false,
             is_union: false,
             is_repr_rust: false,
+            suppressed_findings: Vec::new(),
         }
     }
 
@@ -321,6 +332,7 @@ pub mod test_fixtures {
             is_packed: false,
             is_union: false,
             is_repr_rust: false,
+            suppressed_findings: Vec::new(),
         }
     }
 

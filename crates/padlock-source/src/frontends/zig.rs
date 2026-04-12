@@ -185,6 +185,7 @@ fn parse_variable_declaration(
     arch: &'static ArchConfig,
 ) -> Option<StructLayout> {
     let source_line = node.start_position().row as u32 + 1;
+    let decl_start_byte = node.start_byte();
     let mut name: Option<String> = None;
     let mut struct_node: Option<Node> = None;
     let mut union_node: Option<Node> = None;
@@ -205,13 +206,16 @@ fn parse_variable_declaration(
     }
 
     let name = name?;
-    if let Some(sn) = struct_node {
-        parse_struct_declaration(source, sn, name, arch, source_line)
+    let mut layout = if let Some(sn) = struct_node {
+        parse_struct_declaration(source, sn, name, arch, source_line)?
     } else if let Some(un) = union_node {
-        parse_union_declaration(source, un, name, arch, source_line)
+        parse_union_declaration(source, un, name, arch, source_line)?
     } else {
-        None
-    }
+        return None;
+    };
+    layout.suppressed_findings =
+        super::suppress::suppressed_from_preceding_source(source, decl_start_byte);
+    Some(layout)
 }
 
 /// Parse a Zig `union { ... }` or `union(enum) { ... }` declaration.
@@ -334,6 +338,7 @@ fn parse_union_declaration(
         is_packed: false,
         is_union: true,
         is_repr_rust: false,
+        suppressed_findings: Vec::new(), // set by parse_variable_declaration
     })
 }
 
@@ -415,6 +420,7 @@ fn parse_struct_declaration(
         is_packed,
         is_union: false,
         is_repr_rust: false,
+        suppressed_findings: Vec::new(), // set by parse_variable_declaration
     })
 }
 

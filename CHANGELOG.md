@@ -2,6 +2,14 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.6] — 2026-04-12
+
+### Added
+- **Per-finding suppression**: place `// padlock: ignore[Kind1, Kind2]` on the line immediately before a struct/type declaration to suppress specific finding types while keeping the struct in the report. Supports all languages (C/C++/Rust/Go/Zig). Valid kinds: `PaddingWaste`, `ReorderSuggestion`, `FalseSharing`, `LocalityIssue`. Multiple kinds can be comma-separated in a single directive.
+  - Distinct from `// padlock:ignore` (which removes the struct from analysis entirely).
+  - `StructLayout` carries a `suppressed_findings: Vec<String>` field (serde `default` + `skip_serializing_if` for backward compatibility).
+  - Documented in `docs/findings.md` with per-language examples.
+
 ## [0.8.5] — 2026-04-12
 
 ### Changed

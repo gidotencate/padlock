@@ -295,17 +295,19 @@ fn simulate_rust_layout(
         is_packed: packed,
         is_union: false,
         is_repr_rust: false, // callers override this after construction
+        suppressed_findings: Vec::new(), // callers may override after construction
     }
 }
 
 // ── visitor ───────────────────────────────────────────────────────────────────
 
-struct StructVisitor {
+struct StructVisitor<'src> {
     arch: &'static ArchConfig,
     layouts: Vec<StructLayout>,
+    source: &'src str,
 }
 
-impl<'ast> Visit<'ast> for StructVisitor {
+impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
         syn::visit::visit_item_struct(self, node); // recurse into nested items
 
@@ -348,8 +350,11 @@ impl<'ast> Visit<'ast> for StructVisitor {
             .map(|(n, t, _)| (n.clone(), t.clone()))
             .collect();
         let mut layout = simulate_rust_layout(name, &name_ty, packed, forced_align, self.arch);
-        layout.source_line = Some(node.ident.span().start().line as u32);
+        let struct_line = node.ident.span().start().line as u32;
+        layout.source_line = Some(struct_line);
         layout.is_repr_rust = is_repr_rust(&node.attrs);
+        layout.suppressed_findings =
+            super::suppress::suppressed_from_source_line(self.source, struct_line);
 
         // Apply explicit guard annotations; these take precedence over the
         // heuristic type-name pass in concurrency.rs (which skips non-Unknown fields).
@@ -397,6 +402,7 @@ impl<'ast> Visit<'ast> for StructVisitor {
 
         if all_unit {
             // Pure discriminant — no payload storage
+            let enum_line = node.ident.span().start().line as u32;
             let layout = StructLayout {
                 name,
                 total_size: disc_size,
@@ -416,11 +422,15 @@ impl<'ast> Visit<'ast> for StructVisitor {
                     access: AccessPattern::Unknown,
                 }],
                 source_file: None,
-                source_line: Some(node.ident.span().start().line as u32),
+                source_line: Some(enum_line),
                 arch: self.arch,
                 is_packed: false,
                 is_union: false,
                 is_repr_rust: is_repr_rust(&node.attrs),
+                suppressed_findings: super::suppress::suppressed_from_source_line(
+                    self.source,
+                    enum_line,
+                ),
             };
             self.layouts.push(layout);
             return;
@@ -500,17 +510,22 @@ impl<'ast> Visit<'ast> for StructVisitor {
             access: AccessPattern::Unknown,
         });
 
+        let enum_line = node.ident.span().start().line as u32;
         self.layouts.push(StructLayout {
             name,
             total_size,
             align: total_align,
             fields,
             source_file: None,
-            source_line: Some(node.ident.span().start().line as u32),
+            source_line: Some(enum_line),
             arch: self.arch,
             is_packed: false,
             is_union: false,
             is_repr_rust: is_repr_rust(&node.attrs),
+            suppressed_findings: super::suppress::suppressed_from_source_line(
+                self.source,
+                enum_line,
+            ),
         });
     }
 }
@@ -522,6 +537,7 @@ pub fn parse_rust(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec
     let mut visitor = StructVisitor {
         arch,
         layouts: Vec::new(),
+        source,
     };
     visitor.visit_file(&file);
     Ok(visitor.layouts)

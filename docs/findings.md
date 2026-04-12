@@ -210,6 +210,69 @@ Group hot fields together at the front of the struct, or separate hot and cold f
 
 ---
 
+## Per-Finding Suppression
+
+When a finding is intentional or impossible to fix in context, you can suppress specific finding types for a struct without hiding the struct from analysis entirely.
+
+**Syntax** — place a comment on the line immediately before the struct/type declaration:
+
+```c
+// padlock: ignore[ReorderSuggestion]
+struct NetworkPacket { uint8_t type; uint64_t timestamp; };
+```
+
+Multiple kinds can be suppressed in one directive, comma-separated:
+
+```c
+// padlock: ignore[PaddingWaste, ReorderSuggestion]
+struct WireFormat { uint8_t version; uint64_t id; };
+```
+
+The directive works the same way in all supported languages:
+
+*Rust:*
+```rust
+// padlock: ignore[FalseSharing]
+struct Counters {
+    reads:  AtomicU64,
+    writes: AtomicU64,
+}
+```
+
+*Go:*
+```go
+// padlock: ignore[LocalityIssue]
+type DB struct {
+    mu    sync.Mutex
+    cache map[string][]byte
+    name  string
+}
+```
+
+*Zig:*
+```zig
+// padlock: ignore[ReorderSuggestion]
+const Packet = struct {
+    version: u8,
+    id:      u64,
+};
+```
+
+**Valid kind names** (case-sensitive):
+
+| Kind | Suppresses |
+|---|---|
+| `PaddingWaste` | Padding waste finding |
+| `ReorderSuggestion` | Field reorder suggestion |
+| `FalseSharing` | False sharing finding |
+| `LocalityIssue` | Hot/cold locality finding |
+
+**Difference from `// padlock:ignore`**
+
+`// padlock:ignore` (no brackets) removes the struct from analysis entirely — it does not appear in output or reports. `// padlock: ignore[Kind]` keeps the struct in the report but omits the named finding kind.
+
+---
+
 ## Score
 
 Each struct receives an overall score from 0 to 100:

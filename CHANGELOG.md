@@ -2,6 +2,16 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.3] — 2026-04-12
+
+### Added
+- **Extended type coverage** — source frontends now recognise significantly more types without falling back to pointer-size:
+  - **C/C++**: Linux kernel integer types (`u8`/`u16`/`u32`/`u64`, `s8`–`s64`, `__u8`–`__u64`, `__s8`–`__s64`); endian-annotated kernel types (`__be16`, `__le32`, `__be64`, …); C99 fast/least family (`uint_fast32_t` is correctly pointer-sized on 64-bit); `intmax_t`/`uintmax_t`; GCC/Clang `__int128`/`__uint128`; Windows SDK types (`BYTE`, `WORD`, `DWORD`, `QWORD`, `BOOL`, `HANDLE`, `LPVOID`, `UINT8`–`UINT64`, `INT8`–`INT64`, pointer aliases); half-precision floats (`_Float16`, `__fp16`, `__bf16`, `_Float128`); character types (`wchar_t` 4B on POSIX, `char8_t`, `char16_t`, `char32_t`); multi-word spellings (`long int`, `long long int`).
+  - **Zig**: C interop types (`c_char`, `c_short`, `c_int`, `c_uint`, `c_long`, `c_ulong`, `c_longlong`, `c_ulonglong`, `c_float`, `c_double`, `c_longdouble`); arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) — size is `ceil(N/8)` bytes aligned to next power-of-two (capped at 8).
+  - **Rust**: All `NonZeroXxx` types (`NonZeroU8`–`NonZeroU128`, `NonZeroUsize`, signed variants) — now correctly sized as their underlying integer; `f16` (2B) and `f128` (16B).
+- Tests for all new type additions in `c_cpp.rs`, `zig.rs`, and `rust.rs`.
+- README "What source analysis gets right" table expanded to reflect the new coverage.
+
 ## [0.8.2] — 2026-04-12
 
 ### Added (VS Code extension)

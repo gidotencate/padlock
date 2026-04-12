@@ -99,12 +99,33 @@ fn primitive_size_align(name: &str, arch: &'static ArchConfig) -> (usize, usize)
     match name {
         // ── language primitives ───────────────────────────────────────────────
         "bool" | "u8" | "i8" => (1, 1),
-        "u16" | "i16" => (2, 2),
+        "u16" | "i16" | "f16" => (2, 2),
         "u32" | "i32" | "f32" => (4, 4),
         "u64" | "i64" | "f64" => (8, 8),
-        "u128" | "i128" => (16, 16),
+        "u128" | "i128" | "f128" => (16, 16),
         "usize" | "isize" => (ps, ps),
         "char" => (4, 4), // Rust char is a Unicode scalar (4 bytes)
+
+        // NonZero integer types — same size/align as the underlying integer.
+        // The niche optimisation means Option<NonZeroU8> == 1 byte, but the
+        // struct field itself is identical in size to the plain integer.
+        "NonZeroU8" | "NonZeroI8" => (1, 1),
+        "NonZeroU16" | "NonZeroI16" => (2, 2),
+        "NonZeroU32" | "NonZeroI32" => (4, 4),
+        "NonZeroU64" | "NonZeroI64" => (8, 8),
+        "NonZeroU128" | "NonZeroI128" => (16, 16),
+        "NonZeroUsize" | "NonZeroIsize" => (ps, ps),
+
+        // Wrapping<T>, Saturating<T> — transparent newtype over T.
+        // The generic arg has already been stripped, so we get the inner
+        // primitive name here; if the stripping didn't happen these fall
+        // through to pointer-size, which is acceptable.
+        "Wrapping" | "Saturating" => (ps, ps),
+
+        // MaybeUninit<T> and UnsafeCell<T> are transparent newtypes —
+        // same size as T. Without knowing T we approximate as pointer-size,
+        // which is correct for the common case of wrapping a pointer-sized value.
+        "MaybeUninit" | "UnsafeCell" => (ps, ps),
 
         // ── std atomics ───────────────────────────────────────────────────────
         "AtomicBool" | "AtomicU8" | "AtomicI8" => (1, 1),
@@ -943,5 +964,39 @@ struct Conn { port: u16, status: u32 }
         assert_eq!(l.total_size, 16);
         let gaps = padlock_core::ir::find_padding(l);
         assert_eq!(gaps[0].bytes, 7);
+    }
+
+    // ── type-table tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn nonzero_types_same_size_as_base() {
+        assert_eq!(primitive_size_align("NonZeroU8", &X86_64_SYSV), (1, 1));
+        assert_eq!(primitive_size_align("NonZeroI8", &X86_64_SYSV), (1, 1));
+        assert_eq!(primitive_size_align("NonZeroU16", &X86_64_SYSV), (2, 2));
+        assert_eq!(primitive_size_align("NonZeroU32", &X86_64_SYSV), (4, 4));
+        assert_eq!(primitive_size_align("NonZeroU64", &X86_64_SYSV), (8, 8));
+        assert_eq!(primitive_size_align("NonZeroU128", &X86_64_SYSV), (16, 16));
+        assert_eq!(
+            primitive_size_align("NonZeroUsize", &X86_64_SYSV),
+            (X86_64_SYSV.pointer_size, X86_64_SYSV.pointer_size)
+        );
+    }
+
+    #[test]
+    fn float16_and_float128_correct_size() {
+        assert_eq!(primitive_size_align("f16", &X86_64_SYSV), (2, 2));
+        assert_eq!(primitive_size_align("f128", &X86_64_SYSV), (16, 16));
+    }
+
+    #[test]
+    fn rust_struct_with_nonzero_fields() {
+        let src = "struct Counts { hits: NonZeroU64, misses: NonZeroU32, flags: u8 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].size, 8); // NonZeroU64
+        assert_eq!(l.fields[1].size, 4); // NonZeroU32
+        assert_eq!(l.fields[2].size, 1); // u8
+        // Total: 8+4+1 = 13, padded to align(8) = 16
+        assert_eq!(l.total_size, 16);
     }
 }

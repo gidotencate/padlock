@@ -817,12 +817,17 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 
 | Language | Accurate | Notes |
 |---|---|---|
-| C / C++ | Normal structs, unions, pointer fields, all primitive types, `std::atomic<T>` | |
-| C++ | vtable pointer injection for `virtual` classes, single/multiple inheritance base slots | base-class sizes are approximate until nested-struct resolution |
-| Rust | All primitive types, `repr(C)`, `repr(packed)`, `repr(transparent)` | |
-| Rust stdlib | `Vec`, `String`, `Box`, `Arc`, `Rc`, all `AtomicXxx`, `PhantomData`, `Duration`, channels, smart pointers | size is independent of type parameter `T` |
-| Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words) | |
+| C / C++ | All C primitives (`char`–`long long`, `float`/`double`/`long double`), `stdint.h` exact-width (`int8_t`–`uint64_t`), C99 fast/least family, `intmax_t`/`uintmax_t`, `size_t`/`ptrdiff_t`/`intptr_t`, `std::atomic<T>` | |
+| C / C++ | Linux kernel types: `u8`–`u64`, `s8`–`s64`, `__u8`–`__u64`, `__s8`–`__s64`, endian-annotated `__be16`/`__le32` etc. | |
+| C / C++ | Windows SDK: `BYTE`, `WORD`, `DWORD`, `QWORD`, `BOOL`, `HANDLE`, `LPVOID`, `UINT8`–`UINT64`, `INT8`–`INT64` and pointer aliases | |
+| C / C++ | GCC/Clang extensions: `__int128`, `_Float16`, `__fp16`, `__bf16`, `_Float128` | |
+| C / C++ | Character types: `wchar_t` (4B on POSIX), `char8_t`, `char16_t`, `char32_t` | |
+| C++ | vtable pointer injection for `virtual` classes, single/multiple inheritance base slots, `alignas(N)` on fields and structs | base-class sizes are approximate until nested-struct resolution |
 | C / C++ | `__attribute__((packed))` structs and classes | no inter-field padding inserted; struct alignment set to 1 |
+| Rust | All primitive types (`u8`–`u128`, `i8`–`i128`, `f16`, `f32`, `f64`, `f128`, `usize`, `isize`, `char`, `bool`), `repr(C)`, `repr(packed)`, `repr(transparent)`, `repr(align(N))` | |
+| Rust stdlib | `Vec`, `String`, `Box`, `Arc`, `Rc`, all `AtomicXxx`, `PhantomData`, `Duration`, channels, smart pointers, all `NonZeroXxx` | size is independent of type parameter `T` |
+| Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words), `complex128` | |
+| Zig | All standard integer/float types, C interop types (`c_int`, `c_uint`, `c_long`, etc.), arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) | arbitrary-width sizes use `ceil(N/8)` bytes, aligned to next power-of-two (capped at 8) |
 
 ### What source analysis skips (instead of showing wrong data)
 
@@ -834,12 +839,13 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 
 ### Known remaining limitations (source analysis)
 
-- **C++ `alignas(N)` / `__attribute__((aligned(N)))` on individual fields** — field alignment overrides are not modeled; use binary analysis for accuracy.
 - **C++ templates** — unknown type parameters fall through to pointer-size; the struct is analyzed but may show approximate sizes.
 - **Rust enums with data variants** (`enum Foo { A(u64), B { x: u32 } }`) — not modeled; only plain structs are analyzed.
-- **Go named interface fields** (`io.Reader`, custom interfaces) — reported as 2 words (like `interface{}`/`any`), which is correct for the runtime representation. Named interfaces implemented by pointer types are always 2 words regardless.
+- **Go named interface fields** (`io.Reader`, custom interfaces) — reported as 2 words (like `interface{}`/`any`), which is correct for the runtime representation.
 - **`#pragma pack(N)` on C/C++ structs** — only `__attribute__((packed))` (GCC/Clang style) is detected from source; MSVC-style `#pragma pack` is not. Use binary analysis for accuracy on MSVC-compiled code.
+- **`wchar_t` on Windows** — padlock treats `wchar_t` as 4 bytes (POSIX/GCC). On MSVC Windows targets it is 2 bytes. Use binary analysis for Windows builds.
 - **Rust const-expression padding** (`[u8; 64 - size_of::<Mutex<u64>>()]`) — the expression is not evaluated; the field gets pointer-size as a default.
+- **Zig packed structs with arbitrary-width integers** — bit-packing layout cannot be modelled accurately without a compiler; padlock uses the `ceil(N/8)` approximation.
 - **`repr(Rust)` reordering** — the compiler may reorder fields and eliminate padding automatically; padlock analyzes declaration order, which is what developers read and control.
 
 ---

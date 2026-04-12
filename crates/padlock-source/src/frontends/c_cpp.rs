@@ -58,18 +58,82 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "char" | "_Bool" | "bool" => (1, 1),
         "short" | "short int" => (2, 2),
         "int" => (4, 4),
-        "long" => (arch.pointer_size, arch.pointer_size),
-        "long long" => (8, 8),
+        "long" | "long int" => (arch.pointer_size, arch.pointer_size),
+        "long long" | "long long int" => (8, 8),
         "float" => (4, 4),
         "double" => (8, 8),
         "long double" => (16, 16),
+
+        // C99 stdint exact-width types
         "int8_t" | "uint8_t" => (1, 1),
         "int16_t" | "uint16_t" => (2, 2),
         "int32_t" | "uint32_t" => (4, 4),
         "int64_t" | "uint64_t" => (8, 8),
+        "intmax_t" | "uintmax_t" => (8, 8),
         "size_t" | "ssize_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t" => {
             (arch.pointer_size, arch.pointer_size)
         }
+
+        // C99 fast types — uint_fast{8,16}_t are always 1/2B;
+        // uint_fast{32,64}_t are pointer-sized on 64-bit (8B), 4B on 32-bit.
+        "int_fast8_t" | "uint_fast8_t" => (1, 1),
+        "int_fast16_t" | "uint_fast16_t" => (2, 2),
+        "int_fast32_t" | "uint_fast32_t" | "int_fast64_t" | "uint_fast64_t" => {
+            (arch.pointer_size, arch.pointer_size)
+        }
+
+        // C99 least types — minimum guaranteed widths
+        "int_least8_t" | "uint_least8_t" => (1, 1),
+        "int_least16_t" | "uint_least16_t" => (2, 2),
+        "int_least32_t" | "uint_least32_t" => (4, 4),
+        "int_least64_t" | "uint_least64_t" => (8, 8),
+
+        // GCC/Clang 128-bit integer extension
+        "__int128" | "__uint128" | "__int128_t" | "__uint128_t" => (16, 16),
+
+        // Linux kernel short-form integer types (linux/types.h)
+        "u8" | "s8" => (1, 1),
+        "u16" | "s16" => (2, 2),
+        "u32" | "s32" => (4, 4),
+        "u64" | "s64" => (8, 8),
+
+        // Linux kernel double-underscore types (__u8, __s8, __be16, __le32, …)
+        "__u8" | "__s8" | "__u8__" | "__s8__" => (1, 1),
+        "__u16" | "__s16" | "__be16" | "__le16" => (2, 2),
+        "__u32" | "__s32" | "__be32" | "__le32" => (4, 4),
+        "__u64" | "__s64" | "__be64" | "__le64" => (8, 8),
+
+        // MSVC fixed-width intrinsics
+        "__int8" => (1, 1),
+        "__int16" => (2, 2),
+        "__int32" => (4, 4),
+        "__int64" => (8, 8),
+
+        // Windows SDK / WinAPI types
+        "BYTE" | "BOOLEAN" | "CHAR" | "INT8" | "UINT8" => (1, 1),
+        "WORD" | "WCHAR" | "SHORT" | "USHORT" | "INT16" | "UINT16" => (2, 2),
+        "DWORD" | "LONG" | "ULONG" | "INT" | "UINT" | "BOOL" | "FLOAT" | "INT32" | "UINT32" => {
+            (4, 4)
+        }
+        "QWORD" | "LONGLONG" | "ULONGLONG" | "INT64" | "UINT64" | "LARGE_INTEGER" => (8, 8),
+        "DWORD64" | "ULONG64" | "LONG64" => (8, 8),
+        "HANDLE" | "LPVOID" | "PVOID" | "LPCVOID" | "LPSTR" | "LPCSTR" | "LPWSTR" | "LPCWSTR"
+        | "SIZE_T" | "SSIZE_T" | "ULONG_PTR" | "LONG_PTR" | "DWORD_PTR" | "INT_PTR"
+        | "UINT_PTR" => (arch.pointer_size, arch.pointer_size),
+
+        // C/C++ character types
+        // wchar_t: 4B on Linux/macOS (GCC/Clang POSIX), 2B on Windows/MSVC.
+        // All current padlock arch configs are POSIX, so 4B is correct here.
+        "wchar_t" => (4, 4),
+        "char8_t" => (1, 1),
+        "char16_t" => (2, 2),
+        "char32_t" => (4, 4),
+
+        // Half-precision and bfloat16 (ARM, GCC, Clang, ML workloads)
+        "_Float16" | "__fp16" | "__bf16" => (2, 2),
+        // 128-bit float (GCC/Clang extension)
+        "_Float128" | "__float128" => (16, 16),
+
         // Pointer types
         ty if ty.ends_with('*') => (arch.pointer_size, arch.pointer_size),
         // Unknown — use pointer size as a reasonable default
@@ -1495,5 +1559,130 @@ struct Rect { struct Vec2 tl; struct Vec2 br; };
         assert_eq!(rect.fields.len(), 2);
         assert!(rect.fields.iter().any(|f| f.name == "tl"));
         assert!(rect.fields.iter().any(|f| f.name == "br"));
+    }
+
+    // ── type-table tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn linux_kernel_types_correct_size() {
+        // u8/u16/u32/u64 and s8/s16/s32/s64 (linux/types.h)
+        assert_eq!(c_type_size_align("u8", &X86_64_SYSV), (1, 1));
+        assert_eq!(c_type_size_align("u16", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("u32", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("u64", &X86_64_SYSV), (8, 8));
+        assert_eq!(c_type_size_align("s8", &X86_64_SYSV), (1, 1));
+        assert_eq!(c_type_size_align("s16", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("s32", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("s64", &X86_64_SYSV), (8, 8));
+    }
+
+    #[test]
+    fn linux_kernel_dunder_types_correct_size() {
+        assert_eq!(c_type_size_align("__u8", &X86_64_SYSV), (1, 1));
+        assert_eq!(c_type_size_align("__u16", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("__u32", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("__u64", &X86_64_SYSV), (8, 8));
+        assert_eq!(c_type_size_align("__s8", &X86_64_SYSV), (1, 1));
+        assert_eq!(c_type_size_align("__s64", &X86_64_SYSV), (8, 8));
+        // Endian-annotated types are same width as their base
+        assert_eq!(c_type_size_align("__be16", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("__le32", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("__be64", &X86_64_SYSV), (8, 8));
+    }
+
+    #[test]
+    fn c99_fast_types_correct_size() {
+        // fast8/16 are their natural width
+        assert_eq!(c_type_size_align("uint_fast8_t", &X86_64_SYSV), (1, 1));
+        assert_eq!(c_type_size_align("uint_fast16_t", &X86_64_SYSV), (2, 2));
+        // fast32/64 are pointer-sized on 64-bit
+        assert_eq!(c_type_size_align("uint_fast32_t", &X86_64_SYSV), (8, 8));
+        assert_eq!(c_type_size_align("uint_fast64_t", &X86_64_SYSV), (8, 8));
+        // least types are their minimum guaranteed width
+        assert_eq!(c_type_size_align("uint_least8_t", &X86_64_SYSV), (1, 1));
+        assert_eq!(c_type_size_align("uint_least32_t", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("uint_least64_t", &X86_64_SYSV), (8, 8));
+        assert_eq!(c_type_size_align("intmax_t", &X86_64_SYSV), (8, 8));
+        assert_eq!(c_type_size_align("uintmax_t", &X86_64_SYSV), (8, 8));
+    }
+
+    #[test]
+    fn gcc_int128_correct_size() {
+        assert_eq!(c_type_size_align("__int128", &X86_64_SYSV), (16, 16));
+        assert_eq!(c_type_size_align("__uint128", &X86_64_SYSV), (16, 16));
+        assert_eq!(c_type_size_align("__int128_t", &X86_64_SYSV), (16, 16));
+        // unsigned __int128 — "unsigned " prefix is stripped, then __int128 matched
+        assert_eq!(
+            c_type_size_align("unsigned __int128", &X86_64_SYSV),
+            (16, 16)
+        );
+    }
+
+    #[test]
+    fn windows_types_correct_size() {
+        assert_eq!(c_type_size_align("BYTE", &X86_64_SYSV), (1, 1));
+        assert_eq!(c_type_size_align("WORD", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("DWORD", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("QWORD", &X86_64_SYSV), (8, 8));
+        assert_eq!(c_type_size_align("BOOL", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("UINT8", &X86_64_SYSV), (1, 1));
+        assert_eq!(c_type_size_align("INT32", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("UINT64", &X86_64_SYSV), (8, 8));
+        assert_eq!(c_type_size_align("HANDLE", &X86_64_SYSV), (8, 8));
+        assert_eq!(c_type_size_align("LPVOID", &X86_64_SYSV), (8, 8));
+    }
+
+    #[test]
+    fn char_types_correct_size() {
+        assert_eq!(c_type_size_align("wchar_t", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("char8_t", &X86_64_SYSV), (1, 1));
+        assert_eq!(c_type_size_align("char16_t", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("char32_t", &X86_64_SYSV), (4, 4));
+    }
+
+    #[test]
+    fn half_precision_types_correct_size() {
+        assert_eq!(c_type_size_align("_Float16", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("__fp16", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("__bf16", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("_Float128", &X86_64_SYSV), (16, 16));
+    }
+
+    #[test]
+    fn unsigned_prefix_stripped_correctly() {
+        // "unsigned short" → "short" → (2, 2)
+        assert_eq!(c_type_size_align("unsigned short", &X86_64_SYSV), (2, 2));
+        assert_eq!(c_type_size_align("unsigned int", &X86_64_SYSV), (4, 4));
+        assert_eq!(
+            c_type_size_align("unsigned long long", &X86_64_SYSV),
+            (8, 8)
+        );
+        assert_eq!(
+            c_type_size_align("long int", &X86_64_SYSV),
+            (X86_64_SYSV.pointer_size, X86_64_SYSV.pointer_size)
+        );
+    }
+
+    #[test]
+    fn linux_kernel_struct_with_new_types() {
+        // Representative kernel-style struct using __u32, __be16, u8
+        let src = r#"
+struct NetHeader {
+    __be32 src_ip;
+    __be32 dst_ip;
+    __be16 src_port;
+    __be16 dst_port;
+    u8     protocol;
+    u8     ttl;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let l = &layouts[0];
+        // 4+4+2+2+1+1 = 14B; max align is 4 (__be32) → padded to 16B
+        assert_eq!(l.total_size, 16);
+        assert_eq!(l.fields[0].size, 4); // __be32 src_ip
+        assert_eq!(l.fields[2].size, 2); // __be16 src_port
+        assert_eq!(l.fields[4].size, 1); // u8 protocol
     }
 }

@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.8] — 2026-04-12
+
+### Added
+- **Bit-field skip warning**: when the C/C++ source frontend skips a struct because it contains bit-field members, it now prints a diagnostic note to stderr explaining why the struct is absent from output and advising use of binary analysis for accurate results. Previously the skip was silent.
+
 ## [0.8.7] — 2026-04-12
 
 ### Added

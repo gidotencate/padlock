@@ -11,7 +11,8 @@ use tree_sitter::{Node, Parser};
 // ── type resolution ───────────────────────────────────────────────────────────
 
 fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
-    match ty.trim() {
+    let ty = ty.trim();
+    match ty {
         "bool" => (1, 1),
         "u8" | "i8" => (1, 1),
         "u16" | "i16" | "f16" => (2, 2),
@@ -26,6 +27,36 @@ fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "type" | "anytype" | "comptime_int" | "comptime_float" => {
             (arch.pointer_size, arch.pointer_size)
         }
+
+        // Zig C-interop types (std.c / @cImport equivalents)
+        "c_char" | "c_uchar" | "c_schar" => (1, 1),
+        "c_short" | "c_ushort" => (2, 2),
+        "c_int" | "c_uint" => (4, 4),
+        "c_long" | "c_ulong" => (arch.pointer_size, arch.pointer_size), // 8B on LP64, 4B on LLP64
+        "c_longlong" | "c_ulonglong" => (8, 8),
+        "c_float" => (4, 4),
+        "c_double" => (8, 8),
+        "c_longdouble" => (16, 16),
+
+        // Arbitrary-width integers: uN / iN where N is a decimal number.
+        // In an extern struct the field occupies ceil(N/8) bytes, aligned to
+        // the next power-of-two (capped at 8). In a packed struct all integers
+        // are bit-packed — we cannot model that without knowing the context, so
+        // we use the same ceil-and-align heuristic as a reasonable approximation.
+        ty if (ty.starts_with('u') || ty.starts_with('i'))
+            && ty[1..].bytes().all(|b| b.is_ascii_digit())
+            && !ty[1..].is_empty() =>
+        {
+            if let Ok(bits) = ty[1..].parse::<usize>() {
+                let bytes = bits.div_ceil(8).max(1);
+                // Align to next power-of-two, capped at 8
+                let align = bytes.next_power_of_two().min(8);
+                (bytes, align)
+            } else {
+                (arch.pointer_size, arch.pointer_size)
+            }
+        }
+
         _ => (arch.pointer_size, arch.pointer_size),
     }
 }
@@ -636,5 +667,54 @@ mod tests {
             "unions should have no padding gaps: {:?}",
             gaps
         );
+    }
+
+    // ── type-table tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn zig_c_interop_types_correct_size() {
+        assert_eq!(zig_type_size_align("c_char", &X86_64_SYSV), (1, 1));
+        assert_eq!(zig_type_size_align("c_short", &X86_64_SYSV), (2, 2));
+        assert_eq!(zig_type_size_align("c_ushort", &X86_64_SYSV), (2, 2));
+        assert_eq!(zig_type_size_align("c_int", &X86_64_SYSV), (4, 4));
+        assert_eq!(zig_type_size_align("c_uint", &X86_64_SYSV), (4, 4));
+        // c_long is pointer-sized on LP64 (Linux/macOS x86-64)
+        assert_eq!(zig_type_size_align("c_long", &X86_64_SYSV), (8, 8));
+        assert_eq!(zig_type_size_align("c_ulong", &X86_64_SYSV), (8, 8));
+        assert_eq!(zig_type_size_align("c_longlong", &X86_64_SYSV), (8, 8));
+        assert_eq!(zig_type_size_align("c_ulonglong", &X86_64_SYSV), (8, 8));
+        assert_eq!(zig_type_size_align("c_float", &X86_64_SYSV), (4, 4));
+        assert_eq!(zig_type_size_align("c_double", &X86_64_SYSV), (8, 8));
+        assert_eq!(zig_type_size_align("c_longdouble", &X86_64_SYSV), (16, 16));
+    }
+
+    #[test]
+    fn zig_arbitrary_width_integers() {
+        // u1 → 1B (ceil(1/8)=1), aligned to 1
+        assert_eq!(zig_type_size_align("u1", &X86_64_SYSV), (1, 1));
+        // u3 → 1B (ceil(3/8)=1)
+        assert_eq!(zig_type_size_align("u3", &X86_64_SYSV), (1, 1));
+        // u9 → 2B (ceil(9/8)=2), aligned to 2
+        assert_eq!(zig_type_size_align("u9", &X86_64_SYSV), (2, 2));
+        // u24 → 3B, aligned to 4 (next power-of-two)
+        assert_eq!(zig_type_size_align("u24", &X86_64_SYSV), (3, 4));
+        // u48 → 6B, aligned to 8
+        assert_eq!(zig_type_size_align("u48", &X86_64_SYSV), (6, 8));
+        // i7 → 1B, aligned to 1
+        assert_eq!(zig_type_size_align("i7", &X86_64_SYSV), (1, 1));
+        // i128 is already in the table; u129 hits the arbitrary-width path
+        assert_eq!(zig_type_size_align("u129", &X86_64_SYSV), (17, 8));
+    }
+
+    #[test]
+    fn zig_struct_with_c_interop_types() {
+        // A Zig extern struct using C interop types
+        let src = "const Header = extern struct { version: c_uint, length: c_ushort, flags: u8 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].size, 4); // c_uint
+        assert_eq!(l.fields[1].size, 2); // c_ushort
+        assert_eq!(l.fields[2].size, 1); // u8
     }
 }

@@ -13,6 +13,8 @@ use clap::{Args, ValueEnum};
 use padlock_core::findings::{Finding, Report, Severity};
 use padlock_core::ir::{StructLayout, find_padding};
 
+use crate::config::Config;
+
 /// Severity level for the `--fail-on-severity` flag.
 #[derive(Clone, ValueEnum)]
 pub enum FailSeverity {
@@ -75,6 +77,38 @@ pub struct FilterArgs {
 }
 
 impl FilterArgs {
+    /// Apply config file defaults to any fields not set via CLI.
+    ///
+    /// CLI flags (non-None) always take precedence. Config values fill in
+    /// fields that the user didn't specify on the command line.
+    pub fn apply_config_defaults(&mut self, cfg: &Config) {
+        if self.filter.is_none() {
+            self.filter = cfg.filter.clone();
+        }
+        if self.exclude.is_none() {
+            self.exclude = cfg.exclude.clone();
+        }
+        if self.min_size.is_none() {
+            self.min_size = cfg.min_size;
+        }
+        if self.min_holes.is_none() {
+            self.min_holes = cfg.min_holes;
+        }
+        // sort_by: apply config when the CLI value is still the default (Score).
+        // We cannot distinguish "user said --sort-by score" from "not specified",
+        // so config wins over the built-in default but loses to any explicit value.
+        if matches!(self.sort_by, SortBy::Score) {
+            if let Some(ref s) = cfg.sort_by {
+                self.sort_by = match s.to_ascii_lowercase().as_str() {
+                    "size" => SortBy::Size,
+                    "waste" => SortBy::Waste,
+                    "name" => SortBy::Name,
+                    _ => SortBy::Score,
+                };
+            }
+        }
+    }
+
     /// Apply name/size/holes filters to layouts before running analysis passes.
     pub fn apply_to_layouts(&self, layouts: &mut Vec<StructLayout>) -> anyhow::Result<()> {
         if let Some(ref pat) = self.filter {

@@ -35,6 +35,10 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
             .unwrap_or(std::path::Path::new(".")),
     );
 
+    // Merge config filter defaults into a local copy; CLI flags take precedence.
+    let mut filter = filter.clone();
+    filter.apply_config_defaults(&cfg);
+
     // Collect layouts from all paths (dirs expanded, binaries via DWARF).
     let (mut layouts, analyzed) = collect_layouts(paths)?;
 
@@ -80,8 +84,15 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
         threshold > 0 && s.score < threshold as f64
     });
 
-    // Check --fail-on-severity threshold.
-    let severity_failed = if let Some(ref threshold) = fail_on_severity {
+    // Check --fail-on-severity threshold (CLI flag takes precedence; config fallback).
+    let effective_fail_sev: Option<FailSeverity> = fail_on_severity.or_else(|| {
+        cfg.fail_on_severity.as_ref().map(|s| match s {
+            padlock_core::findings::Severity::High => FailSeverity::High,
+            padlock_core::findings::Severity::Medium => FailSeverity::Medium,
+            padlock_core::findings::Severity::Low => FailSeverity::Low,
+        })
+    });
+    let severity_failed = if let Some(ref threshold) = effective_fail_sev {
         report
             .structs
             .iter()

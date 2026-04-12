@@ -20,6 +20,26 @@ const TEMPLATE: &str = r#"# .padlock.toml — padlock project configuration
 # Struct names to suppress entirely from output and exit-code logic.
 # ignore = ["GeneratedStruct", "FfiLayout"]
 
+# ── Filter defaults (CLI flags override these when specified) ──────────────────
+
+# Include only structs whose names match this regex pattern.
+# filter = "^(Hot|Critical)"
+
+# Exclude structs whose names match this regex pattern.
+# exclude = "^Generated"
+
+# Show only structs with total size >= N bytes.
+# min_size = 64
+
+# Show only structs with at least N padding holes.
+# min_holes = 1
+
+# Default sort order for output: "score" | "size" | "waste" | "name"
+# sort_by = "score"
+
+# Exit non-zero if any finding meets this severity: "high" | "medium" | "low"
+# fail_on_severity = "high"
+
 [arch]
 # Force a specific architecture for layout simulation.
 # Options: x86_64 (default) | aarch64 | aarch64_apple | wasm32 | riscv64

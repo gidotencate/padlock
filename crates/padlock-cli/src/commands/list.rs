@@ -5,11 +5,21 @@ use std::path::PathBuf;
 use comfy_table::{Cell, Table};
 use padlock_core::findings::Report;
 
+use crate::config::Config;
 use crate::filter::FilterArgs;
 use crate::paths::collect_layouts;
 
 pub fn run(paths: &[PathBuf], filter: &FilterArgs) -> anyhow::Result<()> {
+    let cfg = Config::for_path(
+        paths
+            .first()
+            .map(|p| p.as_path())
+            .unwrap_or(std::path::Path::new(".")),
+    );
+    let mut filter = filter.clone();
+    filter.apply_config_defaults(&cfg);
     let (mut layouts, _) = collect_layouts(paths)?;
+    layouts.retain(|l| !cfg.is_ignored(&l.name));
     filter.apply_to_layouts(&mut layouts)?;
 
     if layouts.is_empty() {

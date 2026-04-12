@@ -57,7 +57,10 @@ pub struct RegressionEntry {
 #[derive(Debug, Serialize)]
 pub struct CheckResult {
     pub regressions: Vec<RegressionEntry>,
+    /// Structs that improved significantly (score rose >1 point) since the baseline.
     pub new_improvements: usize,
+    /// Structs present in the baseline that are no longer found or have been fixed.
+    pub resolved: usize,
     pub unchanged: usize,
     pub passed: bool,
 }
@@ -130,6 +133,7 @@ pub fn run(
                 let result = CheckResult {
                     regressions: vec![],
                     new_improvements: 0,
+                    resolved: 0,
                     unchanged: report.structs.len(),
                     passed: !has_high,
                 };
@@ -156,6 +160,10 @@ pub fn run(
         .map(|e| ((e.struct_name.clone(), e.source_file.clone()), e))
         .collect();
 
+    // Track which baseline structs were seen in the current run.
+    let mut seen_baseline_keys: std::collections::HashSet<(String, Option<String>)> =
+        std::collections::HashSet::new();
+
     let mut regressions: Vec<RegressionEntry> = Vec::new();
     let mut improvements = 0usize;
     let mut unchanged = 0usize;
@@ -166,6 +174,7 @@ pub fn run(
 
         match baseline_map.get(&key) {
             Some(base) => {
+                seen_baseline_keys.insert(key);
                 let sev_regressed =
                     severity_rank(&current_worst) > severity_rank(&base.worst_severity);
                 // Score decrease of more than 1 point is a regression.
@@ -210,10 +219,18 @@ pub fn run(
         }
     }
 
+    // Structs in the baseline that didn't appear in the current run are "resolved"
+    // (deleted, refactored, or no longer found by the analyzer).
+    let disappeared = baseline_map
+        .keys()
+        .filter(|k| !seen_baseline_keys.contains(*k))
+        .count();
+
     let passed = regressions.is_empty();
     let result = CheckResult {
         regressions,
         new_improvements: improvements,
+        resolved: improvements + disappeared,
         unchanged,
         passed,
     };
@@ -232,14 +249,17 @@ pub fn run(
 }
 
 fn render_check_result(result: &CheckResult) {
+    let drift_summary = format!(
+        "{} new, {} resolved, {} unchanged",
+        result.regressions.len(),
+        result.resolved,
+        result.unchanged,
+    );
     if result.passed {
-        println!(
-            "padlock check passed — no regressions ({} unchanged, {} improved)",
-            result.unchanged, result.new_improvements
-        );
+        println!("padlock check passed — no regressions ({drift_summary})");
     } else {
         eprintln!(
-            "padlock check FAILED — {} regression(s):\n",
+            "padlock check FAILED — {} regression(s)  [{drift_summary}]\n",
             result.regressions.len()
         );
         for r in &result.regressions {
@@ -254,10 +274,6 @@ fn render_check_result(result: &CheckResult) {
                 eprintln!("    score: {:.0} → {:.0}", base, r.current_score);
             }
         }
-        eprintln!(
-            "\n{} unchanged, {} improved",
-            result.unchanged, result.new_improvements
-        );
     }
 }
 

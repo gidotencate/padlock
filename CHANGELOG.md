@@ -2,6 +2,13 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.2] — 2026-04-12
+
+### Added
+- **Go fix test coverage**: `generate_go_fix`, `generate_go_fix_from_source`, and `apply_fixes_go`
+  are now covered by integration tests that verify field reordering, verbatim line preservation,
+  and in-place file rewriting for Go structs. (The implementation was already complete.)
+
 ## [0.9.1] — 2026-04-12
 
 ### Changed

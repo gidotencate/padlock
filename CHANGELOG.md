@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.9] — 2026-04-12
+
+### Added
+- **Field-level source locations**: all source frontends (C/C++, Go, Zig, Rust) now populate `source_line` on each `Field` in the IR. The line number is 1-based, matching the field declaration in the source file. This enables future tooling (IDE integration, diagnostic output) to pinpoint individual fields. DWARF-parsed layouts are unaffected (line info already comes from debug info).
+
 ## [0.8.8] — 2026-04-12
 
 ### Added

@@ -2,6 +2,12 @@
 
 All notable changes to padlock are documented here.
 
+## [0.8.5] — 2026-04-12
+
+### Changed
+- **False sharing heuristic tightening**: `has_false_sharing` no longer flags two purely-atomic fields sharing a cache line as false sharing. The type-name heuristic assigns each field's own name as its guard, so two `AtomicU64` fields on the same line would previously always trigger this check — but that pattern is cache-line bouncing (a locality issue), not classical lock-based false sharing. A conflict is now only reported when **at least one** of the two fields has `is_atomic: false` (i.e. a mutex/lock type, or explicitly annotated via `GUARDED_BY` / `#[lock_protected_by]`). Explicit annotations always set `is_atomic: false`, so annotated conflicts are always reported as before.
+- Tests added to verify: two pure atomics → no false sharing; atomic + mutex → false sharing; mixed two atomics + one mutex → false sharing.
+
 ## [0.8.4] — 2026-04-12
 
 ### Added

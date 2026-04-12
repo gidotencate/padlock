@@ -12,17 +12,21 @@ use padlock_core::ir::{StructLayout, TypeInfo, find_padding};
 ///
 /// ```text
 /// ReadyEvent  24 bytes  align=4
-/// ┌────────────────────────────────────────────────────────────┐
-/// │ offset │ size │ align │ field                              │
-/// ├────────────────────────────────────────────────────────────┤
-/// │      0 │    1 │     1 │ tick: u8                          │
-/// │      1 │    3 │     — │ <padding>                         │
-/// │      4 │    4 │     4 │ ready: Ready                      │
-/// │      8 │    1 │     1 │ is_shutdown: bool                 │
-/// │      9 │   15 │     — │ <padding> (trailing)              │
-/// └────────────────────────────────────────────────────────────┘
+/// ┌──────────────────────────────────────────────────────────────────┐
+/// │ offset │ size │ align │ CL │ field                              │
+/// ├──────────────────────────────────────────────────────────────────┤
+/// │      0 │    1 │     1 │  0 │ tick: u8                          │
+/// │      1 │    3 │     — │  0 │ <padding>                         │
+/// │      4 │    4 │     4 │  0 │ ready: Ready                      │
+/// │      8 │    1 │     1 │  0 │ is_shutdown: bool                 │
+/// │      9 │   15 │     — │  0 │ <padding> (trailing)              │
+/// └──────────────────────────────────────────────────────────────────┘
 /// 14 bytes wasted (58%) — reorder: ready, tick, is_shutdown → 8 bytes
 /// ```
+///
+/// The `CL` column shows the zero-indexed cache-line number for each field.
+/// A cache-line separator row (`╞══ cache line N ══╡`) is also emitted
+/// whenever the layout crosses a cache-line boundary.
 pub fn render_explain(layout: &StructLayout) -> String {
     use padlock_core::analysis::reorder;
 
@@ -48,14 +52,23 @@ pub fn render_explain(layout: &StructLayout) -> String {
         },
     ));
 
-    // Table
+    // Table — columns: offset(6) | size(4) | align(5) | CL(2) | field(36)
     let col_field = 36usize;
-    let divider = format!("├{:─<8}┼{:─<6}┼{:─<7}┼{:─<col_field$}┤", "", "", "", "");
-    let top = format!("┌{:─<8}┬{:─<6}┬{:─<7}┬{:─<col_field$}┐", "", "", "", "");
-    let bot = format!("└{:─<8}┴{:─<6}┴{:─<7}┴{:─<col_field$}┘", "", "", "", "");
+    let divider = format!(
+        "├{:─<8}┼{:─<6}┼{:─<7}┼{:─<4}┼{:─<col_field$}┤",
+        "", "", "", "", ""
+    );
+    let top = format!(
+        "┌{:─<8}┬{:─<6}┬{:─<7}┬{:─<4}┬{:─<col_field$}┐",
+        "", "", "", "", ""
+    );
+    let bot = format!(
+        "└{:─<8}┴{:─<6}┴{:─<7}┴{:─<4}┴{:─<col_field$}┘",
+        "", "", "", "", ""
+    );
     let header = format!(
-        "│ {:>6} │ {:>4} │ {:>5} │ {:<col_field$}│",
-        "offset", "size", "align", "field"
+        "│ {:>6} │ {:>4} │ {:>5} │ {:>2} │ {:<col_field$}│",
+        "offset", "size", "align", "CL", "field"
     );
 
     out.push_str(&top);
@@ -130,7 +143,8 @@ pub fn render_explain(layout: &StructLayout) -> String {
     }
 
     // Cache-line separator row width matches the table inner width.
-    let cache_sep_inner = 8 + 1 + 6 + 1 + 7 + 1 + col_field + 3; // ─ count between outer │
+    // Inner width = 8(offset) + 1(┼) + 6(size) + 1(┼) + 7(align) + 1(┼) + 4(CL) + 1(┼) + col_field + 3
+    let cache_sep_inner = 8 + 1 + 6 + 1 + 7 + 1 + 4 + 1 + col_field + 3; // ─ count between outer │
     for row in &rows {
         match row {
             Row::Field {
@@ -140,6 +154,7 @@ pub fn render_explain(layout: &StructLayout) -> String {
                 name,
                 ty,
             } => {
+                let cl = offset / cache_line;
                 let label = format!("{}: {}", name, ty);
                 let label = if label.len() > col_field {
                     format!("{}…", &label[..col_field - 1])
@@ -147,8 +162,8 @@ pub fn render_explain(layout: &StructLayout) -> String {
                     label
                 };
                 out.push_str(&format!(
-                    "│ {:>6} │ {:>4} │ {:>5} │ {:<col_field$}│\n",
-                    offset, size, align, label
+                    "│ {:>6} │ {:>4} │ {:>5} │ {:>2} │ {:<col_field$}│\n",
+                    offset, size, align, cl, label
                 ));
             }
             Row::Pad {
@@ -156,14 +171,15 @@ pub fn render_explain(layout: &StructLayout) -> String {
                 size,
                 trailing,
             } => {
+                let cl = offset / cache_line;
                 let label = if *trailing {
                     "<padding> (trailing)".to_string()
                 } else {
                     "<padding>".to_string()
                 };
                 out.push_str(&format!(
-                    "│ {:>6} │ {:>4} │ {:>5} │ {:<col_field$}│\n",
-                    offset, size, "—", label
+                    "│ {:>6} │ {:>4} │ {:>5} │ {:>2} │ {:<col_field$}│\n",
+                    offset, size, "—", cl, label
                 ));
             }
             Row::CacheLine {
@@ -365,6 +381,77 @@ mod tests {
             out.contains("cache line 1"),
             "must show cache line 1 separator: {out}"
         );
+    }
+
+    #[test]
+    fn explain_shows_cl_column_header() {
+        let layout = connection_layout();
+        let out = render_explain(&layout);
+        assert!(out.contains("CL"), "CL column header must appear");
+    }
+
+    #[test]
+    fn explain_cl_column_shows_zero_for_small_struct() {
+        // connection_layout is 24 bytes — all fields on cache line 0
+        let layout = connection_layout();
+        let out = render_explain(&layout);
+        // Every data row should have │  0 │ (CL 0) and none should show │  1 │
+        assert!(out.contains("│  0 │"), "all fields must be on cache line 0");
+        assert!(
+            !out.contains("│  1 │"),
+            "no field should be on cache line 1"
+        );
+    }
+
+    #[test]
+    fn explain_cl_column_shows_nonzero_for_large_struct() {
+        use padlock_core::arch::X86_64_SYSV;
+        use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+        let big = StructLayout {
+            name: "Big".to_string(),
+            total_size: 128,
+            align: 8,
+            fields: vec![
+                Field {
+                    name: "a".to_string(),
+                    ty: TypeInfo::Primitive {
+                        name: "u8[64]".to_string(),
+                        size: 64,
+                        align: 1,
+                    },
+                    offset: 0,
+                    size: 64,
+                    align: 1,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "b".to_string(),
+                    ty: TypeInfo::Primitive {
+                        name: "u64".to_string(),
+                        size: 8,
+                        align: 8,
+                    },
+                    offset: 64,
+                    size: 8,
+                    align: 8,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+            ],
+            source_file: None,
+            source_line: None,
+            arch: &X86_64_SYSV,
+            is_packed: false,
+            is_union: false,
+            is_repr_rust: false,
+            suppressed_findings: Vec::new(),
+        };
+        let out = render_explain(&big);
+        // field 'b' starts at offset 64 → cache line 1
+        assert!(out.contains("│  1 │"), "field b must show CL 1");
     }
 
     #[test]

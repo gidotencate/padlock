@@ -1428,4 +1428,112 @@ mod tests {
         // IR fallback must still produce all fields from the layout
         assert!(out.contains("timeout"));
     }
+
+    // ── Go fix tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn go_fix_reorders_fields() {
+        let layout = connection_layout();
+        let out = generate_go_fix(&layout);
+        // timeout (align 8) must come before bools (align 1)
+        let pos_timeout = out.find("timeout").unwrap();
+        let pos_port = out.find("port").unwrap();
+        let pos_bool = out.find("is_active").unwrap();
+        assert!(pos_timeout < pos_bool, "timeout must precede booleans");
+        assert!(pos_port < pos_bool, "port must precede booleans");
+    }
+
+    #[test]
+    fn go_fix_from_source_preserves_verbatim_field_lines() {
+        let layout = connection_layout();
+        let src = r#"type Connection struct {
+	is_active bool
+	timeout   f64
+	is_tls    bool
+	port      i32
+}"#;
+        let out = generate_go_fix_from_source(&layout, src);
+        // The reordered output must contain the exact verbatim field lines
+        assert!(out.contains("timeout   f64"), "verbatim timeout line");
+        assert!(out.contains("port      i32"), "verbatim port line");
+        // timeout must appear before is_active in the output
+        let pos_timeout = out.find("timeout").unwrap();
+        let pos_is_active = out.find("is_active").unwrap();
+        assert!(
+            pos_timeout < pos_is_active,
+            "timeout must come before is_active"
+        );
+    }
+
+    #[test]
+    fn apply_fixes_go_rewrites_struct_in_file() {
+        let src = "package p\n\ntype Point struct {\n\tFlag bool\n\tX    int64\n\tY    int32\n}\n";
+        // Build a minimal layout: Flag(bool,1), X(i64,8), Y(i32,4)
+        // optimal: X(8) → Y(4) → Flag(1)
+        use padlock_core::arch::X86_64_SYSV;
+        use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+        let layout = StructLayout {
+            name: "Point".into(),
+            total_size: 16,
+            align: 8,
+            fields: vec![
+                Field {
+                    name: "Flag".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "bool".into(),
+                        size: 1,
+                        align: 1,
+                    },
+                    offset: 0,
+                    size: 1,
+                    align: 1,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "X".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "int64".into(),
+                        size: 8,
+                        align: 8,
+                    },
+                    offset: 8,
+                    size: 8,
+                    align: 8,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "Y".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "int32".into(),
+                        size: 4,
+                        align: 4,
+                    },
+                    offset: 16,
+                    size: 4,
+                    align: 4,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+            ],
+            source_file: None,
+            source_line: None,
+            arch: &X86_64_SYSV,
+            is_packed: false,
+            is_union: false,
+            is_repr_rust: false,
+            suppressed_findings: vec![],
+        };
+        let fixed = apply_fixes_go(src, &[&layout]);
+        // X (int64, align 8) must appear before Flag (bool, align 1)
+        let pos_x = fixed.find("\tX ").unwrap();
+        let pos_flag = fixed.find("\tFlag").unwrap();
+        assert!(pos_x < pos_flag, "X must precede Flag after reorder");
+        // Package declaration must be preserved
+        assert!(fixed.starts_with("package p\n"), "package line preserved");
+    }
 }

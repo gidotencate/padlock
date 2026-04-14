@@ -46,8 +46,14 @@ When a `ReorderSuggestion` diagnostic is active, the lightbulb (⚡) menu offers
 
 ## Requirements
 
-padlock must be installed and on your `PATH`:
+padlock must be installed and on your `PATH`.
 
+**macOS (Homebrew):**
+```bash
+brew install gidotencate/padlock/padlock
+```
+
+**Any platform with Rust:**
 ```bash
 cargo install padlock-cli
 ```
@@ -92,6 +98,24 @@ cargo install padlock-cli
   "padlock.severity": "medium",
   "padlock.executable": "/home/user/.cargo/bin/padlock",
   "padlock.extraArgs": ["--min-size", "16"]
+}
+```
+
+### Example: cross-architecture analysis (STM32F4 firmware)
+
+Use `padlock.extraArgs` to set a target architecture. For Cortex-M4 firmware (32-byte cache lines, 4-byte pointers), false-sharing findings are active. For Cortex-M0/M3 (no cache), they are suppressed automatically.
+
+```json
+{
+  "padlock.extraArgs": ["--target", "thumbv7em-none-eabi"]
+}
+```
+
+### Example: focus on fixed-ABI types only
+
+```json
+{
+  "padlock.extraArgs": ["--hide-repr-rust"]
 }
 ```
 

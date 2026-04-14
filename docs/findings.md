@@ -86,6 +86,8 @@ The terminal output shows the before and after sizes explicitly:
 
 False sharing occurs when two or more fields that are accessed **independently** under **different** locks (or independently as atomic values) occupy the same 64-byte cache line (128 bytes on Apple Silicon). A write to one field invalidates the entire cache line on all other cores, even though they are not logically related — causing unnecessary cache coherence traffic and cache misses.
 
+> **Architecture note**: on targets without a hardware cache (`cache_line_size = 0`, e.g. Cortex-M0/M3, AVR) this finding is automatically suppressed — cache-line conflicts are meaningless without a cache. Use `--target thumbv6m-none-eabi` (or another no-cache triple) to enable this behaviour.
+
 **How it is detected**
 
 For each struct padlock:
@@ -237,6 +239,8 @@ Annotating the hot fields explicitly (see the `FalseSharing` annotation examples
 **How to fix**
 
 Group hot fields together at the front of the struct, or separate hot and cold field groups with explicit cache-line padding.
+
+> **Architecture note**: on targets without a hardware cache (`cache_line_size = 0`, e.g. Cortex-M0/M3, AVR) this finding is also suppressed along with `FalseSharing` — locality is only meaningful when cache pressure exists.
 
 ---
 

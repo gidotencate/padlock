@@ -56,7 +56,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Locality** | Flags hot/cold field interleaving that hurts cache utilisation |
 | **Scoring** | Each struct gets a 0–100 score (100 = no issues) |
 | **Multi-language** | C, C++, Rust, Go, Zig source; compiled binaries via DWARF/PDB/BTF |
-| **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64; `--target <triple>` for cross-arch analysis |
+| **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64, Cortex-M, AVR; `--target <triple>` for cross-arch analysis |
 | **repr(Rust) awareness** | Severity downgraded for repr(Rust) structs (compiler may already reorder); `--hide-repr-rust` excludes them entirely |
 | **Path exclusions** | `exclude_paths = ["proto/**", "vendor/**"]` in `.padlock.toml` skips generated or third-party files |
 | **ABI safety** | `padlock fix` warns before reordering fixed-layout structs (`repr(C)`, C, Go, Zig) that may break FFI or serialization |
@@ -73,7 +73,27 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 
 ---
 
-## Build
+## Installation
+
+### macOS (Homebrew)
+
+```bash
+brew install gidotencate/padlock/padlock
+```
+
+### Any platform with Rust installed
+
+```bash
+cargo install padlock-cli
+```
+
+### Pre-built binaries
+
+Download from [GitHub Releases](https://github.com/gidotencate/padlock/releases) for Linux (x86-64, ARM64), macOS (x86-64, Apple Silicon), and Windows (x86-64).
+
+---
+
+## Build from source
 
 Requires a Rust toolchain (1.88+).
 
@@ -272,6 +292,20 @@ assumes a specific field offset. Review all callers before applying.
 ```
 
 `repr(Rust)` structs do not trigger this warning — the compiler already optimises their layout freely. Always audit callers and serialization code before applying fixes to fixed-ABI types.
+
+---
+
+### `padlock bpf <path>…`
+
+Alias for `analyze` that targets eBPF object files and binaries containing a `.BTF` ELF section. Prints a brief orientation note (human output only) and runs the full analysis pipeline. Accepts `--json`, `--sarif`, `--fail-on-severity`, and all filter flags.
+
+```bash
+padlock bpf my_prog.bpf.o
+padlock bpf my_prog.bpf.o --json
+padlock bpf my_prog.bpf.o --sarif > padlock-bpf.sarif
+```
+
+See [docs/ebpf-btf.md](docs/ebpf-btf.md) for a full eBPF workflow including CI integration and comparison with `bpftool`.
 
 ---
 
@@ -612,8 +646,15 @@ For exact compiler-verified layout of any repr, use `padlock analyze target/debu
 | `aarch64_apple` | 8 bytes | 128 bytes | M-series Mac |
 | `wasm32` | 4 bytes | 64 bytes | WebAssembly |
 | `riscv64` | 8 bytes | 64 bytes | RISC-V 64-bit |
+| `cortex_m` | 4 bytes | — | Cortex-M0/M0+/M3/M23 — no cache; false-sharing suppressed |
+| `cortex_m4` | 4 bytes | 32 bytes | Cortex-M4/M7/M33 — optional L1 cache |
+| `avr` | 2 bytes | — | AVR 8-bit (ATmega etc.) — no cache, 1-byte alignment |
 
 The architecture is auto-detected from the host when analyzing source files. For binary analysis it is read from the binary's ELF/Mach-O/PE header. Use `--target <triple>` to override for cross-compilation scenarios (e.g. `--target aarch64-apple-darwin` when building for Apple Silicon from a Linux CI host).
+
+Targets with `cache_line_size = 0` (Cortex-M0/M3, AVR) automatically suppress `FalseSharing` and `LocalityIssue` findings — these are meaningless without a hardware cache. `PaddingWaste` and `ReorderSuggestion` still apply.
+
+See **[docs/robotics-ros2.md](docs/robotics-ros2.md)** for a full embedded ARM workflow with STM32/ROS 2 examples.
 
 ---
 
@@ -893,7 +934,11 @@ padlock-cli       — padlock binary + cargo-padlock subcommand; watch mode
 See [docs/architecture.md](docs/architecture.md) for the full data-flow diagram and crate responsibilities.  
 See [docs/findings.md](docs/findings.md) for detailed finding reference.  
 See [docs/comparison.md](docs/comparison.md) for how padlock compares to pahole, -Wpadded, and runtime profilers.  
-See [docs/publishing.md](docs/publishing.md) for crates.io publishing and GitHub Actions CI setup.
+See [docs/publishing.md](docs/publishing.md) for crates.io publishing and GitHub Actions CI setup.  
+See [docs/game-dev-ecs.md](docs/game-dev-ecs.md) for game development / DOD / ECS workflows.  
+See [docs/ebpf-btf.md](docs/ebpf-btf.md) for eBPF and BTF analysis with `padlock bpf`.  
+See [docs/robotics-ros2.md](docs/robotics-ros2.md) for embedded ARM and ROS 2 workflows.  
+See [docs/extending.md](docs/extending.md) for adding analysis passes, frontends, output formats, and architectures.
 
 ## License
 

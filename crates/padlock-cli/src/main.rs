@@ -9,6 +9,7 @@ pub mod paths;
 
 mod commands {
     pub mod analyze;
+    pub mod bpf;
     pub mod check;
     pub mod diff;
     pub mod explain;
@@ -154,6 +155,31 @@ enum Commands {
         filter: Option<String>,
     },
 
+    /// Analyse eBPF object files or binaries that contain a .BTF section.
+    ///
+    /// This is an alias for `padlock analyze` that accepts the same paths and
+    /// flags but prints a brief note reminding users that BTF-derived layouts
+    /// reflect the compiled types, not the source, and that false-sharing
+    /// findings for BPF map structs are directly actionable.
+    ///
+    /// Example: padlock bpf my_prog.bpf.o --json
+    Bpf {
+        /// eBPF object files or binaries with a .BTF ELF section
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Output as SARIF
+        #[arg(long)]
+        sarif: bool,
+        /// Exit non-zero when any finding meets or exceeds this severity
+        #[arg(long, value_name = "SEVERITY")]
+        fail_on_severity: Option<filter::FailSeverity>,
+        #[command(flatten)]
+        filter: filter::FilterArgs,
+    },
+
     /// Generate a .padlock.toml configuration template in the current directory
     Init,
 
@@ -214,6 +240,14 @@ fn main() -> anyhow::Result<()> {
             target,
             filter,
         } => commands::summary::run(&paths, top, cache_line_size, word_size, target, &filter),
+
+        Commands::Bpf {
+            paths,
+            json,
+            sarif,
+            fail_on_severity,
+            filter,
+        } => commands::bpf::run(&paths, json, sarif, fail_on_severity, &filter),
 
         Commands::Init => commands::init::run(),
 

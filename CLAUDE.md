@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is padlock
 
-`padlock` is a struct memory layout analyzer for C, C++, Rust, and Go. It finds padding waste, false sharing, and cache locality problems in struct/type definitions — ranks issues by impact, auto-fixes field ordering, and flags concurrency risks. It is CLI-first and CI-ready, targeting multiple CPU architectures.
+`padlock` is a struct memory layout analyzer for C, C++, Rust, Go, and Zig. It finds padding waste, false sharing, and cache locality problems in struct/type definitions — ranks issues by impact, auto-fixes field ordering, and flags concurrency risks. It is CLI-first and CI-ready, targeting multiple CPU architectures.
 
 ## Commands
 
@@ -73,7 +73,7 @@ Source/binary input → (`padlock-dwarf` or `padlock-source`) → `padlock-core`
 
 ## Key implementation details
 
-- **Supported architectures** (`padlock-core/src/arch.rs`): `X86_64_SYSV`, `AARCH64`, `AARCH64_APPLE` (128-byte cache line), `WASM32`, `RISCV64`. The default throughout the codebase is `X86_64_SYSV`.
+- **Supported architectures** (`padlock-core/src/arch.rs`): `X86_64_SYSV`, `AARCH64`, `AARCH64_APPLE` (128-byte cache line), `WASM32`, `RISCV64`, `CORTEX_M` (no cache, 4-byte ptrs), `CORTEX_M4` (32-byte lines, 4-byte ptrs), `AVR` (no cache, 2-byte ptrs). `arch_by_name()` resolves short names and Rust target triples via `arch_by_triple()`. `cache_line_size = 0` suppresses FalseSharing and LocalityIssue analysis. The default throughout the codebase is `X86_64_SYSV`.
 - **Test fixtures**: `padlock-core` has a `test-helpers` feature that exposes `ir::test_fixtures` (e.g. `connection_layout()`, `packed_layout()`) for use in other crates: `cargo test -p padlock-core --features test-helpers`.
 - **`Report::from_layouts`** in `findings.rs` is the single entry point that runs all analysis passes and produces `StructReport` results with scored findings.
 - **Severity thresholds**: PaddingWaste ≥30% waste → High, ≥10% → Medium, <10% → Low. ReorderSuggestion savings ≥8 bytes → High, else Medium. FalseSharing is always High.

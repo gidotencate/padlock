@@ -2,6 +2,17 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.5] — 2026-04-14
+
+### Added
+- **Cortex-M and AVR architecture support**: three new built-in `ArchConfig` constants — `CORTEX_M` (M0/M0+/M3/M23, no cache, 4-byte pointers), `CORTEX_M4` (M4/M7/M33, 32-byte cache lines, 4-byte pointers), and `AVR` (ATmega, no cache, 2-byte pointers, 1-byte max alignment). Short names (`cortex_m`, `cortex_m4`, `avr`) and Rust target triples (`thumbv6m-none-eabi`, `thumbv7em-none-eabihf`, `avr-unknown-gnu-atmega328p`, …) resolve to these configs via `arch_by_name` / `arch_by_triple`. When `cache_line_size = 0`, false-sharing and locality analysis is suppressed entirely; padding waste and reorder findings are unaffected.
+- **`padlock bpf` subcommand**: thin alias for `padlock analyze` targeted at eBPF programs. Runs BTF-backed analysis on kernel object files and prints an orientation note (suppressed under `--json`/`--sarif`) explaining that BTF layouts reflect compiled types and are ABI-stable. All `analyze` flags are supported.
+- **Homebrew formula** (`Formula/padlock.rb`): installs the `padlock` binary via `cargo install` with `depends_on "rust" => :build`. Includes a smoke test that checks `--version` and analyses a minimal padded C struct.
+- **Game-dev / ECS documentation** (`docs/game-dev-ecs.md`): DOD-style Transform and RigidBody component examples, CI integration for game build pipelines, and compile-time size assertions with `padlock::assert_size`.
+- **eBPF / BTF documentation** (`docs/ebpf-btf.md`): `padlock bpf` usage guide, BTF accuracy explanation, perf event payload examples, false sharing in shared BPF maps, and a CI workflow snippet.
+- **Robotics / ROS 2 documentation** (`docs/robotics-ros2.md`): Cortex-M target architecture table, STM32F4 IMU example with 19% waste reduction, ROS 2 generated message layout analysis, CDR serialization padding impact, and CI integration.
+- **Extension guide** (`docs/extending.md`): step-by-step instructions for adding analysis passes, language frontends, output formats, and architecture configs; full repository map; testing conventions.
+
 ## [0.9.4] — 2026-04-14
 
 ### Added

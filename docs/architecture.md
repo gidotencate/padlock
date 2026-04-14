@@ -63,7 +63,7 @@ Central dependency for all other crates. Contains:
   - `find_padding(layout)` — returns all `PaddingGap` objects between fields
   - `optimal_order(layout)` — returns fields sorted by descending alignment
 
-- **`arch.rs`** — `ArchConfig` constants for each supported target (pointer size, cache line size). Statics: `X86_64_SYSV`, `AARCH64`, `AARCH64_APPLE`, `WASM32`, `RISCV64`. `with_overrides(base, cache_line_size, word_size)` creates a heap-leaked `&'static ArchConfig` with user-supplied overrides, used by `--cache-line-size` / `--word-size` CLI flags.
+- **`arch.rs`** — `ArchConfig` constants for each supported target (pointer size, cache line size). Statics: `X86_64_SYSV`, `AARCH64`, `AARCH64_APPLE`, `WASM32`, `RISCV64`, `CORTEX_M` (no-cache, 4-byte ptrs), `CORTEX_M4` (32-byte lines, 4-byte ptrs), `AVR` (no-cache, 2-byte ptrs). `arch_by_name()` resolves short names and falls through to `arch_by_triple()` for Rust target triples. `with_overrides(base, cache_line_size, word_size)` creates a heap-leaked `&'static ArchConfig` with user-supplied overrides, used by `--cache-line-size` / `--word-size` CLI flags. When `cache_line_size = 0`, false-sharing and locality analysis is suppressed.
 
 - **`findings.rs`** — `Finding` enum, `StructReport` (includes `num_fields`, `num_holes`, source location), `Report` (includes `analyzed_paths`). `Report::from_layouts` is the single entry point that runs all passes and returns the full report.
 
@@ -132,7 +132,7 @@ Output formatters. All functions take `padlock-core` types as input.
 
 Two binaries. Wires all other crates together.
 
-- **`main.rs`** — `clap` derive API; subcommand dispatch for `padlock`. `--version` flag auto-populated from `Cargo.toml`. Subcommands: `analyze`, `summary`, `list`, `diff`, `fix`, `report`, `watch`, `explain`, `check`, `init`.
+- **`main.rs`** — `clap` derive API; subcommand dispatch for `padlock`. `--version` flag auto-populated from `Cargo.toml`. Subcommands: `analyze`, `summary`, `list`, `diff`, `fix`, `report`, `watch`, `explain`, `check`, `init`, `bpf`.
 - **`config.rs`** — `Config`: reads `.padlock.toml` (searches from the first path upward, then `$HOME`). Parses `[padlock]` section keys: `ignore`, `filter`, `exclude`, `min_size`, `min_holes`, `sort_by`, `fail_on_severity`. `is_ignored(&name)` checks the ignore list. `for_path(p)` walks ancestor directories to find the nearest config file.
 - **`filter.rs`** — `FilterArgs` (shared CLI flags: `--filter`, `--exclude`, `--min-holes`, `--min-size`, `--packable`, `--sort-by`) and `SortBy` enum. Applies pre-analysis layout filtering and post-analysis report sorting. `apply_config_defaults(&cfg)` fills any `None`/default `FilterArgs` fields from the loaded `Config` — CLI values always take precedence. Also contains `FailSeverity` enum (`High | Medium | Low`) with `matches(&self, sev: &Severity) -> bool` implementing ≥-semantics: `Low` matches any, `Medium` matches Medium and above, `High` matches only High.
 - **`paths.rs`** — `collect_layouts` (loads layouts from multiple paths, expands directories) and `walk_source_files` (recursive directory walker, skips `target/`, `.git/`, etc.). Directory files are parsed in parallel using `rayon`; unchanged files are served from the on-disk parse cache before parallel dispatch.
@@ -147,6 +147,7 @@ Two binaries. Wires all other crates together.
 - **`commands/explain.rs`** — Prints a visual field-by-field memory layout table (offset, size, align, CL, padding gaps inline) for each struct. The `CL` column shows the zero-indexed cache-line number per row. Accepts `--filter`.
 - **`commands/init.rs`** — Generates a `.padlock.toml` configuration file in the current directory with all supported options commented out and annotated. `--force` overwrites an existing file.
 - **`commands/check.rs`** — Baseline/ratchet mode. `--save-baseline FILE` snapshots current findings as JSON. `--baseline FILE` compares current findings against the snapshot and fails only on regressions (new structs with High findings, score drops, severity increases). Every run prints a drift summary: `N new / M resolved / K unchanged` (resolved = improved + disappeared from baseline). Supports `--json` output.
+- **`commands/bpf.rs`** — Thin alias for `analyze`. Prints a one-line BTF orientation note (human output only) then delegates to `commands::analyze::run`. Accepts `--json`, `--sarif`, `--fail-on-severity`, and all filter flags. See `docs/ebpf-btf.md`.
 - **`bin/cargo_padlock.rs`** — The `cargo-padlock` binary, installed as a cargo subcommand. Reads `Cargo.toml` for the default binary name, runs `cargo build`, locates the built binary in `target/{profile}/`, and runs DWARF analysis. Exits non-zero on high-severity findings.
 
 ---

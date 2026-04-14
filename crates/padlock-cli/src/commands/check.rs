@@ -77,7 +77,14 @@ pub fn run(
     filter.apply_config_defaults(&cfg);
 
     let (mut layouts, analyzed) = collect_layouts(paths)?;
-    layouts.retain(|l| !cfg.is_ignored(&l.name));
+    layouts.retain(|l| {
+        !cfg.is_ignored(&l.name)
+            && !l
+                .source_file
+                .as_deref()
+                .map(|f| cfg.is_path_excluded(f))
+                .unwrap_or(false)
+    });
     filter.apply_to_layouts(&mut layouts)?;
 
     let mut report = Report::from_layouts(&layouts);

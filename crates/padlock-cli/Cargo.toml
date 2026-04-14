@@ -18,10 +18,10 @@ name = "cargo-padlock"
 path = "src/bin/cargo_padlock.rs"
 
 [dependencies]
-padlock-core   = { path = "../padlock-core",   version = "0.9.3" }
-padlock-dwarf  = { path = "../padlock-dwarf",  version = "0.9.3" }
-padlock-source = { path = "../padlock-source", version = "0.9.3" }
-padlock-output = { path = "../padlock-output", version = "0.9.3" }
+padlock-core   = { path = "../padlock-core",   version = "0.9.4" }
+padlock-dwarf  = { path = "../padlock-dwarf",  version = "0.9.4" }
+padlock-source = { path = "../padlock-source", version = "0.9.4" }
+padlock-output = { path = "../padlock-output", version = "0.9.4" }
 serde          = { version = "1", features = ["derive"] }
 serde_json     = "1"
 regex          = "1"
@@ -37,4 +37,4 @@ rayon          = "1"
 
 [dev-dependencies]
 tempfile = "3"
-padlock-core = { path = "../padlock-core", version = "0.9.3", features = ["test-helpers"] }
+padlock-core = { path = "../padlock-core", version = "0.9.4", features = ["test-helpers"] }

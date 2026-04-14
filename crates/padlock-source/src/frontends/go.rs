@@ -143,6 +143,7 @@ fn parse_struct_type(
             AccessPattern::Concurrent {
                 guard: Some(g),
                 is_atomic: false,
+                is_annotated: true,
             }
         } else {
             AccessPattern::Unknown

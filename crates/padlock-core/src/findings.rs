@@ -1,7 +1,7 @@
 // padlock-core/src/findings.rs
 
 use crate::analysis::{false_sharing, locality, padding, reorder, scorer};
-use crate::ir::{PaddingGap, SharingConflict, StructLayout};
+use crate::ir::{AccessPattern, PaddingGap, SharingConflict, StructLayout};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Severity {
@@ -36,6 +36,11 @@ pub enum Finding {
         struct_name: String,
         conflicts: Vec<SharingConflict>,
         severity: Severity,
+        /// True when every conflicting field's access pattern was inferred from its
+        /// type name rather than an explicit source annotation (`GUARDED_BY`,
+        /// `#[lock_protected_by]`, `// padlock:guard=`, etc.).
+        /// Engineers should verify inferred findings with profiling before acting.
+        is_inferred: bool,
     },
     ReorderSuggestion {
         struct_name: String,
@@ -50,6 +55,8 @@ pub enum Finding {
         hot_fields: Vec<String>,
         cold_fields: Vec<String>,
         severity: Severity,
+        /// True when all hot-field classifications came from the type-name heuristic.
+        is_inferred: bool,
     },
 }
 
@@ -193,21 +200,33 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
     // Unions place all fields at offset 0 by definition; that is not false sharing.
     if !layout.is_union && false_sharing::has_false_sharing(layout) {
         let conflicts = false_sharing::find_sharing_conflicts(layout);
+        // is_inferred = true when no conflicting field carries an explicit annotation.
+        let is_inferred = !layout.fields.iter().any(|f| {
+            matches!(f.access, AccessPattern::Concurrent { is_annotated: true, .. })
+        });
         findings.push(Finding::FalseSharing {
             struct_name: layout.name.clone(),
             conflicts,
             severity: Severity::High,
+            is_inferred,
         });
     }
 
     // ── locality ─────────────────────────────────────────────────────────────
     if locality::has_locality_issue(layout) {
         let (hot, cold) = locality::partition_hot_cold(layout);
+        // is_inferred = true when no hot field has an explicit annotation.
+        // ReadMostly is always set by the heuristic; Concurrent is annotated when
+        // is_annotated = true.
+        let is_inferred = !layout.fields.iter().any(|f| {
+            matches!(f.access, AccessPattern::Concurrent { is_annotated: true, .. })
+        });
         findings.push(Finding::LocalityIssue {
             struct_name: layout.name.clone(),
             hot_fields: hot,
             cold_fields: cold,
             severity: Severity::Medium,
+            is_inferred,
         });
     }
 

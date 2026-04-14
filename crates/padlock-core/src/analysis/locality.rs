@@ -150,6 +150,7 @@ mod tests {
                 AccessPattern::Concurrent {
                     guard: None,
                     is_atomic: true,
+                    is_annotated: false,
                 },
             ),
         ]);

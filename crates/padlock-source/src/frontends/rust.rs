@@ -371,6 +371,7 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
                 layout.fields[i].access = AccessPattern::Concurrent {
                     guard: Some(g.clone()),
                     is_atomic: false,
+                    is_annotated: true,
                 };
             }
         }

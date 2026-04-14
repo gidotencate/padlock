@@ -147,42 +147,77 @@ fn render_finding(f: &Finding) -> String {
             waste_pct,
             gaps,
             ..
-        } => format!(
-            "[{sev}] Padding waste: {wasted_bytes}B ({waste_pct:.0}%) across {} gap(s)",
-            gaps.len()
-        ),
+        } => {
+            // Show up to 3 gap locations so the engineer knows exactly where to look.
+            let gap_detail: Vec<String> = gaps
+                .iter()
+                .take(3)
+                .map(|g| format!("{}B after `{}` (offset {})", g.bytes, g.after_field, g.at_offset))
+                .collect();
+            let detail = if gaps.len() > 3 {
+                format!("{} … and {} more", gap_detail.join(", "), gaps.len() - 3)
+            } else {
+                gap_detail.join(", ")
+            };
+            format!("[{sev}] Padding waste: {wasted_bytes}B ({waste_pct:.0}%) — {detail}")
+        }
         Finding::ReorderSuggestion {
             savings,
+            original_size,
             optimized_size,
             suggested_order,
             severity,
             ..
         } => {
             let base = format!(
-                "[{sev}] Reorder fields to save {savings}B → {optimized_size}B: {}",
+                "[{sev}] Reorder fields: {original_size}B → {optimized_size}B (saves {savings}B): {}",
                 suggested_order.join(", ")
             );
-            // For High-severity suggestions (≥8B savings) append a concrete
-            // scale hint so engineers immediately see why the reorder matters.
             if *severity == Severity::High {
                 format!("{base}  (~{savings} MB/1M instances)")
             } else {
                 base
             }
         }
-        Finding::FalseSharing { conflicts, .. } => format!(
-            "[{sev}] False sharing: {} cache-line conflict(s)",
-            conflicts.len()
-        ),
+        Finding::FalseSharing {
+            conflicts,
+            is_inferred,
+            ..
+        } => {
+            // Show the field names involved so the engineer knows what to look at.
+            let field_lists: Vec<String> = conflicts
+                .iter()
+                .map(|c| format!("cache line {}: [{}]", c.cache_line, c.fields.join(", ")))
+                .collect();
+            let inferred_note = if *is_inferred {
+                "  (inferred from type names — add guard annotations or verify with profiling)"
+            } else {
+                ""
+            };
+            format!(
+                "[{sev}] False sharing: {}{}",
+                field_lists.join("; "),
+                inferred_note
+            )
+        }
         Finding::LocalityIssue {
             hot_fields,
             cold_fields,
+            is_inferred,
             ..
-        } => format!(
-            "[{sev}] Locality: hot [{}] interleaved with cold [{}]",
-            hot_fields.join(", "),
-            cold_fields.join(", ")
-        ),
+        } => {
+            let inferred_note = if *is_inferred {
+                "  (inferred from type names — verify with profiling)"
+            } else {
+                ""
+            };
+            format!(
+                "[{sev}] Locality: hot [{}] interleaved with cold [{}]{}",
+                hot_fields.join(", "),
+                cold_fields.join(", "),
+                inferred_note
+            )
+        }
     }
 }
 
@@ -212,7 +247,7 @@ mod tests {
     fn render_report_shows_reorder_suggestion() {
         let report = Report::from_layouts(&[connection_layout()]);
         let out = render_report(&report);
-        assert!(out.contains("Reorder") || out.contains("save"));
+        assert!(out.contains("Reorder") || out.contains("saves"));
     }
 
     #[test]
@@ -264,5 +299,22 @@ mod tests {
         let report = Report::from_layouts(&[packed_layout()]);
         let out = render_report(&report);
         assert!(!out.contains("MB/1M instances"));
+    }
+
+    #[test]
+    fn padding_waste_shows_gap_locations() {
+        let report = Report::from_layouts(&[connection_layout()]);
+        let out = render_report(&report);
+        // Should show "XB after `field` (offset N)" for each gap.
+        assert!(out.contains("after `"), "gap location detail missing");
+        assert!(out.contains("offset "), "gap offset missing");
+    }
+
+    #[test]
+    fn reorder_shows_before_and_after_sizes() {
+        let report = Report::from_layouts(&[connection_layout()]);
+        let out = render_report(&report);
+        // New format: "NB → NB (saves NB)"
+        assert!(out.contains("saves"), "savings clause missing");
     }
 }

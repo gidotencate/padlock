@@ -6,13 +6,18 @@ padlock run against popular open-source projects — all findings reflect declar
 
 ## Summary
 
-| Project | Language | Version | Structs | Wasted | Score |
-|---|---|---|---|---|---|
-| [tokio](https://tokio.rs) | Rust | 1.51.1 | 197 | 480B | — |
-| [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | — |
-| [Go net + database](https://pkg.go.dev) | Go | stdlib 1.22 | 607 | 1 236B | 86/100 (B) |
+| Project | Language | Version | Structs | Wasted | Score | Notable |
+|---|---|---|---|---|---|---|
+| [tokio](https://tokio.rs) | Rust | 1.51.1 | 367 | 485B | 91/100 A¹ | `TraceStatus` — score 48, false sharing |
+| [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | — | `multiState` — 20% waste, saves 8B |
+| [Go net + database](https://pkg.go.dev) | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53 |
+| Linux kernel `net/` | C | 6.x | 2 066 | 5 093B | 84/100 B | `virtio_vsock` — score 45, all 4 finding types |
+
+¹ repr(Rust) structs are severity-downgraded (compiler may already reorder). Use `--hide-repr-rust` to focus on ABI-stable findings only. The per-struct average score is 91; the weighted project score is higher due to the majority of clean small structs.
 
 The Go stdlib score is B (86/100) across 607 structs. 71% are clean; 12% have High findings — almost all from false sharing between atomic and mutex-protected fields rather than padding waste.
+
+The Linux `net/` subsystem score is B (84/100) across 2 066 structs. 57% are clean; 12% have High findings — primarily false sharing in driver and protocol structs that have grown organically over many kernel versions.
 
 ---
 
@@ -284,3 +289,52 @@ struct Session {
 ```
 
 Now correctly reports 72 bytes with 7 bytes of padding, rather than the former 24-byte underestimate. For exact sizes on a specific compiler/platform, binary (DWARF) analysis remains authoritative.
+
+
+---
+
+## C — Linux kernel `net/` subsystem (6.x)
+
+```
+$ padlock summary ~/linux/net
+Score   84 / 100   B    2066 structs · 676 files · 5093B wasted
+
+  🔴 High     ██░░░░░░░░░░░░░░░░░░   243  (12%)
+  🟡 Medium   ████░░░░░░░░░░░░░░░░   471  (23%)
+  🔵 Low      █░░░░░░░░░░░░░░░░░░░   176  (9%)
+  ✅ Clean    ███████████░░░░░░░░░  1176  (57%)
+```
+
+### `virtio_vsock` — score 45, all four finding types
+
+The vsock virtio driver struct accumulates all four padlock finding types in one place — a textbook example of layout debt in a struct that has grown over many kernel versions:
+
+```
+$ padlock analyze net/vmw_vsock/virtio_transport.c
+
+[✗] virtio_vsock  136B  fields=19  holes=4  score=45
+    [MEDIUM] Padding waste: 24B (18%) across 4 gaps
+    [HIGH]   Reorder fields: 136B → 112B (saves 24B)  (~24 MB/1M instances)
+    [HIGH]   False sharing: 2 cache-line conflict(s)
+    [MEDIUM] Locality: hot [tx_lock, queued_replies, rx_lock, event_lock]
+             interleaved with cold [vdev, vqs, tx_work, rx_work, ...]
+```
+
+The false sharing findings are `(inferred)` — padlock recognised `tx_lock`, `rx_lock`, and `event_lock` as mutex-type fields from their names. Adding `GUARDED_BY()` annotations would promote these to confirmed findings.
+
+### `rcu_node` — score 52, 5 false-sharing conflicts
+
+The RCU node struct in `kernel/rcu/tree.h` is one of the most concurrency-sensitive structs in the kernel. It has 39 fields, 5 false-sharing cache-line conflicts, and 16 bytes of padding:
+
+```
+$ padlock analyze kernel/rcu/tree.h --filter rcu_node
+
+[✗] rcu_node  296B  fields=39  holes=3  score=52
+    [LOW]  Padding waste: 16B (5%) across 3 gaps
+    [HIGH] Reorder fields: 296B → 280B (saves 16B)
+    [HIGH] False sharing: 5 cache-line conflict(s)
+    [MEDIUM] Locality: hot [__private, boost_mtx, kthread_mutex, exp_poll_lock]
+             interleaved with cold [gp_seq, qsmask, completedqs, ...]
+```
+
+The 5 false-sharing conflicts reflect the struct's role as the central node in RCU's scalable tree — multiple independent locks (`boost_mtx`, `kthread_mutex`, `exp_poll_lock`) protect different aspects of the same node and currently share cache lines. These are confirmed architectural trade-offs, not accidental bugs, but padlock surfaces them for review.

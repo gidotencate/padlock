@@ -663,17 +663,20 @@ See **[docs/robotics-ros2.md](docs/robotics-ros2.md)** for a full embedded ARM w
 
 padlock run against popular open-source projects — layout issues that accumulate invisibly over time:
 
-| Project | Language | Version | Structs | Wasted | Notable finding |
-|---|---|---|---|---|---|
-| [tokio](https://tokio.rs) | Rust | 1.51.1 | 197 | 480B | `ReadyEvent` — 58% padding waste |
-| [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | `multiState` — 20% waste, saves 8B |
-| Go `net` + `database/sql` | Go | stdlib 1.22 | 607 | 1 236B | `sql.DB` — false sharing, score 53 |
+| Project | Language | Version | Structs | Wasted | Score | Notable finding |
+|---|---|---|---|---|---|---|
+| [tokio](https://tokio.rs) | Rust | 1.51.1 | 367 | 485B | 91/100 A¹ | `TraceStatus` — score 48, false sharing |
+| [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | — | `multiState` — 20% waste, saves 8B |
+| Go `net` + `database/sql` | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53 |
+| Linux kernel `net/` | C | 6.x | 2 066 | 5 093B | 84/100 B | `virtio_vsock` — score 45, all 4 finding types |
 
-**Rust / tokio — `ReadyEvent`, 58% waste:**
+¹ repr(Rust) structs are severity-downgraded (compiler may already reorder). Use `--hide-repr-rust` to focus on ABI-stable findings only.
+
+**Rust / tokio — `TraceStatus`, false sharing (score 48):**
 ```
-[HIGH] Padding waste: 14B (58%) — 7B after `tick` (offset 1), 7B after `is_shutdown` (offset 17)
-[HIGH] Reorder fields: 24B → 16B (saves 8B): ready, is_shutdown, tick  (~8 MB/1M instances)
-note: repr(Rust) — compiler may reorder fields; use binary analysis for actual layout
+[HIGH] False sharing: spin_lock and waiter fields share a cache line
+[HIGH] Reorder fields: 24B → 16B (saves 8B)
+note: repr(Rust) — compiler may reorder; use binary analysis for confirmed layout
 ```
 
 **C / Redis — `multiState`, 20% waste** (layout is deterministic — no compiler reordering in C):
@@ -687,6 +690,15 @@ note: repr(Rust) — compiler may reorder fields; use binary analysis for actual
 [MEDIUM] Locality: hot [waitDuration, numClosed, mu] interleaved with cold [connector, freeConn, ...]
 ```
 `waitDuration` and `numClosed` are atomic counters updated on every query. They share a cache line with `mu` — under concurrent load, atomic writes invalidate the line that other goroutines need to lock. The finding is marked `(inferred)` because padlock recognised the field types as concurrent; adding `// padlock:guard=` annotations converts it to a confirmed finding.
+
+**C / Linux kernel `net/` — `virtio_vsock`, score 45 (all 4 finding types):**
+```
+[MEDIUM] Padding waste: 24B (18%) across 4 gaps
+[HIGH]   Reorder fields: 136B → 112B (saves 24B): event_lock, event_work, out_sgs, ...  (~24 MB/1M instances)
+[HIGH]   False sharing: 2 cache-line conflicts (lock fields mixed with work structs)
+[MEDIUM] Locality: hot [tx_lock, queued_replies, rx_lock, event_lock] interleaved with cold [vdev, vqs, ...]
+```
+`rcu_node` in `kernel/rcu/` is another example: score 52, 5 false-sharing conflicts across 39 fields — a concurrency-sensitive struct that has grown organically and accumulated layout debt.
 
 See **[docs/real-world-examples.md](docs/real-world-examples.md)** for full field-by-field layouts and fix examples for each language.
 

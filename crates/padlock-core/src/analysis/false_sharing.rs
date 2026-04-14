@@ -2,6 +2,25 @@
 
 use crate::ir::{AccessPattern, SharingConflict, StructLayout};
 
+/// Normalise a guard name for comparison.
+///
+/// Strips language-specific prefixes that refer to the same object:
+/// - `self.mu` → `mu`  (Rust / Python)
+/// - `this->mu` → `mu` (C++ member)
+/// - `this.mu` → `mu`  (Go/Java style)
+/// - Leading `&` / `*` dereference operators
+///
+/// Only the outermost layer of each prefix is stripped so that deeply qualified
+/// names (e.g. `self.inner.mu`) still compare differently from `self.outer.mu`.
+pub fn normalize_guard(guard: &str) -> &str {
+    let s = guard
+        .strip_prefix("self.")
+        .or_else(|| guard.strip_prefix("this->"))
+        .or_else(|| guard.strip_prefix("this."))
+        .unwrap_or(guard);
+    s.trim_start_matches(['&', '*'])
+}
+
 /// Return all groups of fields that share a cache line.
 /// Any cache line with two or more fields is a potential false-sharing hazard.
 pub fn find_sharing_conflicts(layout: &StructLayout) -> Vec<SharingConflict> {
@@ -65,7 +84,9 @@ pub fn has_false_sharing(layout: &StructLayout) -> bool {
         for j in (i + 1)..concurrent.len() {
             let (cl_a, guard_a, atomic_a) = concurrent[i];
             let (cl_b, guard_b, atomic_b) = concurrent[j];
-            if cl_a == cl_b && guard_a != guard_b {
+            if cl_a == cl_b
+                && guard_a.map(normalize_guard) != guard_b.map(normalize_guard)
+            {
                 // Skip if both fields are purely atomic with no lock involvement —
                 // that pattern is handled by the locality analysis, not false sharing.
                 if atomic_a && atomic_b {
@@ -237,6 +258,59 @@ mod tests {
     #[test]
     fn no_false_sharing_for_pure_atomics_on_different_lines() {
         let layout = make_layout(vec![atomic("counter_a", 0), atomic("counter_b", 64)]);
+        assert!(!has_false_sharing(&layout));
+    }
+
+    // ── normalize_guard ───────────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_strips_self_prefix() {
+        assert_eq!(normalize_guard("self.mu"), "mu");
+    }
+
+    #[test]
+    fn normalize_strips_this_arrow_prefix() {
+        assert_eq!(normalize_guard("this->mu"), "mu");
+    }
+
+    #[test]
+    fn normalize_strips_this_dot_prefix() {
+        assert_eq!(normalize_guard("this.mu"), "mu");
+    }
+
+    #[test]
+    fn normalize_strips_leading_ampersand() {
+        assert_eq!(normalize_guard("&mu"), "mu");
+    }
+
+    #[test]
+    fn normalize_strips_leading_star() {
+        assert_eq!(normalize_guard("*mu"), "mu");
+    }
+
+    #[test]
+    fn normalize_no_change_for_plain_name() {
+        assert_eq!(normalize_guard("mu"), "mu");
+    }
+
+    // Guards with different receiver prefixes but the same base name should NOT
+    // trigger false sharing.
+    #[test]
+    fn no_false_sharing_when_guards_differ_only_by_self_prefix() {
+        // "self.mu" and "mu" normalise to the same base name.
+        let layout = make_layout(vec![
+            concurrent("readers", 0, "self.mu"),
+            concurrent("writers", 8, "mu"),
+        ]);
+        assert!(!has_false_sharing(&layout));
+    }
+
+    #[test]
+    fn no_false_sharing_when_guards_differ_only_by_this_arrow_prefix() {
+        let layout = make_layout(vec![
+            concurrent("readers", 0, "this->lock"),
+            concurrent("writers", 8, "lock"),
+        ]);
         assert!(!has_false_sharing(&layout));
     }
 }

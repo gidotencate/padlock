@@ -39,9 +39,26 @@ inputs:
       permission in the calling workflow.
     default: 'true'
 
+  target:
+    description: >
+      Target architecture for source analysis. Accepts a Rust target triple
+      (e.g. `aarch64-apple-darwin`) or a short name (`aarch64_apple`,
+      `wasm32`, `riscv64`). Defaults to the runner's host architecture.
+      Use this when analysing code that will be compiled for a different
+      platform — most commonly Apple Silicon cache-line layout from a
+      Linux CI host.
+    default: ''
+
+  hide-repr-rust:
+    description: >
+      When `true`, exclude `repr(Rust)` structs from all output. Useful
+      when you want to focus CI gating on types with a fixed binary layout
+      (C, `repr(C)`, Go, Zig) where findings are fully accurate.
+    default: 'false'
+
   padlock-version:
     description: >
-      Version of padlock to install (e.g. `0.4.0`). Defaults to `latest`.
+      Version of padlock to install (e.g. `0.9.3`). Defaults to `latest`.
       Pin to a specific version for reproducible CI.
     default: 'latest'
 
@@ -137,18 +154,27 @@ runs:
         # Support newline-separated list of paths
         PATHS=(${{ inputs.path }})
 
+        # Build optional extra flags
+        EXTRA_FLAGS=()
+        if [ -n "${{ inputs.target }}" ]; then
+          EXTRA_FLAGS+=(--target "${{ inputs.target }}")
+        fi
+        if [ "${{ inputs.hide-repr-rust }}" = "true" ]; then
+          EXTRA_FLAGS+=(--hide-repr-rust)
+        fi
+
         # Always collect JSON so we can count findings for outputs / thresholds.
-        padlock analyze --json "${PATHS[@]}" > /tmp/padlock-results.json 2>&1 || true
+        padlock analyze --json "${PATHS[@]}" "${EXTRA_FLAGS[@]}" > /tmp/padlock-results.json 2>&1 || true
 
         # Also run the chosen output format for the log / artefacts.
         if [ "$FORMAT" = "sarif" ]; then
-          padlock analyze --sarif "${PATHS[@]}" > padlock-results.sarif
+          padlock analyze --sarif "${PATHS[@]}" "${EXTRA_FLAGS[@]}" > padlock-results.sarif
         elif [ "$FORMAT" = "json" ]; then
           cp /tmp/padlock-results.json padlock-results.json
         elif [ "$FORMAT" = "markdown" ]; then
-          padlock analyze --markdown "${PATHS[@]}" >> "$GITHUB_STEP_SUMMARY" || true
+          padlock analyze --markdown "${PATHS[@]}" "${EXTRA_FLAGS[@]}" >> "$GITHUB_STEP_SUMMARY" || true
         else
-          padlock analyze "${PATHS[@]}" || true
+          padlock analyze "${PATHS[@]}" "${EXTRA_FLAGS[@]}" || true
         fi
 
         # Count findings by severity from JSON output.

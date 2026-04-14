@@ -3,7 +3,7 @@
 #
 # To use this in your own repository:
 #   1. Copy this file to .github/workflows/padlock.yml
-#   2. Replace `uses: gidotencate/padlock@v1` with the version you want to pin
+#   2. Replace `uses: gidotencate/padlock@v0.9.3` with the version you want to pin
 #   3. Adjust `path` to point at your source directory or compiled binary
 
 name: Struct Layout Analysis
@@ -25,7 +25,7 @@ jobs:
 
       # ── Option A: source file analysis (no build needed) ────────────────────
       - name: Analyse Rust source
-        uses: gidotencate/padlock@v0.5.4
+        uses: gidotencate/padlock@v0.9.3
         with:
           path: crates/
           output-format: human
@@ -35,7 +35,7 @@ jobs:
       # Requires: Settings → Code security → Code scanning → enabled
       #
       # - name: Analyse struct layouts (SARIF)
-      #   uses: gidotencate/padlock@v0.5.4
+      #   uses: gidotencate/padlock@v0.9.3
       #   with:
       #     path: crates/
       #     output-format: sarif
@@ -46,7 +46,7 @@ jobs:
       # - uses: dtolnay/rust-toolchain@stable
       # - run: cargo build
       # - name: Analyse binary
-      #   uses: gidotencate/padlock@v0.5.4
+      #   uses: gidotencate/padlock@v0.9.3
       #   with:
       #     path: target/debug/myapp
       #     output-format: human

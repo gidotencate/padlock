@@ -2,6 +2,29 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.4] — 2026-04-14
+
+### Added
+- **Evidence labels in all output surfaces**: `FalseSharing` and `LocalityIssue` findings now carry an `is_inferred` flag that is `true` when the finding was derived from type-name heuristics (`Mutex<T>`, `sync.Mutex`, `AtomicU64`, etc.) rather than explicit guard annotations. Inferred findings are labeled `(inferred from type names — add guard annotations or verify with profiling)` in terminal, Markdown, SARIF, and VS Code diagnostics. Explicitly annotated findings show no label — they are confirmed. The distinction is present in JSON output as `"is_inferred": true/false` on each finding.
+- **`is_annotated` on `AccessPattern::Concurrent`**: the IR now records whether a `Concurrent` access pattern was set by an explicit source annotation (`GUARDED_BY`, `#[lock_protected_by]`, `// padlock:guard=`) or by the type-name heuristic pass. Explicit annotations in all frontends (Rust, C/C++, Go) set `is_annotated: true`; the heuristic pass sets `is_annotated: false`. Used to derive `is_inferred` on findings.
+- **`repr(Rust)` severity downgrade**: findings on `repr(Rust)` structs (no `#[repr(C/packed/transparent)]`) are downgraded one severity level (High→Medium, Medium→Low) since the compiler may already have applied the optimisation at compile time. `ReorderSuggestion` is capped at Medium for these structs. Severity is still emitted at full strength for `repr(C)` and `repr(packed)` structs where the layout is fixed.
+- **`--hide-repr-rust` flag** (`analyze`, `summary`, `check`): excludes all `repr(Rust)` structs from output entirely, focusing CI gating and terminal output on types with a fixed binary layout (C, `repr(C)`, Go, Zig) where findings are fully accurate and directly actionable.
+- **`--target <TRIPLE>` flag** (`analyze`, `summary`, `check`): sets the target architecture for source analysis using a Rust target triple or short name. Common values: `aarch64-apple-darwin` (Apple Silicon, 128-byte cache lines), `aarch64-unknown-linux-gnu`, `wasm32-unknown-unknown`. Overrides `arch.override` in `.padlock.toml`.
+- **`arch_by_triple()` in `padlock-core`**: new function that maps Rust target triples to `ArchConfig` by prefix matching. `arch_by_name()` now falls through to `arch_by_triple()` for strings not matching a short name.
+- **`exclude_paths` in `.padlock.toml`**: glob patterns matched against `source_file` in each layout. Matching layouts are excluded from all analysis output. Useful for skipping generated files (`proto/**`), vendored code (`vendor/**`), or third-party directories. Backslashes normalised before matching (Windows compatibility).
+- **ABI safety warning in `padlock fix`**: before rewriting any struct with a fixed binary layout (C, `repr(C)`, Go, Zig), `padlock fix` emits a warning to stderr listing the affected struct names and advising review of FFI boundaries and serialized data. `repr(Rust)` structs do not trigger this warning.
+- **Guard name normalization in false-sharing detection**: guard identifiers are now normalized before comparison — `self.mu`, `this->mu`, `&mu`, `*mu` all compare equal to `mu`. Prevents false positives from annotation style differences across frontends.
+- **Per-gap detail in `PaddingWaste` output**: terminal, Markdown, and SARIF output now shows `"NB after 'field' (offset O)"` for each gap (up to 3, then "and N more") instead of the previous `"across N gap(s)"`. Makes it immediately clear where each padding byte is located.
+- **Before/after sizes in `ReorderSuggestion` output**: terminal, Markdown, and SARIF output now shows `"XB → YB (saves ZB)"` instead of `"save ZB → YB"`. Both sizes visible at a glance without mental arithmetic.
+- **VS Code extension `is_inferred` support**: `PadlockFinding` interface gains `is_inferred?: boolean`; hover popups and Problems panel diagnostic messages for `FalseSharing` and `LocalityIssue` append the inferred label when set.
+
+### Fixed
+- **`.pre-commit-hooks.yaml` `--min-severity` typo**: `padlock-strict` hook was passing `--min-severity high` which is not a valid flag. Corrected to `--fail-on-severity high`. Also added `go` and `zig` to `types_or` in both hooks.
+
+### Changed
+- **GitHub Action**: exposed `target` and `hide-repr-rust` inputs, wired through to all `padlock analyze` invocations. Updated example workflow version pin from `v0.5.4` to `v0.9.3`.
+- **Documentation**: README, `docs/findings.md`, `docs/real-world-examples.md`, and `editors/vscode/README.md` updated to reflect all new features, new output format strings, evidence labeling, `.padlock.toml` configuration section, and ABI warning behavior.
+
 ## [0.9.3] — 2026-04-12
 
 ### Added

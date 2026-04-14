@@ -3,15 +3,15 @@
   description: Analyze struct memory layouts for padding waste and false sharing
   language: rust
   entry: padlock analyze
-  types_or: [rust, c, c++]
+  types_or: [rust, c, c++, go, zig]
   pass_filenames: true
   args: []
 
 - id: padlock-strict
   name: padlock layout check (strict)
-  description: Analyze struct layouts and fail on any High severity finding
+  description: Analyze struct layouts — fails the commit on any High severity finding
   language: rust
   entry: padlock analyze
-  types_or: [rust, c, c++]
+  types_or: [rust, c, c++, go, zig]
   pass_filenames: true
-  args: ['--min-severity', 'high']
+  args: ['--fail-on-severity', 'high']

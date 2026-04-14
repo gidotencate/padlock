@@ -86,6 +86,7 @@ mod tests {
             min_size: None,
             packable: false,
             sort_by: SortBy::Score,
+            hide_repr_rust: false,
         }
     }
 

@@ -74,6 +74,15 @@ pub struct FilterArgs {
     /// Sort results by: score (default), size, waste, name
     #[arg(long, value_enum, default_value = "score", value_name = "FIELD")]
     pub sort_by: SortBy,
+
+    /// Exclude repr(Rust) structs from output.
+    ///
+    /// repr(Rust) structs have no guaranteed memory layout — the compiler may
+    /// already reorder fields and eliminate padding. Findings for these structs
+    /// describe the *declared* order only and may not reflect the compiled layout.
+    /// Use this flag to focus on structs with a fixed ABI (repr(C), C, Go, Zig).
+    #[arg(long)]
+    pub hide_repr_rust: bool,
 }
 
 impl FilterArgs {
@@ -130,9 +139,13 @@ impl FilterArgs {
         Ok(())
     }
 
-    /// Apply post-analysis filters (packable) and sort to the assembled report.
+    /// Apply post-analysis filters (packable, hide_repr_rust) and sort to the assembled report.
     /// Re-synchronises `total_structs` and `total_wasted_bytes` after filtering.
     pub fn apply_to_report(&self, report: &mut Report) {
+        if self.hide_repr_rust {
+            report.structs.retain(|sr| !sr.is_repr_rust);
+        }
+
         if self.packable {
             report.structs.retain(|sr| {
                 sr.findings
@@ -210,6 +223,7 @@ mod tests {
             min_size,
             packable,
             sort_by,
+            hide_repr_rust: false,
         }
     }
 

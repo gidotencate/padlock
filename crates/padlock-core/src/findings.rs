@@ -10,6 +10,17 @@ pub enum Severity {
     High,
 }
 
+impl Severity {
+    /// Return the next lower severity level (High→Medium, Medium→Low, Low→Low).
+    pub fn downgrade(self) -> Self {
+        match self {
+            Severity::High => Severity::Medium,
+            Severity::Medium => Severity::Low,
+            Severity::Low => Severity::Low,
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind")]
 pub enum Finding {
@@ -127,13 +138,19 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
     // Unions: is_union suppresses padding at the find_padding level; no extra check needed.
     if wasted > 0 {
         let waste_pct = wasted as f64 / layout.total_size as f64 * 100.0;
-        let severity = if waste_pct >= 30.0 {
+        let mut severity = if waste_pct >= 30.0 {
             Severity::High
         } else if waste_pct >= 10.0 {
             Severity::Medium
         } else {
             Severity::Low
         };
+        // repr(Rust) structs have no guaranteed layout — the compiler may already
+        // eliminate this padding.  Downgrade by one level so the finding remains
+        // visible without over-alarming on code the compiler has already handled.
+        if layout.is_repr_rust {
+            severity = severity.downgrade();
+        }
         findings.push(Finding::PaddingWaste {
             struct_name: layout.name.clone(),
             total_size: layout.total_size,
@@ -152,17 +169,23 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
             .iter()
             .map(|f| f.name.clone())
             .collect();
+        // repr(Rust): the compiler likely already reorders fields, so cap at Medium —
+        // the suggestion is still actionable (especially when adding repr(C) later)
+        // but should not block a High-only CI gate.
+        let severity = if layout.is_repr_rust {
+            Severity::Medium
+        } else if savings >= 8 {
+            Severity::High
+        } else {
+            Severity::Medium
+        };
         findings.push(Finding::ReorderSuggestion {
             struct_name: layout.name.clone(),
             original_size: layout.total_size,
             optimized_size,
             savings,
             suggested_order,
-            severity: if savings >= 8 {
-                Severity::High
-            } else {
-                Severity::Medium
-            },
+            severity,
         });
     }
 

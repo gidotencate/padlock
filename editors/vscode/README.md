@@ -48,9 +48,10 @@ When a `ReorderSuggestion` diagnostic is active, the lightbulb (⚡) menu offers
 
 padlock must be installed and on your `PATH`.
 
-**macOS (Homebrew):**
+**macOS / Linux (Homebrew):**
 ```bash
-brew install gidotencate/padlock/padlock
+brew tap gidotencate/padlock https://github.com/gidotencate/padlock
+brew install padlock
 ```
 
 **Any platform with Rust:**

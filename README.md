@@ -75,10 +75,11 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 
 ## Installation
 
-### macOS (Homebrew)
+### macOS / Linux (Homebrew)
 
 ```bash
-brew install gidotencate/padlock/padlock
+brew tap gidotencate/padlock https://github.com/gidotencate/padlock
+brew install padlock
 ```
 
 ### Any platform with Rust installed

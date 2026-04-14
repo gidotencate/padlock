@@ -16,6 +16,9 @@ pub struct AnalyzeOpts {
     pub cache_line_size: Option<usize>,
     pub word_size: Option<usize>,
     pub fail_on_severity: Option<FailSeverity>,
+    /// Rust target triple or short arch name (e.g. `aarch64-apple-darwin`).
+    /// Overrides the `arch.override` config value.
+    pub target: Option<String>,
 }
 
 pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow::Result<()> {
@@ -26,6 +29,7 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
         cache_line_size,
         word_size,
         fail_on_severity,
+        target,
     } = opts;
     // Load config by searching upward from the first supplied path.
     let cfg = Config::for_path(
@@ -42,10 +46,11 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
     // Collect layouts from all paths (dirs expanded, binaries via DWARF).
     let (mut layouts, analyzed) = collect_layouts(paths)?;
 
-    // Apply arch override from config.
-    if let Some(ref arch_name) = cfg.arch_override {
+    // Apply arch override: CLI --target takes precedence over config arch.override.
+    let arch_name_override = target.as_deref().or(cfg.arch_override.as_deref());
+    if let Some(arch_name) = arch_name_override {
         let arch = padlock_core::arch::arch_by_name(arch_name).unwrap_or_else(|| {
-            eprintln!("padlock: warning: unknown arch '{arch_name}', ignoring override");
+            eprintln!("padlock: warning: unknown target/arch '{arch_name}', ignoring override");
             padlock_dwarf::reader::detect_arch_from_host()
         });
         for layout in &mut layouts {

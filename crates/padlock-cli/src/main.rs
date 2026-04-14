@@ -60,6 +60,11 @@ enum Commands {
         /// (high, medium, or low). Useful for stricter CI gates.
         #[arg(long, value_name = "SEVERITY")]
         fail_on_severity: Option<filter::FailSeverity>,
+        /// Target architecture as a Rust triple or short name
+        /// (e.g. aarch64-apple-darwin, x86_64-unknown-linux-gnu, aarch64, wasm32).
+        /// Overrides the arch.override config value.
+        #[arg(long, value_name = "TRIPLE")]
+        target: Option<String>,
         #[command(flatten)]
         filter: filter::FilterArgs,
     },
@@ -80,6 +85,9 @@ enum Commands {
         /// Override the pointer/word size in bytes
         #[arg(long, value_name = "BYTES")]
         word_size: Option<usize>,
+        /// Target architecture as a Rust triple or short name
+        #[arg(long, value_name = "TRIPLE")]
+        target: Option<String>,
         #[command(flatten)]
         filter: filter::FilterArgs,
     },
@@ -163,6 +171,9 @@ enum Commands {
         /// Output comparison result as JSON
         #[arg(long)]
         json: bool,
+        /// Target architecture as a Rust triple or short name
+        #[arg(long, value_name = "TRIPLE")]
+        target: Option<String>,
         #[command(flatten)]
         filter: filter::FilterArgs,
     },
@@ -179,6 +190,7 @@ fn main() -> anyhow::Result<()> {
             cache_line_size,
             word_size,
             fail_on_severity,
+            target,
             filter,
         } => commands::analyze::run(
             &paths,
@@ -189,6 +201,7 @@ fn main() -> anyhow::Result<()> {
                 cache_line_size,
                 word_size,
                 fail_on_severity,
+                target,
             },
             &filter,
         ),
@@ -198,8 +211,9 @@ fn main() -> anyhow::Result<()> {
             top,
             cache_line_size,
             word_size,
+            target,
             filter,
-        } => commands::summary::run(&paths, top, cache_line_size, word_size, &filter),
+        } => commands::summary::run(&paths, top, cache_line_size, word_size, target, &filter),
 
         Commands::Init => commands::init::run(),
 
@@ -226,6 +240,7 @@ fn main() -> anyhow::Result<()> {
                 cache_line_size: None,
                 word_size: None,
                 fail_on_severity: None,
+                target: None,
             },
             &filter,
         ),
@@ -239,7 +254,15 @@ fn main() -> anyhow::Result<()> {
             baseline,
             save_baseline,
             json,
+            target,
             filter,
-        } => commands::check::run(&paths, baseline.as_deref(), save_baseline, json, &filter),
+        } => commands::check::run(
+            &paths,
+            baseline.as_deref(),
+            save_baseline,
+            json,
+            target,
+            &filter,
+        ),
     }
 }

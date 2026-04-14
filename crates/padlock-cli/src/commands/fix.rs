@@ -70,6 +70,23 @@ fn fix_file(path: &Path, dry_run: bool, re: Option<&regex::Regex>) -> anyhow::Re
         return Ok(());
     }
 
+    // Emit an ABI-compatibility warning for fixed-layout types. Reordering their
+    // fields changes the binary layout and breaks serialization, FFI, and any
+    // pre-compiled code that shares the struct's memory layout.
+    let fixed_abi_structs: Vec<&str> = layouts_to_fix
+        .iter()
+        .filter(|l| !l.is_repr_rust)
+        .map(|l| l.name.as_str())
+        .collect();
+    if !fixed_abi_structs.is_empty() {
+        let names = fixed_abi_structs.join(", ");
+        eprintln!(
+            "padlock: warning: reordering fields in {names} will change the binary layout. \
+             If this type is used across FFI, serialized to disk/network, or shared with \
+             pre-compiled code, update all call sites before deploying."
+        );
+    }
+
     // Show per-struct diff.
     for layout in &layouts_to_fix {
         let old_text =

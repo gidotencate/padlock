@@ -72,7 +72,7 @@ pub fn has_false_sharing(layout: &StructLayout) -> bool {
         .fields
         .iter()
         .filter_map(|f| {
-            if let AccessPattern::Concurrent { guard, is_atomic } = &f.access {
+            if let AccessPattern::Concurrent { guard, is_atomic, .. } = &f.access {
                 Some((f.offset / line, guard.as_deref(), *is_atomic))
             } else {
                 None
@@ -139,6 +139,7 @@ mod tests {
             access: AccessPattern::Concurrent {
                 guard: Some(guard.into()),
                 is_atomic: false,
+                is_annotated: false,
             },
         }
     }
@@ -159,6 +160,7 @@ mod tests {
             access: AccessPattern::Concurrent {
                 guard: Some(name.into()),
                 is_atomic: true,
+                is_annotated: false,
             },
         }
     }

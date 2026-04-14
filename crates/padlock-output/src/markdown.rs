@@ -85,43 +85,71 @@ fn render_finding_md(f: &Finding) -> String {
             waste_pct,
             gaps,
             ..
-        } => format!(
-            "Padding waste: {}B ({:.0}%) across {} gap(s)",
-            wasted_bytes,
-            waste_pct,
-            gaps.len()
-        ),
+        } => {
+            let gap_detail: Vec<String> = gaps
+                .iter()
+                .take(3)
+                .map(|g| format!("{}B after `{}` (offset {})", g.bytes, g.after_field, g.at_offset))
+                .collect();
+            let detail = if gaps.len() > 3 {
+                format!("{} … and {} more", gap_detail.join(", "), gaps.len() - 3)
+            } else {
+                gap_detail.join(", ")
+            };
+            format!("Padding waste: {wasted_bytes}B ({waste_pct:.0}%) — {detail}")
+        }
         Finding::ReorderSuggestion {
             savings,
+            original_size,
             optimized_size,
             suggested_order,
             severity,
             ..
         } => {
             let base = format!(
-                "Reorder fields to save {}B → {}B: `{}`",
-                savings,
-                optimized_size,
+                "Reorder fields: {original_size}B → {optimized_size}B (saves {savings}B): `{}`",
                 suggested_order.join(", ")
             );
             if *severity == Severity::High {
-                format!("{} (~{} MB/1M instances)", base, savings)
+                format!("{base} (~{savings} MB/1M instances)")
             } else {
                 base
             }
         }
-        Finding::FalseSharing { conflicts, .. } => {
-            format!("False sharing: {} cache-line conflict(s)", conflicts.len())
+        Finding::FalseSharing {
+            conflicts,
+            is_inferred,
+            ..
+        } => {
+            let field_lists: Vec<String> = conflicts
+                .iter()
+                .map(|c| format!("cache line {}: `[{}]`", c.cache_line, c.fields.join(", ")))
+                .collect();
+            let inferred = if *is_inferred {
+                " _(inferred from type names — add guard annotations or verify with profiling)_"
+            } else {
+                ""
+            };
+            format!("False sharing: {}{}", field_lists.join("; "), inferred)
         }
         Finding::LocalityIssue {
             hot_fields,
             cold_fields,
+            is_inferred,
             ..
-        } => format!(
-            "Locality: hot `[{}]` interleaved with cold `[{}]`",
-            hot_fields.join(", "),
-            cold_fields.join(", ")
-        ),
+        } => {
+            let inferred = if *is_inferred {
+                " _(inferred from type names — verify with profiling)_"
+            } else {
+                ""
+            };
+            format!(
+                "Locality: hot `[{}]` interleaved with cold `[{}]`{}",
+                hot_fields.join(", "),
+                cold_fields.join(", "),
+                inferred
+            )
+        }
     }
 }
 

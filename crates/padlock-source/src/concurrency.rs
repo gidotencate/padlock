@@ -29,6 +29,7 @@ pub fn annotate_concurrency(layout: &mut StructLayout, language: &SourceLanguage
                 field.access = AccessPattern::Concurrent {
                     guard: Some(field.name.clone()),
                     is_atomic,
+                    is_annotated: false,
                 };
             }
         } else if is_read_mostly_type(&ty_name, language)

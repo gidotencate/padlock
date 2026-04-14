@@ -133,20 +133,73 @@ fn message_for(finding: &Finding) -> String {
             wasted_bytes,
             waste_pct,
             struct_name,
+            gaps,
             ..
-        } => format!("{struct_name}: {wasted_bytes}B wasted ({waste_pct:.0}% of struct)"),
+        } => {
+            let gap_detail: Vec<String> = gaps
+                .iter()
+                .take(3)
+                .map(|g| format!("{}B after `{}` (offset {})", g.bytes, g.after_field, g.at_offset))
+                .collect();
+            let detail = if gaps.len() > 3 {
+                format!("{} and {} more gaps", gap_detail.join(", "), gaps.len() - 3)
+            } else {
+                gap_detail.join(", ")
+            };
+            format!(
+                "{struct_name}: {wasted_bytes}B wasted ({waste_pct:.0}% of struct) — {detail}"
+            )
+        }
         Finding::FalseSharing {
             struct_name,
             conflicts,
+            is_inferred,
             ..
-        } => format!("{struct_name}: {} cache-line conflict(s)", conflicts.len()),
+        } => {
+            let field_lists: Vec<String> = conflicts
+                .iter()
+                .map(|c| format!("cache line {}: [{}]", c.cache_line, c.fields.join(", ")))
+                .collect();
+            let inferred = if *is_inferred {
+                " (inferred from type names)"
+            } else {
+                ""
+            };
+            format!(
+                "{struct_name}: false sharing — {}{}",
+                field_lists.join("; "),
+                inferred
+            )
+        }
         Finding::ReorderSuggestion {
             struct_name,
             savings,
+            original_size,
+            optimized_size,
+            suggested_order,
             ..
-        } => format!("{struct_name}: reordering fields saves {savings}B"),
-        Finding::LocalityIssue { struct_name, .. } => {
-            format!("{struct_name}: hot and cold fields are interleaved")
+        } => format!(
+            "{struct_name}: reordering fields saves {savings}B ({original_size}B → {optimized_size}B): {}",
+            suggested_order.join(", ")
+        ),
+        Finding::LocalityIssue {
+            struct_name,
+            hot_fields,
+            cold_fields,
+            is_inferred,
+            ..
+        } => {
+            let inferred = if *is_inferred {
+                " (inferred from type names)"
+            } else {
+                ""
+            };
+            format!(
+                "{struct_name}: hot fields [{}] interleaved with cold [{}]{}",
+                hot_fields.join(", "),
+                cold_fields.join(", "),
+                inferred
+            )
         }
     }
 }

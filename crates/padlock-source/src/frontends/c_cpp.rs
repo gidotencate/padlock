@@ -466,6 +466,7 @@ fn parse_class_specifier(
             AccessPattern::Concurrent {
                 guard: Some(g),
                 is_atomic: false,
+                is_annotated: true,
             }
         } else {
             AccessPattern::Unknown
@@ -681,6 +682,7 @@ fn parse_struct_or_union_specifier(
                 AccessPattern::Concurrent {
                     guard: Some(g),
                     is_atomic: false,
+                    is_annotated: true,
                 }
             } else {
                 AccessPattern::Unknown
@@ -1282,6 +1284,7 @@ typedef struct {
                     access: AccessPattern::Concurrent {
                         guard: Some("lock_a".into()),
                         is_atomic: false,
+                        is_annotated: true,
                     },
                 },
                 Field {
@@ -1299,6 +1302,7 @@ typedef struct {
                     access: AccessPattern::Concurrent {
                         guard: Some("lock_b".into()),
                         is_atomic: false,
+                        is_annotated: true,
                     },
                 },
             ],
@@ -1317,6 +1321,7 @@ typedef struct {
         layout.fields[1].access = AccessPattern::Concurrent {
             guard: Some("lock_a".into()),
             is_atomic: false,
+            is_annotated: true,
         };
         assert!(!padlock_core::analysis::false_sharing::has_false_sharing(
             &layout

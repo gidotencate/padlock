@@ -76,6 +76,11 @@ pub enum AccessPattern {
     Concurrent {
         guard: Option<String>,
         is_atomic: bool,
+        /// True when this pattern was set by an explicit source annotation
+        /// (e.g. `GUARDED_BY`, `#[lock_protected_by]`, `// padlock:guard=`).
+        /// False when inferred from the field's type name by the heuristic pass.
+        #[serde(default)]
+        is_annotated: bool,
     },
     ReadMostly,
     Padding,

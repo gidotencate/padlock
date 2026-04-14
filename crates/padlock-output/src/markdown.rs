@@ -89,7 +89,12 @@ fn render_finding_md(f: &Finding) -> String {
             let gap_detail: Vec<String> = gaps
                 .iter()
                 .take(3)
-                .map(|g| format!("{}B after `{}` (offset {})", g.bytes, g.after_field, g.at_offset))
+                .map(|g| {
+                    format!(
+                        "{}B after `{}` (offset {})",
+                        g.bytes, g.after_field, g.at_offset
+                    )
+                })
                 .collect();
             let detail = if gaps.len() > 3 {
                 format!("{} … and {} more", gap_detail.join(", "), gaps.len() - 3)

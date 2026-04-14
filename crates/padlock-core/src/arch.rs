@@ -136,39 +136,15 @@ mod tests {
 
     #[test]
     fn target_triples_resolve() {
-        assert_eq!(
-            arch_by_name("x86_64-unknown-linux-gnu"),
-            Some(&X86_64_SYSV)
-        );
-        assert_eq!(
-            arch_by_name("x86_64-pc-windows-msvc"),
-            Some(&X86_64_SYSV)
-        );
-        assert_eq!(
-            arch_by_name("aarch64-unknown-linux-gnu"),
-            Some(&AARCH64)
-        );
-        assert_eq!(
-            arch_by_name("aarch64-linux-android"),
-            Some(&AARCH64)
-        );
+        assert_eq!(arch_by_name("x86_64-unknown-linux-gnu"), Some(&X86_64_SYSV));
+        assert_eq!(arch_by_name("x86_64-pc-windows-msvc"), Some(&X86_64_SYSV));
+        assert_eq!(arch_by_name("aarch64-unknown-linux-gnu"), Some(&AARCH64));
+        assert_eq!(arch_by_name("aarch64-linux-android"), Some(&AARCH64));
         // Apple targets get the 128-byte cache line config.
-        assert_eq!(
-            arch_by_name("aarch64-apple-darwin"),
-            Some(&AARCH64_APPLE)
-        );
-        assert_eq!(
-            arch_by_name("aarch64-apple-ios"),
-            Some(&AARCH64_APPLE)
-        );
-        assert_eq!(
-            arch_by_name("wasm32-unknown-unknown"),
-            Some(&WASM32)
-        );
-        assert_eq!(
-            arch_by_name("riscv64gc-unknown-linux-gnu"),
-            Some(&RISCV64)
-        );
+        assert_eq!(arch_by_name("aarch64-apple-darwin"), Some(&AARCH64_APPLE));
+        assert_eq!(arch_by_name("aarch64-apple-ios"), Some(&AARCH64_APPLE));
+        assert_eq!(arch_by_name("wasm32-unknown-unknown"), Some(&WASM32));
+        assert_eq!(arch_by_name("riscv64gc-unknown-linux-gnu"), Some(&RISCV64));
     }
 
     #[test]

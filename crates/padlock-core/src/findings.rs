@@ -202,7 +202,13 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
         let conflicts = false_sharing::find_sharing_conflicts(layout);
         // is_inferred = true when no conflicting field carries an explicit annotation.
         let is_inferred = !layout.fields.iter().any(|f| {
-            matches!(f.access, AccessPattern::Concurrent { is_annotated: true, .. })
+            matches!(
+                f.access,
+                AccessPattern::Concurrent {
+                    is_annotated: true,
+                    ..
+                }
+            )
         });
         findings.push(Finding::FalseSharing {
             struct_name: layout.name.clone(),
@@ -219,7 +225,13 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
         // ReadMostly is always set by the heuristic; Concurrent is annotated when
         // is_annotated = true.
         let is_inferred = !layout.fields.iter().any(|f| {
-            matches!(f.access, AccessPattern::Concurrent { is_annotated: true, .. })
+            matches!(
+                f.access,
+                AccessPattern::Concurrent {
+                    is_annotated: true,
+                    ..
+                }
+            )
         });
         findings.push(Finding::LocalityIssue {
             struct_name: layout.name.clone(),

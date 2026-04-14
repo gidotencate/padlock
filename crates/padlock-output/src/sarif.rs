@@ -139,16 +139,19 @@ fn message_for(finding: &Finding) -> String {
             let gap_detail: Vec<String> = gaps
                 .iter()
                 .take(3)
-                .map(|g| format!("{}B after `{}` (offset {})", g.bytes, g.after_field, g.at_offset))
+                .map(|g| {
+                    format!(
+                        "{}B after `{}` (offset {})",
+                        g.bytes, g.after_field, g.at_offset
+                    )
+                })
                 .collect();
             let detail = if gaps.len() > 3 {
                 format!("{} and {} more gaps", gap_detail.join(", "), gaps.len() - 3)
             } else {
                 gap_detail.join(", ")
             };
-            format!(
-                "{struct_name}: {wasted_bytes}B wasted ({waste_pct:.0}% of struct) — {detail}"
-            )
+            format!("{struct_name}: {wasted_bytes}B wasted ({waste_pct:.0}% of struct) — {detail}")
         }
         Finding::FalseSharing {
             struct_name,

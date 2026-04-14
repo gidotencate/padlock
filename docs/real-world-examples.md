@@ -56,7 +56,7 @@ ReadyEvent  24 bytes  align=8  fields=3  [repr(Rust) — compiler may reorder]
 The fix is straightforward — sort fields by descending alignment:
 
 ```
-[HIGH] Reorder fields to save 8B → 16B: ready, is_shutdown, tick
+[HIGH] Reorder fields: 24B → 16B (saves 8B): ready, is_shutdown, tick
 ```
 
 > **`repr(Rust)` note:** `ReadyEvent` has no `#[repr(C)]` annotation, so the Rust compiler is free to reorder fields itself. padlock flags the declared order as a potential source-level issue — if the struct ever gains `repr(C)` for FFI, or if the compiler happens not to reorder it, the waste becomes real. Use binary analysis (`padlock analyze target/debug/tokio-...`) for the compiler-accurate layout.
@@ -66,8 +66,8 @@ The fix is straightforward — sort fields by descending alignment:
 The runtime `Builder` struct (200 bytes, 27 fields) has 30 bytes of padding across 5 gaps, recoverable to 176 bytes by reordering — freeing 24 bytes that every `Runtime::new()` call allocates on the stack:
 
 ```
-[HIGH] Reorder fields to save 24B → 176B  (~24 MB/1M instances)
-[MEDIUM] Padding waste: 30B (15%) across 5 gap(s)
+[HIGH] Reorder fields: 200B → 176B (saves 24B)  (~24 MB/1M instances)
+[MEDIUM] Padding waste: 30B (15%) — 4B after `worker_threads` (offset 12), and 4 more gaps
 note: repr(Rust) — compiler may reorder fields; use binary analysis for actual layout
 ```
 
@@ -87,8 +87,8 @@ pub(crate) struct WorkerMetrics {
 ```
 
 ```
-[MEDIUM] Padding waste: 24B (19%) across 1 gap(s)
-[HIGH]   False sharing: 2 cache-line conflict(s)
+[MEDIUM] Padding waste: 24B (19%) — 24B after `thread_id` (offset 32)
+[HIGH]   False sharing: cache line 0: [busy_duration_total, queue_depth, thread_id]  (inferred from type names — add guard annotations or verify with profiling)
 ```
 
 The struct has padding waste *within* the 128-byte block, but the inter-instance false sharing is correctly eliminated by the forced alignment.
@@ -143,7 +143,7 @@ multiState  40 bytes  align=8  fields=6
 Moving `argv_len_sums` (a `size_t`, pointer-aligned) to follow the pointer field eliminates both padding gaps:
 
 ```
-[HIGH] Reorder fields to save 8B → 32B: argv_len_sums, commands, alloc_count, cmd_flags, cmd_inv_flags, count
+[HIGH] Reorder fields: 40B → 32B (saves 8B): argv_len_sums, commands, alloc_count, cmd_flags, cmd_inv_flags, count
 ```
 
 The fix in C is a one-line comment in the struct declaration — no code changes needed:
@@ -164,8 +164,8 @@ typedef struct multiState {
 Command metadata structs are allocated once at startup and cached for every command lookup:
 
 ```
-[HIGH] Reorder fields to save 8B → 72B  (~8 MB/1M instances)
-  Spans 2 cache line(s); optimal spans 1
+[HIGH] Reorder fields: 80B → 72B (saves 8B)  (~8 MB/1M instances)
+  Spans 2 cache lines; optimal spans 1
 ```
 
 The current layout crosses a 64-byte cache line boundary at offset 64. After reordering, the entire struct fits within a single cache line — every command-parsing lookup that touches this struct currently pulls two cache lines from memory.
@@ -175,9 +175,9 @@ The current layout crosses a 64-byte cache line boundary at offset 64. After reo
 The main `redisServer` struct (2 736 bytes, 397 fields) has 128 bytes of padding across 32 gaps and 42 false-sharing conflicts. It is intentionally a global singleton — the padding and false sharing primarily affect startup performance and the scheduler thread. padlock highlights it for completeness rather than as a target for optimization:
 
 ```
-[LOW]  Padding waste: 128B (5%) across 32 gap(s)
-[HIGH] Reorder fields to save 128B → 2608B
-[HIGH] False sharing: 42 cache-line conflict(s)
+[LOW]  Padding waste: 128B (5%) — 4B after `activerehashing` (offset 124), and 31 more gaps
+[HIGH] Reorder fields: 2736B → 2608B (saves 128B)
+[HIGH] False sharing: cache line 0: [hz, dynamic_hz, aof_use_rdb_preamble, ...], and 41 more conflicts  (inferred from type names — add guard annotations or verify with profiling)
 ```
 
 ---
@@ -213,9 +213,9 @@ type DB struct {
 $ padlock analyze /usr/lib/go-1.22/src/database/sql/sql.go --filter '^DB$'
 
 [✗] DB  184B  fields=21  score=53
-    [LOW]    Padding waste: 7B (4%) across 1 gap(s)
-    [HIGH]   False sharing: 3 cache-line conflict(s)
-    [MEDIUM] Locality: hot [waitDuration, numClosed, mu] interleaved with cold [...]
+    [LOW]    Padding waste: 7B (4%) — 7B after `numClosed` (offset 16)
+    [HIGH]   False sharing: cache line 0: [waitDuration, numClosed, mu]  (inferred from type names — add guard annotations or verify with profiling)
+    [MEDIUM] Locality: hot [waitDuration, numClosed, mu] interleaved with cold [connector, freeConn, ...]
 ```
 
 `waitDuration` and `numClosed` are atomic counters updated on every query — any goroutine that modifies them invalidates the cache line that also holds `connector` and the start of `mu`, which is locked on every connection acquire. Under concurrent load this generates unnecessary cache-coherence traffic across threads.
@@ -243,10 +243,10 @@ type DB struct {
 
 ```
 [✗] Transport  240B  fields=31  score=51
-    [LOW]    Padding waste: 19B (8%) across 3 gap(s)
-    [HIGH]   Reorder fields to save 16B → 224B  (~16 MB/1M instances)
-    [HIGH]   False sharing: 4 cache-line conflict(s)
-    [MEDIUM] Locality: hot [idleMu, reqMu, altMu, ...] interleaved with cold [...]
+    [LOW]    Padding waste: 19B (8%) — 7B after `closeIdle` (offset 8), and 2 more gaps
+    [HIGH]   Reorder fields: 240B → 224B (saves 16B)  (~16 MB/1M instances)
+    [HIGH]   False sharing: cache line 0: [idleMu, reqMu]; cache line 1: [altMu, connsPerHostMu]  (inferred from type names — add guard annotations or verify with profiling)
+    [MEDIUM] Locality: hot [idleMu, reqMu, altMu, connsPerHostMu] interleaved with cold [closeIdle, idleConn, ...]
 ```
 
 The layout (abridged):

@@ -59,6 +59,12 @@ struct Connection { is_active, timeout, is_tls, port }
 struct Connection { timeout, port, is_active, is_tls }
 ```
 
+The terminal output shows the before and after sizes explicitly:
+
+```
+[HIGH] Reorder fields: 24B → 16B (saves 8B): timeout, port, is_active, is_tls  (~8 MB/1M instances)
+```
+
 **Severity thresholds**
 
 | Severity | Condition |
@@ -145,6 +151,20 @@ type SharedCounters struct {
 }
 ```
 
+**Confirmed vs. inferred findings**
+
+padlock distinguishes between two confidence levels:
+
+- **Confirmed** — the field carries an explicit guard annotation (`GUARDED_BY`, `#[lock_protected_by]`, `// padlock:guard=`). The guard identifier is known exactly. Output shows the finding without qualification.
+- **Inferred** — the field's type name was recognised as a synchronisation primitive by the heuristic pass (e.g. `Mutex<T>`, `sync.Mutex`, `AtomicU64`). The guard is assumed to be the field itself. Output appends:
+  ```
+  (inferred from type names — add guard annotations or verify with profiling)
+  ```
+
+Inferred findings are **still actionable** — they identify real false-sharing candidates — but they should be verified with profiling or by adding explicit guard annotations before committing to a fix.
+
+To convert an inferred finding to a confirmed one, annotate the fields explicitly (see the annotation examples above). Once all concurrent fields in a cache-line conflict have explicit annotations, the `(inferred)` label disappears.
+
 **Severity**
 
 Always **High**. False sharing is a confirmed concurrency performance hazard.
@@ -199,6 +219,16 @@ struct Worker {
     char            name[64];  // cold — lines 0–1
 };
 ```
+
+**Confirmed vs. inferred findings**
+
+`LocalityIssue` follows the same evidence labeling as `FalseSharing`. When all hot fields were identified by type-name heuristic rather than explicit annotation, the output appends:
+
+```
+(inferred from type names — verify with profiling)
+```
+
+Annotating the hot fields explicitly (see the `FalseSharing` annotation examples) removes the `(inferred)` label and makes the finding confirmed.
 
 **Severity**
 

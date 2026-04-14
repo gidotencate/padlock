@@ -72,7 +72,10 @@ pub fn has_false_sharing(layout: &StructLayout) -> bool {
         .fields
         .iter()
         .filter_map(|f| {
-            if let AccessPattern::Concurrent { guard, is_atomic, .. } = &f.access {
+            if let AccessPattern::Concurrent {
+                guard, is_atomic, ..
+            } = &f.access
+            {
                 Some((f.offset / line, guard.as_deref(), *is_atomic))
             } else {
                 None
@@ -84,9 +87,7 @@ pub fn has_false_sharing(layout: &StructLayout) -> bool {
         for j in (i + 1)..concurrent.len() {
             let (cl_a, guard_a, atomic_a) = concurrent[i];
             let (cl_b, guard_b, atomic_b) = concurrent[j];
-            if cl_a == cl_b
-                && guard_a.map(normalize_guard) != guard_b.map(normalize_guard)
-            {
+            if cl_a == cl_b && guard_a.map(normalize_guard) != guard_b.map(normalize_guard) {
                 // Skip if both fields are purely atomic with no lock involvement —
                 // that pattern is handled by the locality analysis, not false sharing.
                 if atomic_a && atomic_b {

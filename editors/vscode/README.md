@@ -7,8 +7,8 @@
 When you save a supported file, padlock runs in the background and populates the Problems panel with layout findings. No squiggles, no interruptions — just findings waiting when you want them.
 
 ```
-WARNING  Connection: 10B wasted (41%). Run 'padlock explain' for full layout.   connection.rs  line 4
-WARNING  Connection: reordering fields saves 8B (24B → 16B). Use 'padlock: Apply fix'.   connection.rs  line 4
+WARNING  Connection: 10B wasted (41% of 24B). Run 'padlock explain' for the full layout.   connection.rs  line 4
+WARNING  Connection: reordering fields saves 8B (24B → 16B). Use 'padlock: Apply fix' or the lightbulb (⚡) to reorder.   connection.rs  line 4
 ```
 
 ### Status bar health score
@@ -129,6 +129,8 @@ Fix: separate independently-locked groups onto their own cache lines with `#[rep
 
 Severity: always **High**
 
+**Evidence labels:** When a `FalseSharing` finding was derived from type-name heuristics (e.g. recognising `Mutex<T>` or `sync.Mutex`), the diagnostic message includes `(inferred from type names — add guard annotations or verify with profiling)`. When it was derived from explicit `GUARDED_BY` / `#[lock_protected_by]` / `// padlock:guard=` annotations, no label is shown — the finding is confirmed. See the annotation section below to convert inferred findings to confirmed ones.
+
 ### LocalityIssue
 
 Hot fields (accessed concurrently or frequently) are interleaved with cold fields (set once, rarely read). This wastes cache lines and pollutes the hot-path working set.
@@ -136,6 +138,8 @@ Hot fields (accessed concurrently or frequently) are interleaved with cold field
 Fix: group frequently-accessed fields at the start of the struct.
 
 Severity: **Medium**
+
+**Evidence labels:** When hot fields were identified by type-name heuristic, the diagnostic includes `(inferred from type names — verify with profiling)`. Explicit guard annotations remove this label.
 
 ## Annotating concurrent fields
 

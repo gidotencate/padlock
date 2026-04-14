@@ -84,7 +84,10 @@ pub fn run(
     if let Some(arch_name) = arch_name_override {
         let arch = padlock_core::arch::arch_by_name(arch_name).unwrap_or_else(|| {
             eprintln!("padlock: warning: unknown target/arch '{arch_name}', ignoring override");
-            layouts.first().map(|l| l.arch).unwrap_or(&padlock_core::arch::X86_64_SYSV)
+            layouts
+                .first()
+                .map(|l| l.arch)
+                .unwrap_or(&padlock_core::arch::X86_64_SYSV)
         });
         for layout in &mut layouts {
             layout.arch = arch;

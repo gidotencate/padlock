@@ -19,6 +19,8 @@ interface PadlockFinding {
   wasted_bytes?: number;
   savings?: number;
   gaps?: PadlockGap[];
+  /** True when the finding was derived from type-name heuristics rather than explicit annotations. */
+  is_inferred?: boolean;
 }
 
 interface PadlockStruct {
@@ -416,10 +418,14 @@ function formatFindingBrief(f: PadlockFinding, s: PadlockStruct): string {
     }
     case "ReorderSuggestion":
       return `reorder saves ${f.savings ?? 0}B → ${s.total_size - (f.savings ?? 0)}B total`;
-    case "FalseSharing":
-      return "concurrent fields share a cache line";
-    case "LocalityIssue":
-      return "hot/cold fields interleaved — group hot fields first";
+    case "FalseSharing": {
+      const inferred = f.is_inferred ? " _(inferred — verify with profiling or add guard annotations)_" : "";
+      return `concurrent fields share a cache line${inferred}`;
+    }
+    case "LocalityIssue": {
+      const inferred = f.is_inferred ? " _(inferred — verify with profiling)_" : "";
+      return `hot/cold fields interleaved — group hot fields first${inferred}`;
+    }
     default:
       return f.kind;
   }
@@ -661,16 +667,24 @@ function formatMessage(s: PadlockStruct, f: PadlockFinding): string {
         `(${s.total_size}B → ${s.total_size - (f.savings ?? 0)}B). ` +
         `Use 'padlock: Apply fix' or the lightbulb (⚡) to reorder.`
       );
-    case "FalseSharing":
+    case "FalseSharing": {
+      const inferred = f.is_inferred
+        ? " (inferred from type names — add guard annotations or verify with profiling)"
+        : "";
       return (
         `${s.struct_name}: false sharing — fields guarded by different locks ` +
-        `share a cache line. Consider separating with #[repr(align(64))].`
+        `share a cache line. Consider separating with #[repr(align(64))].${inferred}`
       );
-    case "LocalityIssue":
+    }
+    case "LocalityIssue": {
+      const inferred = f.is_inferred
+        ? " (inferred from type names — verify with profiling)"
+        : "";
       return (
         `${s.struct_name}: hot and cold fields are interleaved — ` +
-        `group frequently-accessed fields at the start of the struct.`
+        `group frequently-accessed fields at the start of the struct.${inferred}`
       );
+    }
     default:
       return `${s.struct_name}: ${f.kind} (score ${s.score})`;
   }

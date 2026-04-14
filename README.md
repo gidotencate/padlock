@@ -14,9 +14,9 @@ $ padlock analyze src/connection.rs
 Analyzed 2 structs — 10 bytes wasted across all structs
 
 [✗] Connection (src/connection.rs:4)  24B  fields=4  holes=2  score=33
-    [HIGH] Padding waste: 10B (41%) across 2 gap(s)
-    [HIGH] Reorder fields to save 8B → 16B: timeout, port, is_active, is_tls
-    [HIGH] False sharing: 1 cache-line conflict(s)
+    [HIGH] Padding waste: 10B (41%) — 7B after `is_active` (offset 1), 3B after `is_tls` (offset 13)
+    [HIGH] Reorder fields: 24B → 16B (saves 8B): timeout, port, is_active, is_tls  (~8 MB/1M instances)
+    [HIGH] False sharing: cache line 0: [read_mu, write_mu]  (inferred from type names — add guard annotations or verify with profiling)
 
 [✓] ConnectionOptimal (src/connection.rs:22)  16B  fields=4  score=100
     (no issues found)
@@ -32,13 +32,13 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 ── src/connection.rs ───────────────────────────────────────
 
 [✗] Connection :4  24B  fields=4  holes=2  score=33
-    [HIGH] Padding waste: 10B (41%) across 2 gap(s)
-    [HIGH] Reorder fields to save 8B → 16B: timeout, port, is_active, is_tls
+    [HIGH] Padding waste: 10B (41%) — 7B after `is_active` (offset 1), 3B after `is_tls` (offset 13)
+    [HIGH] Reorder fields: 24B → 16B (saves 8B): timeout, port, is_active, is_tls
 
 ── src/stats.cpp ───────────────────────────────────────────
 
 [✗] Stats :12  96B  fields=4  score=55
-    [HIGH] False sharing: 1 cache-line conflict(s)
+    [HIGH] False sharing: cache line 0: [read_mu, write_mu]
     [MEDIUM] Locality: hot [read_mu, write_mu] interleaved with cold [read_count, write_count]
 ```
 
@@ -48,14 +48,18 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 
 | Capability | Details |
 |---|---|
-| **Padding waste** | Finds gaps from poor field ordering; shows exact bytes wasted |
-| **Reorder suggestions** | Computes optimal declaration order; shows byte savings |
-| **False sharing** | Detects concurrent fields with different guards on the same cache line |
-| **Explicit guard annotation** | `#[lock_protected_by]`, `GUARDED_BY()`, `// padlock:guard=` — no more type-name guessing |
+| **Padding waste** | Finds gaps from poor field ordering; shows per-gap offset and size so you know exactly where to look |
+| **Reorder suggestions** | Computes optimal declaration order; shows before/after struct size and byte savings |
+| **False sharing** | Detects concurrent fields with different guards on the same cache line; shows field names involved |
+| **Evidence labels** | Findings from explicit annotations are confirmed; findings from type-name inference are labeled `(inferred — verify with profiling)` |
+| **Explicit guard annotation** | `#[lock_protected_by]`, `GUARDED_BY()`, `// padlock:guard=` — converts inferred findings to confirmed |
 | **Locality** | Flags hot/cold field interleaving that hurts cache utilisation |
 | **Scoring** | Each struct gets a 0–100 score (100 = no issues) |
 | **Multi-language** | C, C++, Rust, Go, Zig source; compiled binaries via DWARF/PDB/BTF |
-| **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64 |
+| **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64; `--target <triple>` for cross-arch analysis |
+| **repr(Rust) awareness** | Severity downgraded for repr(Rust) structs (compiler may already reorder); `--hide-repr-rust` excludes them entirely |
+| **Path exclusions** | `exclude_paths = ["proto/**", "vendor/**"]` in `.padlock.toml` skips generated or third-party files |
+| **ABI safety** | `padlock fix` warns before reordering fixed-layout structs (`repr(C)`, C, Go, Zig) that may break FFI or serialization |
 | **CI-ready** | SARIF output, `action.yml`, exit-code gating on high-severity findings |
 | **`cargo padlock`** | Cargo subcommand — builds your project then analyses the binary |
 | **Compile-time assertions** | `#[padlock::assert_no_padding]` / `#[padlock::assert_size(N)]` proc macros |
@@ -105,6 +109,12 @@ padlock analyze src/ --packable --sort-by waste
 
 # Only structs with at least 2 padding holes, matching a name pattern
 padlock analyze src/ --min-holes 2 --filter '^Hot'
+
+# Cross-architecture analysis (e.g. checking Apple Silicon cache-line layout)
+padlock analyze src/ --target aarch64-apple-darwin
+
+# Focus on fixed-layout types only (hide repr(Rust) approximations)
+padlock analyze src/ --hide-repr-rust
 
 # Cargo subcommand — build + analyze in one step
 cargo padlock
@@ -167,6 +177,8 @@ Flags:
 - `--sort-by score|size|waste|name` — sort order (default: score, worst first)
 - `--cache-line-size <N>` — override the assumed cache-line size in bytes (default: 64, or 128 on Apple Silicon). Useful for comparing performance across architectures or analysing structs for embedded targets with non-standard cache geometries.
 - `--word-size <N>` — override pointer/word size in bytes (e.g. `--word-size 4` for 32-bit targets). Affects all pointer-sized fields.
+- `--target <TRIPLE>` — set the target architecture using a Rust target triple or short name. Common values: `aarch64-apple-darwin` (Apple Silicon, 128-byte cache lines), `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `wasm32-unknown-unknown`. Overrides the `arch.override` setting in `.padlock.toml`.
+- `--hide-repr-rust` — exclude `repr(Rust)` structs from output entirely. Useful when you want to focus on types with a fixed binary layout (C, `repr(C)`, Go, Zig) where findings are fully accurate and directly actionable.
 - `--fail-on-severity high|medium|low` — exit non-zero when any finding meets or exceeds this severity. `high` is the default CI gate (same as exit-on-high-finding behaviour); `medium` and `low` tighten the gate further.
 
 ---
@@ -203,6 +215,7 @@ $ padlock summary src/
 Flags:
 - `--top <N>` — number of worst files and structs to show (default: 5)
 - `--cache-line-size <N>` / `--word-size <N>` — arch overrides
+- `--target <TRIPLE>` — set target architecture (see `analyze` flags)
 - `--filter` / `--exclude` — same pattern filters as `analyze`
 
 ---
@@ -249,6 +262,16 @@ $ padlock diff src/models.rs
 ### `padlock fix <path>… [--dry-run] [--filter PATTERN]`
 
 Shows the reorder diff and — without `--dry-run` — rewrites the source file in-place, saving a `.bak` backup first. Accepts directories and multiple files; `--filter` limits which structs are rewritten.
+
+**ABI safety warning:** Before rewriting any struct with a fixed binary layout (C structs, `repr(C)`, Go, Zig), padlock emits a warning to stderr:
+
+```
+padlock: warning: reordering fields in Connection, Stats will change the binary layout of a
+fixed-ABI type. This may break FFI boundaries, serialized data compatibility, or any code that
+assumes a specific field offset. Review all callers before applying.
+```
+
+`repr(Rust)` structs do not trigger this warning — the compiler already optimises their layout freely. Always audit callers and serialization code before applying fixes to fixed-ABI types.
 
 ---
 
@@ -307,6 +330,45 @@ Generates a `.padlock.toml` configuration file in the current directory with eve
 padlock init               # writes .padlock.toml (fails if it already exists)
 padlock init --force       # overwrites an existing config
 ```
+
+---
+
+## Configuration (`.padlock.toml`)
+
+Place a `.padlock.toml` file at the root of your project to set defaults for all commands. CLI flags always take precedence over the config file.
+
+```toml
+[padlock]
+# Skip generated or third-party files by glob (matched against source_file paths)
+exclude_paths = ["proto/**", "vendor/**", "third_party/**", "generated/**"]
+
+# Show only structs whose names match this regex (same as --filter)
+filter = ""
+
+# Exclude structs whose names match this regex (same as --exclude)
+exclude = "^__"
+
+# Skip structs smaller than this many bytes
+min_size = 0
+
+# Skip structs with fewer than this many padding gaps
+min_holes = 0
+
+# Default sort order: "score" | "size" | "waste" | "name"
+sort_by = "score"
+
+# Exit non-zero when any finding meets or exceeds this severity: "high" | "medium" | "low"
+fail_on_severity = "high"
+
+[arch]
+# Override the target architecture for source analysis.
+# Accepted values: "x86_64", "aarch64", "aarch64_apple", "wasm32", "riscv64",
+# or a full Rust target triple (e.g. "aarch64-apple-darwin").
+# Takes effect when no --target flag is passed on the CLI.
+override = ""
+```
+
+The `exclude_paths` globs are matched against the `source_file` field of each layout — relative paths as reported by the parser. Use `**` to match any number of path components, `*` for one component, and `?` for one character. Patterns are normalized to forward slashes before matching (so Windows paths work correctly).
 
 ---
 
@@ -551,7 +613,7 @@ For exact compiler-verified layout of any repr, use `padlock analyze target/debu
 | `wasm32` | 4 bytes | 64 bytes | WebAssembly |
 | `riscv64` | 8 bytes | 64 bytes | RISC-V 64-bit |
 
-The architecture is auto-detected from the host when analyzing source files. For binary analysis it is read from the binary's ELF/Mach-O/PE header.
+The architecture is auto-detected from the host when analyzing source files. For binary analysis it is read from the binary's ELF/Mach-O/PE header. Use `--target <triple>` to override for cross-compilation scenarios (e.g. `--target aarch64-apple-darwin` when building for Apple Silicon from a Linux CI host).
 
 ---
 
@@ -567,22 +629,22 @@ padlock run against popular open-source projects — layout issues that accumula
 
 **Rust / tokio — `ReadyEvent`, 58% waste:**
 ```
-[HIGH] Padding waste: 14B (58%) across 2 gap(s)
-[HIGH] Reorder fields to save 8B → 16B: ready, is_shutdown, tick  (~8 MB/1M instances)
+[HIGH] Padding waste: 14B (58%) — 7B after `tick` (offset 1), 7B after `is_shutdown` (offset 17)
+[HIGH] Reorder fields: 24B → 16B (saves 8B): ready, is_shutdown, tick  (~8 MB/1M instances)
 note: repr(Rust) — compiler may reorder fields; use binary analysis for actual layout
 ```
 
 **C / Redis — `multiState`, 20% waste** (layout is deterministic — no compiler reordering in C):
 ```
-[HIGH] Reorder fields to save 8B → 32B: argv_len_sums, commands, alloc_count, ...
+[HIGH] Reorder fields: 40B → 32B (saves 8B): argv_len_sums, commands, alloc_count, ...
 ```
 
 **Go / `database/sql.DB` — false sharing** (layout is deterministic — Go does not reorder fields):
 ```
-[HIGH]   False sharing: 3 cache-line conflict(s)
-[MEDIUM] Locality: hot [waitDuration, numClosed, mu] interleaved with cold [...]
+[HIGH]   False sharing: cache line 0: [waitDuration, numClosed, mu]  (inferred from type names — add guard annotations or verify with profiling)
+[MEDIUM] Locality: hot [waitDuration, numClosed, mu] interleaved with cold [connector, freeConn, ...]
 ```
-`waitDuration` and `numClosed` are atomic counters updated on every query. They share a cache line with `mu` — under concurrent load, atomic writes invalidate the line that other goroutines need to lock.
+`waitDuration` and `numClosed` are atomic counters updated on every query. They share a cache line with `mu` — under concurrent load, atomic writes invalidate the line that other goroutines need to lock. The finding is marked `(inferred)` because padlock recognised the field types as concurrent; adding `// padlock:guard=` annotations converts it to a confirmed finding.
 
 See **[docs/real-world-examples.md](docs/real-world-examples.md)** for full field-by-field layouts and fix examples for each language.
 

@@ -20,6 +20,12 @@ keywords    = ["performance", "memory", "layout", "analysis", "cache"]
 categories  = ["development-tools", "development-tools::profiling"]
 readme      = "README.md"
 
+[workspace.dependencies]
+padlock-core   = { path = "crates/padlock-core",   version = "0.9.5" }
+padlock-dwarf  = { path = "crates/padlock-dwarf",  version = "0.9.5" }
+padlock-source = { path = "crates/padlock-source", version = "0.9.5" }
+padlock-output = { path = "crates/padlock-output", version = "0.9.5" }
+
 [profile.release]
 lto   = "thin"
 strip = true

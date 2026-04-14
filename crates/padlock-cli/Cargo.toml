@@ -18,10 +18,10 @@ name = "cargo-padlock"
 path = "src/bin/cargo_padlock.rs"
 
 [dependencies]
-padlock-core   = { path = "../padlock-core",   version = "0.9.5" }
-padlock-dwarf  = { path = "../padlock-dwarf",  version = "0.9.5" }
-padlock-source = { path = "../padlock-source", version = "0.9.5" }
-padlock-output = { path = "../padlock-output", version = "0.9.5" }
+padlock-core   = { workspace = true }
+padlock-dwarf  = { workspace = true }
+padlock-source = { workspace = true }
+padlock-output = { workspace = true }
 serde          = { version = "1", features = ["derive"] }
 serde_json     = "1"
 regex          = "1"
@@ -40,7 +40,7 @@ tempfile     = "3"
 assert_cmd   = "2"
 predicates   = "3"
 serde_json   = "1"
-padlock-core = { path = "../padlock-core", version = "0.9.5", features = ["test-helpers"] }
+padlock-core = { workspace = true, features = ["test-helpers"] }
 
 [[test]]
 name = "cli"

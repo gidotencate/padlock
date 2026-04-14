@@ -15,7 +15,11 @@ edition       = "2024"
 rust-version  = "1.88"
 license     = "MIT OR Apache-2.0"
 repository  = "https://github.com/gidotencate/padlock"
-description = "Struct memory layout analyzer for C, C++, Rust, and Go"
+description = "Struct memory layout analyzer for C, C++, Rust, Go, and Zig"
 keywords    = ["performance", "memory", "layout", "analysis", "cache"]
 categories  = ["development-tools", "development-tools::profiling"]
 readme      = "README.md"
+
+[profile.release]
+lto   = "thin"
+strip = true

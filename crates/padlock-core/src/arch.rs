@@ -78,16 +78,108 @@ pub fn with_overrides(
     }))
 }
 
-/// Resolve an architecture name string to a static `ArchConfig` reference.
+/// Resolve an architecture name string or Rust target triple to a static `ArchConfig`.
 ///
-/// Accepted values: `x86_64`, `aarch64`, `aarch64_apple`, `wasm32`, `riscv64`.
+/// Short names: `x86_64`, `aarch64`, `aarch64_apple`, `wasm32`, `riscv64`.
+///
+/// Common Rust target triples are also accepted, for example:
+/// - `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`
+/// - `aarch64-unknown-linux-gnu`, `aarch64-linux-android`
+/// - `aarch64-apple-darwin`, `aarch64-apple-ios`
+/// - `wasm32-unknown-unknown`, `wasm32-wasi`
+/// - `riscv64gc-unknown-linux-gnu`
 pub fn arch_by_name(name: &str) -> Option<&'static ArchConfig> {
     match name {
+        // Short names (used in config files and existing code).
         "x86_64" => Some(&X86_64_SYSV),
         "aarch64" => Some(&AARCH64),
         "aarch64_apple" => Some(&AARCH64_APPLE),
         "wasm32" => Some(&WASM32),
         "riscv64" => Some(&RISCV64),
-        _ => None,
+        // Rust target triples — matched by prefix for flexibility.
+        _ => arch_by_triple(name),
+    }
+}
+
+/// Map a Rust target triple to an `ArchConfig`.
+pub fn arch_by_triple(triple: &str) -> Option<&'static ArchConfig> {
+    if triple.starts_with("x86_64-") {
+        Some(&X86_64_SYSV)
+    } else if triple.starts_with("aarch64-apple-") {
+        // Apple Silicon has a 128-byte cache line.
+        Some(&AARCH64_APPLE)
+    } else if triple.starts_with("aarch64-") {
+        Some(&AARCH64)
+    } else if triple.starts_with("wasm32-") {
+        Some(&WASM32)
+    } else if triple.starts_with("riscv64") {
+        Some(&RISCV64)
+    } else {
+        None
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_names_resolve() {
+        assert_eq!(arch_by_name("x86_64"), Some(&X86_64_SYSV));
+        assert_eq!(arch_by_name("aarch64"), Some(&AARCH64));
+        assert_eq!(arch_by_name("aarch64_apple"), Some(&AARCH64_APPLE));
+        assert_eq!(arch_by_name("wasm32"), Some(&WASM32));
+        assert_eq!(arch_by_name("riscv64"), Some(&RISCV64));
+    }
+
+    #[test]
+    fn target_triples_resolve() {
+        assert_eq!(
+            arch_by_name("x86_64-unknown-linux-gnu"),
+            Some(&X86_64_SYSV)
+        );
+        assert_eq!(
+            arch_by_name("x86_64-pc-windows-msvc"),
+            Some(&X86_64_SYSV)
+        );
+        assert_eq!(
+            arch_by_name("aarch64-unknown-linux-gnu"),
+            Some(&AARCH64)
+        );
+        assert_eq!(
+            arch_by_name("aarch64-linux-android"),
+            Some(&AARCH64)
+        );
+        // Apple targets get the 128-byte cache line config.
+        assert_eq!(
+            arch_by_name("aarch64-apple-darwin"),
+            Some(&AARCH64_APPLE)
+        );
+        assert_eq!(
+            arch_by_name("aarch64-apple-ios"),
+            Some(&AARCH64_APPLE)
+        );
+        assert_eq!(
+            arch_by_name("wasm32-unknown-unknown"),
+            Some(&WASM32)
+        );
+        assert_eq!(
+            arch_by_name("riscv64gc-unknown-linux-gnu"),
+            Some(&RISCV64)
+        );
+    }
+
+    #[test]
+    fn unknown_triple_returns_none() {
+        assert_eq!(arch_by_name("mips-unknown-linux-gnu"), None);
+        assert_eq!(arch_by_name("totally-bogus"), None);
+    }
+
+    #[test]
+    fn apple_aarch64_has_128_byte_cache_line() {
+        let cfg = arch_by_name("aarch64-apple-darwin").unwrap();
+        assert_eq!(cfg.cache_line_size, 128);
     }
 }

@@ -70,6 +70,7 @@ pub fn run(
     baseline_path: Option<&Path>,
     save_baseline: bool,
     json: bool,
+    target: Option<String>,
     filter: &FilterArgs,
 ) -> anyhow::Result<()> {
     let cfg = Config::for_path(paths.first().map(|p| p.as_path()).unwrap_or(Path::new(".")));
@@ -77,6 +78,19 @@ pub fn run(
     filter.apply_config_defaults(&cfg);
 
     let (mut layouts, analyzed) = collect_layouts(paths)?;
+
+    // Apply arch override: CLI --target takes precedence over config arch.override.
+    let arch_name_override = target.as_deref().or(cfg.arch_override.as_deref());
+    if let Some(arch_name) = arch_name_override {
+        let arch = padlock_core::arch::arch_by_name(arch_name).unwrap_or_else(|| {
+            eprintln!("padlock: warning: unknown target/arch '{arch_name}', ignoring override");
+            layouts.first().map(|l| l.arch).unwrap_or(&padlock_core::arch::X86_64_SYSV)
+        });
+        for layout in &mut layouts {
+            layout.arch = arch;
+        }
+    }
+
     layouts.retain(|l| {
         !cfg.is_ignored(&l.name)
             && !l

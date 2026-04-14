@@ -19,7 +19,14 @@ pub fn run(paths: &[PathBuf], filter: &FilterArgs) -> anyhow::Result<()> {
     let mut filter = filter.clone();
     filter.apply_config_defaults(&cfg);
     let (mut layouts, _) = collect_layouts(paths)?;
-    layouts.retain(|l| !cfg.is_ignored(&l.name));
+    layouts.retain(|l| {
+        !cfg.is_ignored(&l.name)
+            && !l
+                .source_file
+                .as_deref()
+                .map(|f| cfg.is_path_excluded(f))
+                .unwrap_or(false)
+    });
     filter.apply_to_layouts(&mut layouts)?;
 
     if layouts.is_empty() {

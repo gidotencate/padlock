@@ -61,8 +61,15 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
         }
     }
 
-    // Apply config ignore list, then CLI pre-filters (name, size, holes).
-    layouts.retain(|l| !cfg.is_ignored(&l.name));
+    // Apply config ignore list and path exclusions, then CLI pre-filters (name, size, holes).
+    layouts.retain(|l| {
+        !cfg.is_ignored(&l.name)
+            && !l
+                .source_file
+                .as_deref()
+                .map(|f| cfg.is_path_excluded(f))
+                .unwrap_or(false)
+    });
     filter.apply_to_layouts(&mut layouts)?;
 
     // Run all analysis passes.

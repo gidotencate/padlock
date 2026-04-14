@@ -139,10 +139,17 @@ fn main() -> anyhow::Result<()> {
     // Load config from current directory (project root where cargo padlock is run).
     let cfg = Config::load_from(&std::env::current_dir().unwrap_or_default());
 
-    // Filter ignored structs
+    // Filter ignored structs and excluded paths
     let layouts: Vec<_> = layouts
         .into_iter()
-        .filter(|l| !cfg.is_ignored(&l.name))
+        .filter(|l| {
+            !cfg.is_ignored(&l.name)
+                && !l
+                    .source_file
+                    .as_deref()
+                    .map(|f| cfg.is_path_excluded(f))
+                    .unwrap_or(false)
+        })
         .collect();
 
     let report = padlock_core::findings::Report::from_layouts(&layouts);

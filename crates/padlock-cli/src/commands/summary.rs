@@ -52,8 +52,15 @@ pub fn run(
     let mut filter = filter.clone();
     filter.apply_config_defaults(&cfg);
 
-    // Apply config ignore list, then CLI pre-filters.
-    layouts.retain(|l| !cfg.is_ignored(&l.name));
+    // Apply config ignore list and path exclusions, then CLI pre-filters.
+    layouts.retain(|l| {
+        !cfg.is_ignored(&l.name)
+            && !l
+                .source_file
+                .as_deref()
+                .map(|f| cfg.is_path_excluded(f))
+                .unwrap_or(false)
+    });
     filter.apply_to_layouts(&mut layouts)?;
 
     // Run all analysis passes.

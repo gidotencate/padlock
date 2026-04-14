@@ -70,6 +70,10 @@ pub struct Config {
     /// Exit non-zero when any finding meets this severity: "high" | "medium" | "low".
     /// CLI `--fail-on-severity` overrides this when provided.
     pub fail_on_severity: Option<Severity>,
+    /// Glob patterns matched against each layout's `source_file`.
+    /// Layouts whose source path matches any pattern are excluded from all output.
+    /// Example: `["proto/**", "vendor/**", "generated/**"]`
+    pub exclude_paths: Vec<String>,
 }
 
 impl Default for Config {
@@ -86,6 +90,7 @@ impl Default for Config {
             min_holes: None,
             sort_by: None,
             fail_on_severity: None,
+            exclude_paths: Vec::new(),
         }
     }
 }
@@ -200,6 +205,16 @@ impl Config {
             .and_then(|v| v.as_str())
             .and_then(parse_severity);
 
+        let exclude_paths = padlock
+            .and_then(|p| p.get("exclude_paths"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Some(Self {
             min_severity,
             fail_below,
@@ -212,12 +227,28 @@ impl Config {
             min_holes,
             sort_by,
             fail_on_severity,
+            exclude_paths,
         })
     }
 
     /// Returns true if a struct with the given name should be suppressed.
     pub fn is_ignored(&self, struct_name: &str) -> bool {
         self.ignore.iter().any(|n| n == struct_name)
+    }
+
+    /// Returns true if a layout's source path matches any `exclude_paths` glob pattern.
+    /// `path` is matched as-is (forward-slash separated) against each pattern.
+    pub fn is_path_excluded(&self, path: &str) -> bool {
+        if self.exclude_paths.is_empty() {
+            return false;
+        }
+        // Normalise to forward slashes so patterns work on all platforms.
+        let normalised = path.replace('\\', "/");
+        self.exclude_paths.iter().any(|pat| {
+            glob::Pattern::new(pat)
+                .map(|g| g.matches(&normalised))
+                .unwrap_or(false)
+        })
     }
 
     /// Returns true if a finding with the given severity should be reported.
@@ -442,5 +473,43 @@ fail_on_severity  = "high"
     fn load_from_nonexistent_dir_returns_default() {
         let cfg = Config::load_from(Path::new("/tmp/__padlock_no_such_dir__"));
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn parse_exclude_paths() {
+        let content = r#"
+[padlock]
+exclude_paths = ["proto/**", "vendor/**"]
+"#;
+        let f = write_config(content);
+        let cfg = Config::load_file(f.path()).unwrap();
+        assert_eq!(cfg.exclude_paths, vec!["proto/**", "vendor/**"]);
+    }
+
+    #[test]
+    fn is_path_excluded_matches_glob() {
+        let cfg = Config {
+            exclude_paths: vec!["proto/**".into(), "vendor/**".into()],
+            ..Config::default()
+        };
+        assert!(cfg.is_path_excluded("proto/foo/bar.go"));
+        assert!(cfg.is_path_excluded("vendor/github.com/pkg/pkg.go"));
+        assert!(!cfg.is_path_excluded("src/main.rs"));
+    }
+
+    #[test]
+    fn is_path_excluded_empty_patterns_never_excludes() {
+        let cfg = Config::default();
+        assert!(!cfg.is_path_excluded("proto/foo/bar.go"));
+    }
+
+    #[test]
+    fn is_path_excluded_normalises_backslashes() {
+        let cfg = Config {
+            exclude_paths: vec!["proto/**".into()],
+            ..Config::default()
+        };
+        // Windows-style path should still match.
+        assert!(cfg.is_path_excluded("proto\\foo\\bar.go"));
     }
 }

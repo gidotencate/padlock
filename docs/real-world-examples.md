@@ -6,14 +6,16 @@ padlock run against popular open-source projects — all findings reflect declar
 
 ## Summary
 
-| Project | Language | Version | Structs | Wasted | Score | Notable |
-|---|---|---|---|---|---|---|
-| [tokio](https://tokio.rs) | Rust | 1.51.1 | 367 | 485B | 91/100 A¹ | `TraceStatus` — score 48, false sharing |
-| [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | — | `multiState` — 20% waste, saves 8B |
-| [Go net + database](https://pkg.go.dev) | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53 |
-| Linux kernel `net/` | C | 6.x | 2 066 | 5 093B | 84/100 B | `virtio_vsock` — score 45, all 4 finding types |
+| Project | Language | Version | Structs | Wasted | Score | Notable | Status |
+|---|---|---|---|---|---|---|---|
+| [tokio](https://tokio.rs) | Rust | 1.51.1 | 367 | 485B | 91/100 A¹ | `TraceStatus` — score 48, false sharing | — |
+| [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | — | `multiState` — 20% waste, saves 8B | — |
+| [Go net + database](https://pkg.go.dev) | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53 | Fixes submitted upstream² |
+| Linux kernel `net/` | C | 6.x | 2 066 | 5 093B | 84/100 B | `virtio_vsock` — score 45, all 4 finding types | — |
 
 ¹ repr(Rust) structs are severity-downgraded (compiler may already reorder). Use `--hide-repr-rust` to focus on ABI-stable findings only. The per-struct average score is 91; the weighted project score is higher due to the majority of clean small structs.
+
+² Three CLs submitted to the Go standard library based on padlock findings — see [CL 767580](https://go-review.googlesource.com/c/go/+/767580), [CL 767600](https://go-review.googlesource.com/c/go/+/767600), [CL 767581](https://go-review.googlesource.com/c/go/+/767581). Pending review.
 
 The Go stdlib score is B (86/100) across 607 structs. 71% are clean; 12% have High findings — almost all from false sharing between atomic and mutex-protected fields rather than padding waste.
 
@@ -242,6 +244,8 @@ type DB struct {
 }
 ```
 
+> **Fix submitted upstream:** [CL 767580](https://go-review.googlesource.com/c/go/+/767580) — adds `_ [48]byte` padding between `numClosed` and `mu`, separating the hot atomics onto their own cache line. Pending review for Go 1.x.
+
 ### `net/http.Transport` — false sharing across 4 cache lines
 
 `http.Transport` is the client-side connection pool that every `http.Client` uses. It shows the most complex false-sharing pattern in the standard library: 4 cache-line conflicts, 16 bytes of padding waste, and a 240-byte struct that padlock can shrink to 224 bytes:
@@ -264,6 +268,25 @@ The layout (abridged):
 ```
 
 `idleMu`, `reqMu`, `altMu`, and `connsPerHostMu` are all mutexes that are locked on every connection request — but they live across two different cache lines (0 and 1), so locking any one of them can invalidate the line that holds another.
+
+> **Fix submitted upstream (partial):** [CL 767600](https://go-review.googlesource.com/c/go/+/767600) — adds `_ [16]byte` padding after `idleLRU` to push `reqMu` onto cache line 1, eliminating the CL0 `idleMu`/`reqMu` conflict. The CL1 `altMu`/`connsPerHostMu` conflict is a separate finding. Pending review for Go 1.x.
+
+### `net/http.response` — 22 bytes of alignment padding waste
+
+The unexported `response` struct is allocated on every `ServeHTTP` call. Bool fields interleaved with pointer-sized and int64-sized fields create five padding holes totalling 22 bytes:
+
+```
+$ padlock analyze /usr/lib/go-1.22/src/net/http/server.go --filter '^response$'
+
+[✗] response  232B  fields=22  score=61
+    [MEDIUM] Padding waste: 22B (9%) — 1B after `wantsClose` (offset 42), 7B after `calledHeader`,
+             5B after `requestBodyLimitHit`, 2B after `statusBuf`, 7B trailing
+    [HIGH]   Reorder fields: 232B → 216B (saves 16B)  (~16 MB/1M instances)
+```
+
+At 100 000 req/s the current layout wastes 1.6 MB/s of heap allocation compared to the optimal order, directly increasing GC frequency.
+
+> **Fix submitted upstream:** [CL 767581](https://go-review.googlesource.com/c/go/+/767581) — reorders fields by alignment class (pointers/interfaces, mutexes, int64, bool, byte buffers), eliminating all five padding holes. Pending review for Go 1.x.
 
 ---
 

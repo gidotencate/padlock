@@ -162,10 +162,10 @@ impl FilterArgs {
             }),
             SortBy::Size => report
                 .structs
-                .sort_by(|a, b| b.total_size.cmp(&a.total_size)),
+                .sort_by_key(|s| std::cmp::Reverse(s.total_size)),
             SortBy::Waste => report
                 .structs
-                .sort_by(|a, b| b.wasted_bytes.cmp(&a.wasted_bytes)),
+                .sort_by_key(|s| std::cmp::Reverse(s.wasted_bytes)),
             SortBy::Name => report
                 .structs
                 .sort_by(|a, b| a.struct_name.cmp(&b.struct_name)),

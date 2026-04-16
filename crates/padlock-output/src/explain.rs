@@ -375,6 +375,7 @@ mod tests {
             is_union: false,
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
+            uncertain_fields: Vec::new(),
         };
         let out = render_explain(&big);
         assert!(
@@ -448,6 +449,7 @@ mod tests {
             is_union: false,
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
+            uncertain_fields: Vec::new(),
         };
         let out = render_explain(&big);
         // field 'b' starts at offset 64 → cache line 1

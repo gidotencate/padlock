@@ -1527,6 +1527,7 @@ mod tests {
             is_union: false,
             is_repr_rust: false,
             suppressed_findings: vec![],
+            uncertain_fields: Vec::new(),
         };
         let fixed = apply_fixes_go(src, &[&layout]);
         // X (int64, align 8) must appear before Flag (bool, align 1)

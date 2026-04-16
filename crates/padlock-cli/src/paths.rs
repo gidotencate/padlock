@@ -95,11 +95,15 @@ pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, 
             analyzed.push(path.display().to_string());
             all_layouts.extend(layouts);
         } else {
-            // Binary — try BTF first (eBPF objects), then fall back to DWARF.
+            // Binary — try BTF first (eBPF objects and raw BTF files), then DWARF.
             let data = std::fs::read(path)?;
             let arch = padlock_dwarf::reader::detect_arch(&data)
                 .unwrap_or_else(|_| padlock_dwarf::reader::detect_arch_from_host());
-            let layouts = if has_btf_section(&data) {
+            let layouts = if is_raw_btf(&data) {
+                // Raw BTF file (not an ELF container): `.btf` files produced by
+                // `bpftool btf dump`, `/sys/kernel/btf/vmlinux`, etc.
+                padlock_dwarf::btf::extract_from_btf(&data, arch)?
+            } else if has_btf_section(&data) {
                 extract_btf_layouts(&data, arch)?
             } else {
                 let dwarf = padlock_dwarf::reader::load(&data)?;
@@ -149,6 +153,22 @@ fn walk_inner(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Returns `true` when `data` is a raw BTF blob (not an ELF container).
+///
+/// A raw BTF file starts with the BTF magic `0xEB9F` (little-endian u16) and is
+/// *not* an ELF file (which starts with `\x7FELF`).  Raw BTF blobs are produced
+/// by tools such as `bpftool btf dump file <obj> format raw` and are also exposed
+/// by the kernel at `/sys/kernel/btf/vmlinux`.
+fn is_raw_btf(data: &[u8]) -> bool {
+    const BTF_MAGIC: u16 = 0xEB9F;
+    const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+    if data.len() < 4 {
+        return false;
+    }
+    let magic = u16::from_le_bytes([data[0], data[1]]);
+    magic == BTF_MAGIC && data[..4] != ELF_MAGIC
 }
 
 /// Returns `true` if the binary data contains a `.BTF` ELF section.
@@ -290,5 +310,67 @@ mod tests {
         let (layouts, _) = collect_layouts(&[a, b]).unwrap();
         assert!(layouts.iter().any(|l| l.name == "A"));
         assert!(layouts.iter().any(|l| l.name == "B"));
+    }
+
+    // ── is_raw_btf ────────────────────────────────────────────────────────────
+
+    /// Build a minimal valid raw BTF header (just enough for magic detection).
+    fn raw_btf_header() -> Vec<u8> {
+        // BTF_MAGIC = 0xEB9F, stored little-endian → bytes [0x9F, 0xEB]
+        let mut data = vec![0u8; 24];
+        data[0] = 0x9F;
+        data[1] = 0xEB;
+        data
+    }
+
+    #[test]
+    fn is_raw_btf_detects_btf_magic() {
+        assert!(
+            is_raw_btf(&raw_btf_header()),
+            "valid BTF magic must be detected"
+        );
+    }
+
+    #[test]
+    fn is_raw_btf_rejects_elf_binary() {
+        // ELF files start with \x7FELF — must never be treated as raw BTF even
+        // if (by coincidence) the first two bytes happened to match the BTF magic.
+        let elf_header = b"\x7FELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        assert!(
+            !is_raw_btf(elf_header),
+            "ELF binary must not be detected as raw BTF"
+        );
+    }
+
+    #[test]
+    fn is_raw_btf_rejects_arbitrary_data() {
+        assert!(
+            !is_raw_btf(b"not btf data at all"),
+            "arbitrary data must not be detected as BTF"
+        );
+        assert!(
+            !is_raw_btf(b"\x00\x00\x00\x00"),
+            "zero bytes must not be detected as BTF"
+        );
+    }
+
+    #[test]
+    fn is_raw_btf_rejects_too_short_data() {
+        assert!(!is_raw_btf(&[]), "empty data must return false");
+        assert!(!is_raw_btf(&[0x9F]), "1 byte must return false");
+        assert!(!is_raw_btf(&[0x9F, 0xEB]), "2 bytes must return false");
+        assert!(
+            !is_raw_btf(&[0x9F, 0xEB, 0x01]),
+            "3 bytes must return false"
+        );
+    }
+
+    #[test]
+    fn is_raw_btf_accepts_minimal_4_byte_btf() {
+        // Exactly 4 bytes with BTF magic is the minimum accepted (no ELF header possible)
+        assert!(
+            is_raw_btf(&[0x9F, 0xEB, 0x00, 0x00]),
+            "4-byte BTF magic must be detected"
+        );
     }
 }

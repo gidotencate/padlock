@@ -908,7 +908,8 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | C / C++ | `__attribute__((packed))` structs and classes | no inter-field padding inserted; struct alignment set to 1 |
 | Rust | All primitive types (`u8`–`u128`, `i8`–`i128`, `f16`, `f32`, `f64`, `f128`, `usize`, `isize`, `char`, `bool`), `repr(C)`, `repr(packed)`, `repr(transparent)`, `repr(align(N))` | |
 | Rust stdlib | `Vec`, `String`, `Box`, `Arc`, `Rc`, all `AtomicXxx`, `PhantomData`, `Duration`, channels, smart pointers, all `NonZeroXxx` | size is independent of type parameter `T` |
-| Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words), `complex128` | |
+| Rust stdlib | Transparent newtypes: `Cell<T>`, `MaybeUninit<T>`, `UnsafeCell<T>`, `Wrapping<T>`, `Saturating<T>`, `ManuallyDrop<T>` | sized as inner `T` |
+| Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words), `complex128`, locally-declared named interfaces | qualified cross-package types (e.g. `io.Reader`) flagged as uncertain |
 | Zig | All standard integer/float types, C interop types (`c_int`, `c_uint`, `c_long`, etc.), arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) | arbitrary-width sizes use `ceil(N/8)` bytes, aligned to next power-of-two (capped at 8) |
 
 ### What source analysis skips (instead of showing wrong data)
@@ -916,14 +917,14 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | Case | Action | Accurate alternative |
 |---|---|---|
 | C/C++ structs with bit-field members | Skipped | Binary (DWARF) analysis |
+| C++ template structs/classes/unions (`template<typename T> struct Foo`) | Skipped | Binary analysis; or analyse concrete instantiations |
 | Rust generic struct definitions (`struct Foo<T>`) | Skipped | Binary analysis; or analyse concrete monomorphizations |
 | Forward-declared / incomplete structs | Skipped | Binary analysis |
 
 ### Known remaining limitations (source analysis)
 
-- **C++ templates** — unknown type parameters fall through to pointer-size; the struct is analyzed but may show approximate sizes.
 - **Rust enums with data variants** (`enum Foo { A(u64), B { x: u32 } }`) — not modeled; only plain structs are analyzed.
-- **Go named interface fields** (`io.Reader`, custom interfaces) — reported as 2 words (like `interface{}`/`any`), which is correct for the runtime representation.
+- **Go qualified interface fields** (`io.Reader`, `driver.Connector`, etc.) — cross-package interface types cannot be resolved from source alone; these fields are flagged as `uncertain` in output and sized as 2 words (the correct runtime representation). Use binary analysis for certainty.
 - **`#pragma pack(N)` on C/C++ structs** — only `__attribute__((packed))` (GCC/Clang style) is detected from source; MSVC-style `#pragma pack` is not. Use binary analysis for accuracy on MSVC-compiled code.
 - **`wchar_t` on Windows** — padlock treats `wchar_t` as 4 bytes (POSIX/GCC). On MSVC Windows targets it is 2 bytes. Use binary analysis for Windows builds.
 - **Rust const-expression padding** (`[u8; 64 - size_of::<Mutex<u64>>()]`) — the expression is not evaluated; the field gets pointer-size as a default.

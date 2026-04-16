@@ -374,10 +374,8 @@ fn parse_class_specifier(
                 }
             }
             "field_declaration_list" => body_node = Some(child),
-            "attribute_specifier" => {
-                if source[child.byte_range()].contains("packed") {
-                    is_packed = true;
-                }
+            "attribute_specifier" if source[child.byte_range()].contains("packed") => {
+                is_packed = true;
             }
             // C++11 class-level alignas: `class alignas(64) Name { ... };`
             "alignas_qualifier" | "alignas_specifier" => {

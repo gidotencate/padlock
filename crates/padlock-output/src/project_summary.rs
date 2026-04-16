@@ -127,11 +127,10 @@ pub fn render_summary(input: &SummaryInput<'_>) -> String {
 
     // Severity distribution bar chart
     let bar = |n: usize| {
-        let filled = if total > 0 {
-            (n * bar_width / total).min(bar_width)
-        } else {
-            0
-        };
+        let filled = (n * bar_width)
+            .checked_div(total)
+            .unwrap_or(0)
+            .min(bar_width);
         let empty = bar_width - filled;
         format!("{}{}", "█".repeat(filled), "░".repeat(empty))
     };

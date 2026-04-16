@@ -378,10 +378,8 @@ fn parse_class_specifier(
                 is_packed = true;
             }
             // C++11 class-level alignas: `class alignas(64) Name { ... };`
-            "alignas_qualifier" | "alignas_specifier" => {
-                if struct_alignas.is_none() {
-                    struct_alignas = parse_alignas_value(source, child);
-                }
+            "alignas_qualifier" | "alignas_specifier" if struct_alignas.is_none() => {
+                struct_alignas = parse_alignas_value(source, child);
             }
             _ => {}
         }
@@ -718,10 +716,8 @@ fn parse_struct_or_union_specifier(
             }
             // C++11 struct-level alignas: `struct alignas(64) Name { ... };`
             // tree-sitter-cpp: `alignas_qualifier` as direct child of struct_specifier
-            "alignas_qualifier" | "alignas_specifier" => {
-                if struct_alignas.is_none() {
-                    struct_alignas = parse_alignas_value(source, child);
-                }
+            "alignas_qualifier" | "alignas_specifier" if struct_alignas.is_none() => {
+                struct_alignas = parse_alignas_value(source, child);
             }
             _ => {}
         }
@@ -1064,23 +1060,18 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
             }
             // C++11 alignas: tree-sitter-cpp wraps it as type_qualifier → alignas_qualifier
             // Also handle the direct form in case grammar versions differ.
-            "alignas_qualifier" | "alignas_specifier" => {
-                if alignas_override.is_none() {
-                    alignas_override = parse_alignas_value(source, child);
-                }
+            "alignas_qualifier" | "alignas_specifier" if alignas_override.is_none() => {
+                alignas_override = parse_alignas_value(source, child);
             }
             // type_qualifier wraps alignas_qualifier for field declarations:
             // `alignas(8) char c;` → type_qualifier { alignas_qualifier { ... } }
-            "type_qualifier" => {
-                if alignas_override.is_none() {
-                    for j in 0..child.child_count() {
-                        if let Some(sub) = child.child(j)
-                            && (sub.kind() == "alignas_qualifier"
-                                || sub.kind() == "alignas_specifier")
-                        {
-                            alignas_override = parse_alignas_value(source, sub);
-                            break;
-                        }
+            "type_qualifier" if alignas_override.is_none() => {
+                for j in 0..child.child_count() {
+                    if let Some(sub) = child.child(j)
+                        && (sub.kind() == "alignas_qualifier" || sub.kind() == "alignas_specifier")
+                    {
+                        alignas_override = parse_alignas_value(source, sub);
+                        break;
                     }
                 }
             }

@@ -109,6 +109,12 @@ pub struct StructReport {
     /// Mirrors `StructLayout::is_repr_rust`. When true, findings describe
     /// declared-order waste; the compiler may have already eliminated it.
     pub is_repr_rust: bool,
+    /// Field names whose type size could not be accurately determined from
+    /// source alone (e.g. a qualified Go type like `driver.Connector` whose
+    /// package is not in the analyzed source set).  When non-empty, padding
+    /// and reorder findings on this struct may be inaccurate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncertain_fields: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -266,6 +272,7 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
         score,
         findings,
         is_repr_rust: layout.is_repr_rust,
+        uncertain_fields: layout.uncertain_fields.clone(),
     }
 }
 

@@ -5,6 +5,7 @@
 
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+use std::collections::HashSet;
 use tree_sitter::{Node, Parser};
 
 // ── type resolution ───────────────────────────────────────────────────────────
@@ -25,15 +26,72 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
             (arch.pointer_size, arch.pointer_size)
         }
         ty if ty.starts_with('*') => (arch.pointer_size, arch.pointer_size),
-        // Interface types: two-word fat pointer (type pointer + data pointer)
-        "error" | "interface{}" | "any" => (arch.pointer_size * 2, arch.pointer_size),
+        // Interface types: two-word fat pointer (type pointer + data pointer).
+        // `error` and `any` are the two universally-known interface names; inline
+        // anonymous interface bodies (`interface{ Method() }`) are caught by the
+        // `starts_with("interface")` arm.
+        //
+        // Locally-declared named interfaces (e.g. `type Reader interface { … }`) are
+        // resolved to 16B by `parse_struct_type` using the phase-1 interface name set
+        // collected by `collect_go_interface_names` — they do not reach this function.
+        //
+        // Qualified names from external packages (e.g. `io.Reader`, `driver.Connector`)
+        // fall through to the `_` arm (pointer_size) and are flagged as `uncertain_fields`
+        // by `parse_struct_type` so the output layer can warn the user.
+        "error" | "any" => (arch.pointer_size * 2, arch.pointer_size),
+        ty if ty.starts_with("interface") => (arch.pointer_size * 2, arch.pointer_size),
         _ => (arch.pointer_size, arch.pointer_size),
     }
+}
+
+// ── phase-1: local interface name collection ──────────────────────────────────
+
+/// Scan a Go source tree for `type X interface { ... }` declarations and
+/// return the set of locally-defined interface names.
+///
+/// These names are used in `parse_struct_type` to size named-interface fields
+/// as two-word fat pointers (type-pointer + data-pointer, 16 bytes on 64-bit)
+/// instead of falling through to the generic pointer-sized unknown catch-all.
+fn collect_go_interface_names(source: &str, root: Node<'_>) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        for i in (0..node.child_count()).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+        if node.kind() != "type_spec" {
+            continue;
+        }
+        // type_spec: name=type_identifier, type=interface_type
+        let mut iface_name: Option<String> = None;
+        let mut is_interface = false;
+        for i in 0..node.child_count() {
+            let Some(child) = node.child(i) else { continue };
+            match child.kind() {
+                "type_identifier" => {
+                    iface_name = Some(source[child.byte_range()].to_string());
+                }
+                "interface_type" => {
+                    is_interface = true;
+                }
+                _ => {}
+            }
+        }
+        if is_interface && let Some(name) = iface_name {
+            names.insert(name);
+        }
+    }
+    names
 }
 
 // ── tree-sitter walker ────────────────────────────────────────────────────────
 
 fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> Vec<StructLayout> {
+    // Phase 1: collect locally-defined interface names for accurate fat-pointer sizing.
+    let local_interfaces = collect_go_interface_names(source, root);
+
     let mut layouts = Vec::new();
     let mut stack = vec![root];
 
@@ -46,7 +104,7 @@ fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> V
 
         // type_declaration → type_spec → struct_type
         if node.kind() == "type_declaration"
-            && let Some(layout) = parse_type_declaration(source, node, arch)
+            && let Some(layout) = parse_type_declaration(source, node, arch, &local_interfaces)
         {
             layouts.push(layout);
         }
@@ -58,6 +116,7 @@ fn parse_type_declaration(
     source: &str,
     node: Node<'_>,
     arch: &'static ArchConfig,
+    local_interfaces: &HashSet<String>,
 ) -> Option<StructLayout> {
     let source_line = node.start_position().row as u32 + 1;
     let decl_start_byte = node.start_byte();
@@ -65,7 +124,14 @@ fn parse_type_declaration(
     for i in 0..node.child_count() {
         let child = node.child(i)?;
         if child.kind() == "type_spec" {
-            return parse_type_spec(source, child, arch, source_line, decl_start_byte);
+            return parse_type_spec(
+                source,
+                child,
+                arch,
+                source_line,
+                decl_start_byte,
+                local_interfaces,
+            );
         }
     }
     None
@@ -77,6 +143,7 @@ fn parse_type_spec(
     arch: &'static ArchConfig,
     source_line: u32,
     decl_start_byte: usize,
+    local_interfaces: &HashSet<String>,
 ) -> Option<StructLayout> {
     let mut name: Option<String> = None;
     let mut struct_node: Option<Node> = None;
@@ -99,6 +166,7 @@ fn parse_type_spec(
         arch,
         source_line,
         decl_start_byte,
+        local_interfaces,
     )
 }
 
@@ -109,6 +177,7 @@ fn parse_struct_type(
     arch: &'static ArchConfig,
     source_line: u32,
     decl_start_byte: usize,
+    local_interfaces: &HashSet<String>,
 ) -> Option<StructLayout> {
     let mut raw_fields: Vec<(String, String, Option<String>, u32)> = Vec::new();
 
@@ -132,9 +201,28 @@ fn parse_struct_type(
     let mut offset = 0usize;
     let mut struct_align = 1usize;
     let mut fields: Vec<Field> = Vec::new();
+    let mut uncertain_fields: Vec<String> = Vec::new();
 
     for (fname, ty_name, guard, field_line) in raw_fields {
-        let (size, align) = go_type_size_align(&ty_name, arch);
+        let (mut size, mut align) = go_type_size_align(&ty_name, arch);
+
+        // Override: a locally-declared interface type is a fat pointer (16B on 64-bit).
+        // go_type_size_align does not know about local names, so we patch here.
+        if local_interfaces.contains(ty_name.as_str()) {
+            size = arch.pointer_size * 2;
+            align = arch.pointer_size;
+        }
+
+        // Qualified types (e.g. `driver.Connector`, `io.Reader`) come from external
+        // packages. Without type information we cannot determine whether they are
+        // interfaces (16B fat pointer) or structs (arbitrary size). Flag them as
+        // uncertain so the output layer can warn the user.
+        let is_pointer = ty_name.starts_with('*');
+        let base_ty = ty_name.trim_start_matches('*');
+        if !is_pointer && base_ty.contains('.') {
+            uncertain_fields.push(fname.clone());
+        }
+
         if align > 0 {
             offset = offset.next_multiple_of(align);
         }
@@ -183,6 +271,7 @@ fn parse_struct_type(
             source,
             decl_start_byte,
         ),
+        uncertain_fields,
     })
 }
 
@@ -463,6 +552,114 @@ type Safe struct {
         assert_eq!(l.fields[0].size, 16);
         assert_eq!(l.fields[1].offset, 16);
         assert_eq!(l.total_size, 24);
+    }
+
+    #[test]
+    fn inline_interface_with_methods_is_two_words() {
+        // An anonymous interface with methods (e.g. `interface{ Close() error }`) is a
+        // two-word fat pointer — same as `interface{}`.  The tree-sitter node kind is
+        // `interface_type` in both cases so the `ty.starts_with("interface")` match handles
+        // all inline interface bodies.
+        let src = "package p\ntype S struct { Conn interface{ Close() error } }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 16);
+        assert_eq!(layouts[0].fields[0].align, 8);
+    }
+
+    #[test]
+    fn named_cross_package_interface_falls_back_to_pointer_size() {
+        // Named interfaces from other packages (driver.Connector, io.ReadCloser, …)
+        // appear in the AST as `qualified_type` nodes with text like "driver.Connector".
+        // Without go/types resolution we cannot distinguish an interface from a concrete
+        // struct, so they fall back to pointer_size (8B on x86-64) — the same as an
+        // opaque pointer.  This is a known source-analysis limitation; binary (DWARF)
+        // analysis always returns the correct compiler layout.
+        let src = "package p\ntype DB struct { connector driver.Connector }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        // Known limitation: reports 8B, not the actual 16B.
+        assert_eq!(
+            layouts[0].fields[0].size, 8,
+            "named cross-package interface falls back to pointer_size (known limitation)"
+        );
+        // The field must be flagged as uncertain so the output layer can warn the user.
+        assert!(
+            layouts[0]
+                .uncertain_fields
+                .contains(&"connector".to_string()),
+            "qualified-type field should be in uncertain_fields"
+        );
+    }
+
+    // ── local interface type resolution ───────────────────────────────────────
+
+    #[test]
+    fn local_interface_field_is_fat_pointer() {
+        // A named interface declared in the same file must be sized as a two-word
+        // fat pointer (16B on 64-bit), not as a single pointer (8B).
+        let src = r#"package p
+type Reader interface {
+    Read(p []byte) (n int, err error)
+}
+type Buf struct {
+    R Reader
+    N int32
+}
+"#;
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Buf").expect("Buf");
+        let r = l.fields.iter().find(|f| f.name == "R").expect("R field");
+        assert_eq!(
+            r.size, 16,
+            "local interface must be sized as 16B fat pointer"
+        );
+        assert_eq!(r.align, 8);
+    }
+
+    #[test]
+    fn local_interface_field_not_marked_uncertain() {
+        // A locally-declared interface is resolved; it must NOT appear in uncertain_fields.
+        let src = r#"package p
+type Closer interface { Close() error }
+type File struct { C Closer }
+"#;
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "File").expect("File");
+        assert!(
+            !l.uncertain_fields.contains(&"C".to_string()),
+            "local interface field must not be uncertain"
+        );
+    }
+
+    #[test]
+    fn qualified_type_field_marked_uncertain() {
+        // A qualified type (e.g. `io.Reader`) from an external package cannot be
+        // resolved without go/types; the field must appear in uncertain_fields.
+        let src = "package p\ntype S struct { R io.Reader; N int32 }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert!(
+            l.uncertain_fields.contains(&"R".to_string()),
+            "qualified-type field must be in uncertain_fields"
+        );
+        // Non-qualified field must not be uncertain
+        assert!(
+            !l.uncertain_fields.contains(&"N".to_string()),
+            "plain int32 field must not be uncertain"
+        );
+    }
+
+    #[test]
+    fn pointer_to_qualified_type_not_uncertain() {
+        // `*pkg.Type` is an explicit pointer — size is always pointer_size (8B).
+        // No need to flag it as uncertain since the pointer indirection makes the
+        // type's internal layout irrelevant for padding analysis.
+        let src = "package p\ntype S struct { P *io.Reader }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert!(
+            !l.uncertain_fields.contains(&"P".to_string()),
+            "*qualified.Type pointer must not be uncertain"
+        );
     }
 
     // ── embedded struct support ───────────────────────────────────────────────

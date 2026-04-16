@@ -51,18 +51,67 @@ pub fn extract_guard_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
 fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, TypeInfo) {
     match ty {
         Type::Path(tp) => {
-            let name = tp
-                .path
-                .segments
-                .last()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default();
-            let (size, align) = primitive_size_align(&name, arch);
+            let seg = tp.path.segments.last();
+            let name = seg.map(|s| s.ident.to_string()).unwrap_or_default();
+
+            // Transparent newtypes: size and alignment equal the inner T.
+            // Cell<T>, MaybeUninit<T>, UnsafeCell<T>, Wrapping<T>, Saturating<T>,
+            // ManuallyDrop<T> all have `#[repr(transparent)]` and add no overhead.
+            // Recurse into the first generic type argument when present.
+            if matches!(
+                name.as_str(),
+                "Cell" | "MaybeUninit" | "UnsafeCell" | "Wrapping" | "Saturating" | "ManuallyDrop"
+            ) && let Some(inner_ty) = seg.and_then(|s| {
+                if let syn::PathArguments::AngleBracketed(ref ab) = s.arguments {
+                    ab.args.iter().find_map(|a| {
+                        if let syn::GenericArgument::Type(t) = a {
+                            Some(t)
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            }) {
+                let (size, align, _) = rust_type_size_align(inner_ty, arch);
+                return (size, align, TypeInfo::Primitive { name, size, align });
+            }
+
+            // Box<dyn Trait>, Arc<dyn Trait>, Rc<dyn Trait>, Weak<dyn Trait> are fat
+            // pointers: they hold both a data pointer and a vtable pointer (2 words).
+            let is_fat = matches!(name.as_str(), "Box" | "Arc" | "Rc" | "Weak")
+                && seg
+                    .map(|s| {
+                        if let syn::PathArguments::AngleBracketed(ref ab) = s.arguments {
+                            ab.args.iter().any(|a| {
+                                matches!(a, syn::GenericArgument::Type(Type::TraitObject(_)))
+                            })
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+            let (size, align) = if is_fat {
+                (arch.pointer_size * 2, arch.pointer_size)
+            } else {
+                primitive_size_align(&name, arch)
+            };
             (size, align, TypeInfo::Primitive { name, size, align })
         }
-        Type::Ptr(_) | Type::Reference(_) => {
+        Type::Ptr(p) => {
             let s = arch.pointer_size;
-            (s, s, TypeInfo::Pointer { size: s, align: s })
+            // *const dyn Trait / *mut dyn Trait are fat pointers (data + vtable)
+            let is_fat = matches!(*p.elem, Type::TraitObject(_));
+            let sz = if is_fat { s * 2 } else { s };
+            (sz, s, TypeInfo::Pointer { size: sz, align: s })
+        }
+        Type::Reference(r) => {
+            let s = arch.pointer_size;
+            // &dyn Trait / &mut dyn Trait are fat pointers (data + vtable)
+            let is_fat = matches!(*r.elem, Type::TraitObject(_));
+            let sz = if is_fat { s * 2 } else { s };
+            (sz, s, TypeInfo::Pointer { size: sz, align: s })
         }
         Type::Array(arr) => {
             let (elem_size, elem_align, elem_ty) = rust_type_size_align(&arr.elem, arch);
@@ -141,6 +190,8 @@ fn primitive_size_align(name: &str, arch: &'static ArchConfig) -> (usize, usize)
         "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" => (3 * ps, ps),
 
         // ── single-pointer smart pointers ─────────────────────────────────────
+        // Cell<T> is handled as a transparent newtype in rust_type_size_align;
+        // this entry is a fallback for bare `Cell` without a type argument.
         "Box" | "Rc" | "Arc" | "Weak" | "NonNull" | "Cell" => (ps, ps),
 
         // ── interior-mutability / sync wrappers ───────────────────────────────
@@ -296,6 +347,7 @@ fn simulate_rust_layout(
         is_union: false,
         is_repr_rust: false, // callers override this after construction
         suppressed_findings: Vec::new(), // callers may override after construction
+        uncertain_fields: Vec::new(),
     }
 }
 
@@ -440,6 +492,7 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
                     self.source,
                     enum_line,
                 ),
+                uncertain_fields: Vec::new(),
             };
             self.layouts.push(layout);
             return;
@@ -535,6 +588,7 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
                 self.source,
                 enum_line,
             ),
+            uncertain_fields: Vec::new(),
         });
     }
 }
@@ -1097,5 +1151,125 @@ struct Conn { port: u16, status: u32 }
             !layouts[0].is_repr_rust,
             "repr(C) enum must not be repr(Rust)"
         );
+    }
+
+    // ── dyn Trait fat pointer sizing ──────────────────────────────────────────
+
+    #[test]
+    fn box_dyn_trait_is_fat_pointer() {
+        // Box<dyn Trait> = data ptr + vtable ptr = 2 words (16B on x86-64)
+        let src = "struct S { handler: Box<dyn std::any::Any> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts[0].fields[0].size, 16,
+            "Box<dyn Trait> must be 16 bytes (fat pointer)"
+        );
+    }
+
+    #[test]
+    fn arc_dyn_trait_is_fat_pointer() {
+        let src = "struct S { shared: Arc<dyn std::fmt::Display> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 16);
+    }
+
+    #[test]
+    fn ref_dyn_trait_is_fat_pointer() {
+        // &dyn Trait = data ptr + vtable ptr = 16B
+        // Use a non-generic struct — structs with any generic params (including
+        // lifetime params) are skipped by the parser.
+        let src = "struct S { cb: &'static dyn Fn() }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1, "S must be parsed");
+        assert_eq!(
+            layouts[0].fields[0].size, 16,
+            "&dyn Trait must be a 16-byte fat pointer"
+        );
+    }
+
+    #[test]
+    fn box_concrete_type_is_single_pointer() {
+        // Box<u64> is not a fat pointer — just 8B
+        let src = "struct S { inner: Box<u64> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts[0].fields[0].size, 8,
+            "Box<concrete> must remain 8 bytes"
+        );
+    }
+
+    // ── transparent newtype wrappers ──────────────────────────────────────────
+
+    #[test]
+    fn cell_u8_is_one_byte() {
+        let src = "struct S { x: Cell<u8> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts[0].fields[0].size, 1,
+            "Cell<u8> must be 1 byte, not pointer-sized"
+        );
+    }
+
+    #[test]
+    fn maybe_uninit_u32_is_four_bytes() {
+        let src = "struct S { x: MaybeUninit<u32> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts[0].fields[0].size, 4,
+            "MaybeUninit<u32> must be 4 bytes"
+        );
+    }
+
+    #[test]
+    fn wrapping_i16_is_two_bytes() {
+        let src = "struct S { x: Wrapping<i16> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts[0].fields[0].size, 2,
+            "Wrapping<i16> must be 2 bytes"
+        );
+    }
+
+    #[test]
+    fn manually_drop_u64_is_eight_bytes() {
+        let src = "struct S { x: ManuallyDrop<u64> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts[0].fields[0].size, 8,
+            "ManuallyDrop<u64> must be 8 bytes"
+        );
+    }
+
+    #[test]
+    fn unsafe_cell_u32_is_four_bytes() {
+        let src = "struct S { x: UnsafeCell<u32> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts[0].fields[0].size, 4,
+            "UnsafeCell<u32> must be 4 bytes"
+        );
+    }
+
+    #[test]
+    fn transparent_wrapper_affects_total_size() {
+        // bool(1) + pad(1) + Cell<u16>(2) = 4B
+        let src = "struct S { a: bool, b: Cell<u16> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].size, 1); // bool
+        assert_eq!(l.fields[1].size, 2); // Cell<u16>
+        assert_eq!(l.total_size, 4);
+    }
+
+    #[test]
+    fn struct_with_box_dyn_has_correct_layout() {
+        // bool(1) + 7-pad + Box<dyn Error>(16) = 24B
+        let src = "struct Handler { active: bool, err: Box<dyn std::error::Error> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        let l = &layouts[0];
+        assert_eq!(l.fields[0].size, 1); // bool
+        assert_eq!(l.fields[1].size, 16); // Box<dyn Error>
+        assert_eq!(l.fields[1].offset, 8); // aligned to pointer_size
+        assert_eq!(l.total_size, 24);
     }
 }

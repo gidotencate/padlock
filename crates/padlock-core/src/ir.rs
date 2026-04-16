@@ -131,6 +131,15 @@ pub struct StructLayout {
     /// `"PaddingWaste"`, `"ReorderSuggestion"`, `"FalseSharing"`, `"LocalityIssue"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suppressed_findings: Vec<String>,
+
+    /// Field names whose type size could not be accurately determined from source
+    /// alone (e.g. a qualified name like `driver.Connector` whose package is not
+    /// in the analyzed source set and may be an interface rather than a struct).
+    ///
+    /// When non-empty, padding and reorder findings on this struct may be
+    /// inaccurate. For precise sizing use binary analysis or `--go-types`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncertain_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -182,6 +191,17 @@ pub fn find_padding(layout: &StructLayout) -> Vec<PaddingGap> {
 }
 
 /// Return fields sorted by descending alignment then descending size (optimal order).
+///
+/// This minimises struct padding (same goal as go/analysis/passes/fieldalignment).
+///
+/// **GC note (Go-specific)**: fieldalignment's `optimalOrder` adds a secondary
+/// tie-breaking rule: when alignment is equal, pointer-bearing fields come before
+/// pointer-free fields to minimise the GC scan range (`ptrdata`).  padlock's IR
+/// stores all field types as language-agnostic `TypeInfo`, so pointer-vs-non-pointer
+/// cannot be determined here without language-specific knowledge.  For Go structs the
+/// resulting reorder order may differ from fieldalignment's suggestion by the GC-aware
+/// tie-break, but the padding savings are identical.  A future Go-specific sort path
+/// could incorporate this by carrying `has_gc_pointer: bool` on each `Field`.
 pub fn optimal_order(layout: &StructLayout) -> Vec<&Field> {
     let mut sorted: Vec<&Field> = layout.fields.iter().collect();
     sorted.sort_by(|a, b| {
@@ -278,6 +298,7 @@ pub mod test_fixtures {
             is_union: false,
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
+            uncertain_fields: Vec::new(),
         }
     }
 
@@ -338,6 +359,7 @@ pub mod test_fixtures {
             is_union: false,
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
+            uncertain_fields: Vec::new(),
         }
     }
 

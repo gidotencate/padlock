@@ -6,6 +6,7 @@
 
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+use std::collections::HashMap;
 use tree_sitter::{Node, Parser};
 
 // ── type resolution ───────────────────────────────────────────────────────────
@@ -300,6 +301,7 @@ fn simulate_layout(
         is_union: false,
         is_repr_rust: false,
         suppressed_findings: Vec::new(),
+        uncertain_fields: Vec::new(),
     }
 }
 
@@ -334,6 +336,7 @@ fn simulate_union_layout(
         is_union: true,
         is_repr_rust: false,
         suppressed_findings: Vec::new(),
+        uncertain_fields: Vec::new(),
     }
 }
 
@@ -347,6 +350,7 @@ fn parse_class_specifier(
     source: &str,
     node: Node<'_>,
     arch: &'static ArchConfig,
+    aliases: &HashMap<String, String>,
 ) -> Option<StructLayout> {
     let mut class_name = "<anonymous>".to_string();
     let mut base_names: Vec<String> = Vec::new();
@@ -460,7 +464,11 @@ fn parse_class_specifier(
 
     // Declared member fields
     for (fname, ty_name, guard, alignas, field_line) in raw_fields {
-        let (size, natural_align) = c_type_size_align(&ty_name, arch);
+        let resolved = aliases
+            .get(&ty_name)
+            .map(String::as_str)
+            .unwrap_or(&ty_name);
+        let (size, natural_align) = c_type_size_align(resolved, arch);
         let align = alignas.unwrap_or(natural_align);
         let access = if let Some(g) = guard {
             AccessPattern::Concurrent {
@@ -536,12 +544,81 @@ fn contains_virtual_keyword(source: &str, node: Node<'_>) -> bool {
 
 // ── tree-sitter walker ────────────────────────────────────────────────────────
 
+/// Pre-scan a tree for plain scalar typedef declarations and return a map of
+/// `AliasName → BaseTypeName` for within-file alias resolution.
+///
+/// Only simple scalar aliases are collected, e.g.:
+///   `typedef uint32_t MyId;`   → `{"MyId": "uint32_t"}`
+///   `typedef unsigned int Idx;` → `{"Idx": "unsigned int"}`
+///
+/// Struct/union, function-pointer, and pointer typedefs are skipped — the
+/// alias name in those cases lives in a nested declarator node and will not
+/// appear as a direct `type_identifier` child, so they naturally produce fewer
+/// than two type parts and are filtered out.
+fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        for i in (0..node.child_count()).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+        if node.kind() != "type_definition" {
+            continue;
+        }
+        // Skip struct/union/class typedefs — those produce StructLayout entries.
+        let has_record = (0..node.child_count()).any(|i| {
+            node.child(i)
+                .map(|c| {
+                    matches!(
+                        c.kind(),
+                        "struct_specifier" | "union_specifier" | "class_specifier"
+                    )
+                })
+                .unwrap_or(false)
+        });
+        if has_record {
+            continue;
+        }
+        // Collect direct-child type parts in declaration order:
+        //   `typedef uint32_t MyId;`       → ["uint32_t", "MyId"]
+        //   `typedef unsigned int MyUInt;` → ["unsigned int", "MyUInt"]
+        // For pointer/function typedefs the alias name is nested inside a
+        // declarator node, so only one part is collected and we skip (len < 2).
+        let mut type_parts: Vec<String> = Vec::new();
+        for i in 0..node.child_count() {
+            let Some(child) = node.child(i) else {
+                continue;
+            };
+            match child.kind() {
+                "typedef" | ";" => {}
+                "type_identifier" | "primitive_type" | "sized_type_specifier" => {
+                    type_parts.push(source[child.byte_range()].trim().to_string());
+                }
+                _ => {}
+            }
+        }
+        if type_parts.len() < 2 {
+            continue;
+        }
+        // Last element is the alias name; everything before is the base type.
+        let alias_name = type_parts.pop().unwrap();
+        let base_type = type_parts.join(" ");
+        aliases.entry(alias_name).or_insert(base_type);
+    }
+    aliases
+}
+
 fn extract_structs_from_tree(
     source: &str,
     root: Node<'_>,
     arch: &'static ArchConfig,
     layouts: &mut Vec<StructLayout>,
 ) {
+    // Phase 0: collect within-file typedef scalar aliases for field type resolution.
+    let aliases = collect_typedef_aliases(source, root);
+
     let cursor = root.walk();
     let mut stack = vec![root];
 
@@ -553,19 +630,34 @@ fn extract_structs_from_tree(
             }
         }
 
+        // Skip C++ template structs/classes/unions — without monomorphisation we
+        // cannot know T's size, so any sizing would be wrong.  tree-sitter-cpp
+        // wraps these as `template_declaration > struct_specifier` etc.
+        let in_template = node
+            .parent()
+            .map(|p| p.kind() == "template_declaration")
+            .unwrap_or(false);
+        if in_template {
+            continue;
+        }
+
         match node.kind() {
             "struct_specifier" => {
-                if let Some(layout) = parse_struct_or_union_specifier(source, node, arch, false) {
+                if let Some(layout) =
+                    parse_struct_or_union_specifier(source, node, arch, false, &aliases)
+                {
                     layouts.push(layout);
                 }
             }
             "union_specifier" => {
-                if let Some(layout) = parse_struct_or_union_specifier(source, node, arch, true) {
+                if let Some(layout) =
+                    parse_struct_or_union_specifier(source, node, arch, true, &aliases)
+                {
                     layouts.push(layout);
                 }
             }
             "class_specifier" => {
-                if let Some(layout) = parse_class_specifier(source, node, arch) {
+                if let Some(layout) = parse_class_specifier(source, node, arch, &aliases) {
                     layouts.push(layout);
                 }
             }
@@ -583,7 +675,7 @@ fn extract_structs_from_tree(
             }
         }
         if node.kind() == "type_definition"
-            && let Some(layout) = parse_typedef_struct_or_union(source, node, arch)
+            && let Some(layout) = parse_typedef_struct_or_union(source, node, arch, &aliases)
         {
             let existing = layouts
                 .iter()
@@ -607,6 +699,7 @@ fn parse_struct_or_union_specifier(
     node: Node<'_>,
     arch: &'static ArchConfig,
     is_union: bool,
+    aliases: &HashMap<String, String>,
 ) -> Option<StructLayout> {
     let mut name = "<anonymous>".to_string();
     let mut body_node: Option<Node> = None;
@@ -675,7 +768,11 @@ fn parse_struct_or_union_specifier(
     let mut fields: Vec<Field> = raw_fields
         .into_iter()
         .map(|(fname, ty_name, guard, alignas, field_line)| {
-            let (size, natural_align) = c_type_size_align(&ty_name, arch);
+            let resolved = aliases
+                .get(&ty_name)
+                .map(String::as_str)
+                .unwrap_or(&ty_name);
+            let (size, natural_align) = c_type_size_align(resolved, arch);
             // alignas(N) on a field overrides its alignment requirement.
             let align = alignas.unwrap_or(natural_align);
             let access = if let Some(g) = guard {
@@ -733,6 +830,7 @@ fn parse_typedef_struct_or_union(
     source: &str,
     node: Node<'_>,
     arch: &'static ArchConfig,
+    aliases: &HashMap<String, String>,
 ) -> Option<StructLayout> {
     let mut specifier_node: Option<Node> = None;
     let mut is_union = false;
@@ -757,21 +855,11 @@ fn parse_typedef_struct_or_union(
     let spec = specifier_node?;
     let typedef_name = typedef_name?;
 
-    let mut layout = parse_struct_or_union_specifier(source, spec, arch, is_union)?;
+    let mut layout = parse_struct_or_union_specifier(source, spec, arch, is_union, aliases)?;
     if layout.name == "<anonymous>" {
         layout.name = typedef_name;
     }
     Some(layout)
-}
-
-// Alias kept for the typedef pass in extract_structs_from_tree.
-#[allow(dead_code)]
-fn parse_typedef_struct(
-    source: &str,
-    node: Node<'_>,
-    arch: &'static ArchConfig,
-) -> Option<StructLayout> {
-    parse_typedef_struct_or_union(source, node, arch)
 }
 
 /// Extract a lock guard name from a C/C++ `__attribute__((guarded_by(X)))` or
@@ -1313,6 +1401,7 @@ typedef struct {
             is_union: false,
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
+            uncertain_fields: Vec::new(),
         };
         assert!(padlock_core::analysis::false_sharing::has_false_sharing(
             &layout
@@ -1932,5 +2021,147 @@ struct Config {
         // int at offset 32, bool at 36; total padded to 8-byte align = 40
         assert_eq!(l.fields[1].offset, 32);
         assert_eq!(l.fields[1].size, 4);
+    }
+
+    // ── typedef alias resolution ──────────────────────────────────────────────
+
+    #[test]
+    fn typedef_scalar_alias_resolves_correct_size() {
+        // `typedef uint32_t UserId;` — UserId must be treated as 4B, not pointer-size.
+        let src = r#"
+typedef uint32_t UserId;
+
+struct User {
+    UserId id;
+    char   name[16];
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "User").expect("User");
+        let id = l.fields.iter().find(|f| f.name == "id").expect("id field");
+        assert_eq!(id.size, 4, "UserId alias of uint32_t must be 4 bytes");
+        assert_eq!(id.align, 4);
+    }
+
+    #[test]
+    fn typedef_alias_layout_correct_total_size() {
+        // Without alias resolution: UserId → unknown → pointer_size (8B)
+        // char(1) + 7 pad + unknown(8) = 16B.
+        // With alias resolution: char(1) + 3 pad + uint32_t(4) = 8B.
+        let src = r#"
+typedef uint32_t Token;
+
+struct Auth {
+    char  prefix;
+    Token token;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Auth").expect("Auth");
+        // prefix(1) + 3-byte pad + token(4) = 8B
+        assert_eq!(l.total_size, 8, "alias-resolved layout should be 8 bytes");
+    }
+
+    #[test]
+    fn typedef_pointer_not_confused_with_scalar_alias() {
+        // `typedef int *IntPtr;` — pointer typedef; alias name lives in a nested
+        // declarator, so collect_typedef_aliases must NOT collect it.
+        // IntPtr falls through to the unknown-type catch-all → pointer_size (8B).
+        let src = r#"
+typedef int *IntPtr;
+
+struct S {
+    IntPtr p;
+    int    x;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").expect("S");
+        let p = l.fields.iter().find(|f| f.name == "p").expect("p field");
+        // Pointer typedef — either resolved as pointer (8B) or falls to pointer_size.
+        assert_eq!(p.size, 8, "pointer typedef should be 8 bytes on x86_64");
+    }
+
+    #[test]
+    fn typedef_struct_not_collected_as_scalar_alias() {
+        // `typedef struct { ... } MyStruct;` must not appear in scalar alias map.
+        // The struct is still emitted as a StructLayout.
+        let src = r#"
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+struct Line {
+    Point a;
+    Point b;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        // Point must be emitted as a layout
+        assert!(
+            layouts.iter().any(|l| l.name == "Point"),
+            "typedef struct should emit a StructLayout"
+        );
+    }
+
+    #[test]
+    fn cpp_class_typedef_alias_resolved() {
+        // Typedef alias resolution must also work for C++ class fields.
+        let src = r#"
+typedef uint64_t Timestamp;
+
+class Event {
+    Timestamp when;
+    int       kind;
+};
+"#;
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Event").expect("Event");
+        let when = l.fields.iter().find(|f| f.name == "when").expect("when");
+        assert_eq!(when.size, 8, "Timestamp alias of uint64_t must be 8 bytes");
+        assert_eq!(when.align, 8);
+    }
+
+    // ── C++ template skipping ─────────────────────────────────────────────────
+
+    #[test]
+    fn cpp_template_struct_is_skipped() {
+        // Generic C++ templates cannot be sized without monomorphisation.
+        let src = "template<typename T> struct Wrapper { T value; int count; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.iter().all(|l| l.name != "Wrapper"),
+            "template struct must be skipped, not emitted with wrong sizes"
+        );
+    }
+
+    #[test]
+    fn cpp_template_class_is_skipped() {
+        let src = "template<typename T, typename U> class Pair { T first; U second; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.iter().all(|l| l.name != "Pair"),
+            "template class must be skipped"
+        );
+    }
+
+    #[test]
+    fn cpp_non_template_struct_alongside_template_is_parsed() {
+        // The template is skipped but concrete structs in the same TU are kept.
+        let src = r#"
+template<typename T> struct Generic { T val; };
+struct Concrete { int x; double y; };
+"#;
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.iter().all(|l| l.name != "Generic"),
+            "Generic template must be skipped"
+        );
+        let concrete = layouts
+            .iter()
+            .find(|l| l.name == "Concrete")
+            .expect("Concrete must be parsed");
+        assert_eq!(concrete.fields.len(), 2);
     }
 }

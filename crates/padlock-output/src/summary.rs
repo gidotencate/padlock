@@ -132,6 +132,14 @@ pub fn render_struct(sr: &StructReport, show_filename: bool) -> String {
         );
     }
 
+    if !sr.uncertain_fields.is_empty() {
+        let fields = sr.uncertain_fields.join(", ");
+        out.push_str(&format!(
+            "    note: uncertain field size(s): {fields} — \
+             use binary analysis (DWARF/BTF) or provide type info for accurate results\n"
+        ));
+    }
+
     out
 }
 
@@ -321,5 +329,38 @@ mod tests {
         let out = render_report(&report);
         // New format: "NB → NB (saves NB)"
         assert!(out.contains("saves"), "savings clause missing");
+    }
+
+    // ── uncertain_fields note ─────────────────────────────────────────────────
+
+    #[test]
+    fn uncertain_fields_note_shown_when_non_empty() {
+        let mut layout = connection_layout();
+        layout.uncertain_fields = vec!["connector".to_string()];
+
+        let report = Report::from_layouts(&[layout]);
+        let out = render_struct(&report.structs[0], true);
+        assert!(
+            out.contains("uncertain field size"),
+            "uncertain_fields note must appear in output: {out}"
+        );
+        assert!(
+            out.contains("connector"),
+            "uncertain field name must appear in output: {out}"
+        );
+        assert!(
+            out.contains("DWARF/BTF"),
+            "output must mention binary analysis: {out}"
+        );
+    }
+
+    #[test]
+    fn uncertain_fields_note_absent_when_empty() {
+        let report = Report::from_layouts(&[connection_layout()]);
+        let out = render_struct(&report.structs[0], true);
+        assert!(
+            !out.contains("uncertain field size"),
+            "uncertain_fields note must not appear when fields are empty"
+        );
     }
 }

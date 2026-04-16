@@ -339,6 +339,7 @@ fn parse_union_declaration(
         is_union: true,
         is_repr_rust: false,
         suppressed_findings: Vec::new(), // set by parse_variable_declaration
+        uncertain_fields: Vec::new(),
     })
 }
 
@@ -421,6 +422,7 @@ fn parse_struct_declaration(
         is_union: false,
         is_repr_rust: false,
         suppressed_findings: Vec::new(), // set by parse_variable_declaration
+        uncertain_fields: Vec::new(),
     })
 }
 

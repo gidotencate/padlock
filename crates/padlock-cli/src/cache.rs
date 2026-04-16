@@ -142,6 +142,7 @@ mod tests {
             is_union: false,
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
+            uncertain_fields: Vec::new(),
         }
     }
 

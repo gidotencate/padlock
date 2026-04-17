@@ -923,8 +923,9 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 
 ### Known remaining limitations (source analysis)
 
-- **Rust enums with data variants** (`enum Foo { A(u64), B { x: u32 } }`) — not modeled; only plain structs are analyzed.
+- **Rust enums** — data enums are modeled with a synthetic `__payload` field (sized to the largest variant) and a `__discriminant` field. Exact niched layouts (e.g. `Option<NonZeroU8>` collapsing to 1 byte) are not modeled; use binary analysis for precise niche-optimized sizes.
 - **Go qualified interface fields** (`io.Reader`, `driver.Connector`, etc.) — cross-package interface types cannot be resolved from source alone; these fields are flagged as `uncertain` in output and sized as 2 words (the correct runtime representation). Use binary analysis for certainty.
+- **Go generics** (Go 1.18+) — generic type parameters (`type Pair[T any] struct { ... }`) cannot be sized from source without instantiation; generic structs are skipped. Use binary analysis for concrete instantiations.
 - **`#pragma pack(N)` on C/C++ structs** — only `__attribute__((packed))` (GCC/Clang style) is detected from source; MSVC-style `#pragma pack` is not. Use binary analysis for accuracy on MSVC-compiled code.
 - **`wchar_t` on Windows** — padlock treats `wchar_t` as 4 bytes (POSIX/GCC). On MSVC Windows targets it is 2 bytes. Use binary analysis for Windows builds.
 - **Rust const-expression padding** (`[u8; 64 - size_of::<Mutex<u64>>()]`) — the expression is not evaluated; the field gets pointer-size as a default.

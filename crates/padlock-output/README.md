@@ -1,6 +1,6 @@
 # padlock-output
 
-Output formatters for [padlock](https://github.com/gidotencate/padlock) — a struct memory layout analyzer for C, C++, Rust, and Go.
+Output formatters for [padlock](https://github.com/gidotencate/padlock) — a struct memory layout analyzer for C, C++, Rust, Go, and Zig.
 
 This crate turns `padlock-core` `Report` and `StructLayout` types into human-readable or machine-readable output:
 

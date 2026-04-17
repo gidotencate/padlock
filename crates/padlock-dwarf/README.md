@@ -1,6 +1,6 @@
 # padlock-dwarf
 
-DWARF and PDB binary analysis backend for [padlock](https://github.com/gidotencate/padlock) — a struct memory layout analyzer for C, C++, Rust, and Go.
+DWARF and PDB binary analysis backend for [padlock](https://github.com/gidotencate/padlock) — a struct memory layout analyzer for C, C++, Rust, Go, and Zig.
 
 This crate reads compiled binaries and extracts exact struct layouts as produced by the compiler:
 

@@ -6,8 +6,24 @@
 
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+use std::cell::Cell;
 use std::collections::HashMap;
 use tree_sitter::{Node, Parser};
+
+use crate::CppStdlib;
+
+thread_local! {
+    static STDLIB: Cell<CppStdlib> = const { Cell::new(CppStdlib::LibStdCpp) };
+}
+
+/// Set the active C++ stdlib variant for this thread.  Called from `lib.rs::set_cpp_stdlib`.
+pub(crate) fn set_stdlib(s: CppStdlib) {
+    STDLIB.with(|c| c.set(s));
+}
+
+fn active_stdlib() -> CppStdlib {
+    STDLIB.with(|c| c.get())
+}
 
 // ── type resolution ───────────────────────────────────────────────────────────
 
@@ -34,25 +50,42 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         | "int8x16_t" | "uint8x16_t" | "int16x8_t" | "uint16x8_t" => return (16, 16),
         _ => {}
     }
-    // C++ standard library types (Linux/glibc + libstdc++ defaults).
-    // Sizes are platform-approximate; accuracy is "good enough" for cache-line
-    // bucketing and false-sharing detection.
+    // C++ standard library types — sizes vary by stdlib variant.
+    let stdlib = active_stdlib();
     match ty {
         // ── Synchronisation ───────────────────────────────────────────────────
-        // pthread_mutex_t on Linux/glibc is 40 bytes.
+        // pthread_mutex_t on Linux/glibc: 40 bytes.
+        // On macOS (libc++): opaque_pthread_mutex_t = 56 bytes.
+        // MSVC: CRITICAL_SECTION = 40 bytes on 64-bit.
         "std::mutex"
         | "std::recursive_mutex"
         | "std::timed_mutex"
         | "std::recursive_timed_mutex"
-        | "pthread_mutex_t" => return (40, 8),
+        | "pthread_mutex_t" => {
+            return match stdlib {
+                CppStdlib::LibCpp => (56, 8), // macOS/Apple pthread mutex
+                _ => (40, 8),
+            };
+        }
         "std::shared_mutex" | "std::shared_timed_mutex" => return (56, 8),
-        "std::condition_variable" | "pthread_cond_t" => return (48, 8),
+        "std::condition_variable" | "pthread_cond_t" => {
+            return match stdlib {
+                CppStdlib::LibCpp => (40, 8), // macOS pthread_cond_t
+                _ => (48, 8),
+            };
+        }
 
         // ── String / view ─────────────────────────────────────────────────────
-        // libstdc++ std::string: 32B (ptr + length + SSO buffer / capacity).
-        // libc++ (Clang): 24B. We use 32B (libstdc++ / GCC, dominant on Linux).
+        // libstdc++ std::string: 32B (ptr + length + SSO buffer (15 chars + NUL)).
+        // libc++ (Clang/macOS/Android): 24B (short-string optimisation is smaller).
+        // MSVC STL: 32B on 64-bit (16-byte SSO inline buffer).
         "std::string" | "std::wstring" | "std::u8string" | "std::u16string" | "std::u32string"
-        | "std::pmr::string" => return (32, 8),
+        | "std::pmr::string" => {
+            return match stdlib {
+                CppStdlib::LibCpp => (24, 8),
+                _ => (32, 8), // libstdc++ and MSVC both 32B
+            };
+        }
         // std::string_view / std::span<T>: pointer + length (2 words).
         "std::string_view"
         | "std::wstring_view"
@@ -261,31 +294,38 @@ fn is_bitfield_type(ty: &str) -> bool {
 
 /// Simulate C/C++ struct layout given ordered fields.
 ///
-/// When `packed` is `true` the layout mirrors `__attribute__((packed))`:
-/// no inter-field alignment padding is inserted and the struct alignment
-/// is forced to 1. This matches GCC/Clang behaviour for packed structs.
+/// `pack_n` controls field alignment capping:
+/// - `0` — no packing (default C/C++ ABI alignment rules)
+/// - `1` — `__attribute__((packed))` / `#pragma pack(1)`: force alignment to 1
+/// - `N` — `#pragma pack(N)`: cap each field's alignment at N bytes
+///
+/// This unified model handles both GCC/Clang `__attribute__((packed))` and
+/// MSVC-style `#pragma pack(N)` directives.
 fn simulate_layout(
     fields: &mut Vec<Field>,
     struct_name: String,
     arch: &'static ArchConfig,
     source_line: Option<u32>,
-    packed: bool,
+    pack_n: usize,
 ) -> StructLayout {
     let mut offset = 0usize;
     let mut struct_align = 1usize;
 
     for f in fields.iter_mut() {
-        if !packed && f.align > 0 {
-            offset = offset.next_multiple_of(f.align);
+        let eff_align = if pack_n > 0 {
+            f.align.min(pack_n)
+        } else {
+            f.align
+        };
+        if eff_align > 0 {
+            offset = offset.next_multiple_of(eff_align);
         }
         f.offset = offset;
         offset += f.size;
-        if !packed {
-            struct_align = struct_align.max(f.align);
-        }
+        struct_align = struct_align.max(eff_align);
     }
-    // Trailing padding (not present in packed structs)
-    if !packed && struct_align > 0 {
+    // Trailing padding (not present when fully packed)
+    if pack_n != 1 && struct_align > 0 {
         offset = offset.next_multiple_of(struct_align);
     }
 
@@ -297,7 +337,7 @@ fn simulate_layout(
         source_file: None,
         source_line,
         arch,
-        is_packed: packed,
+        is_packed: pack_n == 1,
         is_union: false,
         is_repr_rust: false,
         suppressed_findings: Vec::new(),
@@ -351,6 +391,7 @@ fn parse_class_specifier(
     node: Node<'_>,
     arch: &'static ArchConfig,
     aliases: &HashMap<String, String>,
+    pragma_pack: usize,
 ) -> Option<StructLayout> {
     let mut class_name = "<anonymous>".to_string();
     let mut base_names: Vec<String> = Vec::new();
@@ -496,13 +537,20 @@ fn parse_class_specifier(
     }
 
     let line = node.start_position().row as u32 + 1;
-    let mut layout = simulate_layout(&mut fields, class_name, arch, Some(line), is_packed);
+    let pack_n = if is_packed {
+        1
+    } else if pragma_pack > 0 {
+        pragma_pack
+    } else {
+        0
+    };
+    let mut layout = simulate_layout(&mut fields, class_name, arch, Some(line), pack_n);
 
     if let Some(al) = struct_alignas
         && al > layout.align
     {
         layout.align = al;
-        if !is_packed {
+        if pack_n == 0 {
             layout.total_size = layout.total_size.next_multiple_of(al);
         }
     }
@@ -615,14 +663,32 @@ fn extract_structs_from_tree(
     // Phase 0: collect within-file typedef scalar aliases for field type resolution.
     let aliases = collect_typedef_aliases(source, root);
 
+    // Phase 1: extract struct/union/class layouts.
+    // We do a single linear pass ordered by byte offset so that `#pragma pack`
+    // directives are processed in document order, keeping `current_pack` accurate
+    // at each struct declaration site.
+    //
+    // Pack state: `current_pack = 0` means no active pragma (use default ABI
+    // alignment); `current_pack = N > 0` means cap field alignment at N bytes.
+    let mut pack_stack: Vec<usize> = Vec::new();
+    let mut current_pack: usize = 0;
+
     let cursor = root.walk();
     let mut stack = vec![root];
 
     while let Some(node) = stack.pop() {
-        // Push children in reverse so we process left-to-right
+        // Push children in reverse so we process left-to-right in document order.
         for i in (0..node.child_count()).rev() {
             if let Some(child) = node.child(i) {
                 stack.push(child);
+            }
+        }
+
+        // Track `#pragma pack(...)` directives (tree-sitter: `preproc_call` nodes).
+        if node.kind() == "preproc_call" {
+            let text = &source[node.byte_range()];
+            if text.contains("#pragma") && text.contains("pack(") {
+                current_pack = parse_pragma_pack(text, &mut pack_stack, current_pack);
             }
         }
 
@@ -634,26 +700,47 @@ fn extract_structs_from_tree(
             .map(|p| p.kind() == "template_declaration")
             .unwrap_or(false);
         if in_template {
+            let tpl_name = (0..node.child_count())
+                .filter_map(|i| node.child(i))
+                .find(|c| c.kind() == "type_identifier")
+                .map(|c| source[c.byte_range()].to_string())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            eprintln!(
+                "padlock: note: skipping '{tpl_name}' — template \
+                 (layout depends on type arguments; use binary analysis for accurate results)"
+            );
             continue;
         }
 
         match node.kind() {
             "struct_specifier" => {
-                if let Some(layout) =
-                    parse_struct_or_union_specifier(source, node, arch, false, &aliases)
-                {
+                if let Some(layout) = parse_struct_or_union_specifier(
+                    source,
+                    node,
+                    arch,
+                    false,
+                    &aliases,
+                    current_pack,
+                ) {
                     layouts.push(layout);
                 }
             }
             "union_specifier" => {
-                if let Some(layout) =
-                    parse_struct_or_union_specifier(source, node, arch, true, &aliases)
-                {
+                if let Some(layout) = parse_struct_or_union_specifier(
+                    source,
+                    node,
+                    arch,
+                    true,
+                    &aliases,
+                    current_pack,
+                ) {
                     layouts.push(layout);
                 }
             }
             "class_specifier" => {
-                if let Some(layout) = parse_class_specifier(source, node, arch, &aliases) {
+                if let Some(layout) =
+                    parse_class_specifier(source, node, arch, &aliases, current_pack)
+                {
                     layouts.push(layout);
                 }
             }
@@ -661,7 +748,12 @@ fn extract_structs_from_tree(
         }
     }
 
-    // Also handle `typedef struct/union { ... } Name;`
+    // Also handle `typedef struct/union { ... } Name;`.
+    // Run a second pass; at this point we do not re-track pragma pack since
+    // typedef structs with non-default packing will have already been captured
+    // in the first pass (the struct specifier inside the typedef is the same
+    // node). The second pass only renames anonymous structs, so pack accuracy
+    // is inherited from the first-pass result.
     let cursor2 = root.walk();
     let mut stack2 = vec![root];
     while let Some(node) = stack2.pop() {
@@ -671,7 +763,8 @@ fn extract_structs_from_tree(
             }
         }
         if node.kind() == "type_definition"
-            && let Some(layout) = parse_typedef_struct_or_union(source, node, arch, &aliases)
+            && let Some(layout) =
+                parse_typedef_struct_or_union(source, node, arch, &aliases, current_pack)
         {
             let existing = layouts
                 .iter()
@@ -689,13 +782,59 @@ fn extract_structs_from_tree(
     let _ = cursor2; // silence unused warnings
 }
 
+/// Parse a `#pragma pack(...)` directive and update the pack stack/current level.
+///
+/// Recognised forms:
+/// - `#pragma pack(N)`        — set pack level to N
+/// - `#pragma pack()`         — reset to default (0)
+/// - `#pragma pack(push, N)`  — push current level, set to N
+/// - `#pragma pack(push)`     — push current level (no change)
+/// - `#pragma pack(pop)`      — restore previous level
+///
+/// Returns the new `current_pack` value.
+fn parse_pragma_pack(text: &str, stack: &mut Vec<usize>, current: usize) -> usize {
+    // Extract the argument list between the outer parentheses of `pack(...)`.
+    let Some(start) = text.find("pack(") else {
+        return current;
+    };
+    let rest = &text[start + 5..]; // skip "pack("
+    let Some(end) = rest.find(')') else {
+        return current;
+    };
+    let args = rest[..end].trim();
+
+    if args.is_empty() {
+        // #pragma pack() — reset to default
+        return 0;
+    }
+
+    // Split on comma to distinguish `push`/`pop`/`N`/`push, N`.
+    let parts: Vec<&str> = args.splitn(2, ',').map(str::trim).collect();
+    match parts[0] {
+        "pop" => stack.pop().unwrap_or(0),
+        "push" => {
+            stack.push(current);
+            if let Some(n_str) = parts.get(1) {
+                n_str.parse::<usize>().unwrap_or(current)
+            } else {
+                current // push without N: keep current level
+            }
+        }
+        n_str => n_str.parse::<usize>().unwrap_or(current),
+    }
+}
+
 /// Parse a `struct_specifier` or `union_specifier` node into a `StructLayout`.
+///
+/// `pragma_pack` is the active `#pragma pack(N)` level at the point of the
+/// declaration (`0` = no active pragma, equivalent to default ABI alignment).
 fn parse_struct_or_union_specifier(
     source: &str,
     node: Node<'_>,
     arch: &'static ArchConfig,
     is_union: bool,
     aliases: &HashMap<String, String>,
+    pragma_pack: usize,
 ) -> Option<StructLayout> {
     let mut name = "<anonymous>".to_string();
     let mut body_node: Option<Node> = None;
@@ -796,10 +935,19 @@ fn parse_struct_or_union_specifier(
         .collect();
 
     let line = node.start_position().row as u32 + 1;
+    // `__attribute__((packed))` forces pack_n=1; `#pragma pack(N)` caps at N.
+    // When both apply, the more restrictive (smaller) wins.
+    let pack_n = if is_packed {
+        1
+    } else if pragma_pack > 0 {
+        pragma_pack
+    } else {
+        0
+    };
     let mut layout = if is_union {
         simulate_union_layout(&mut fields, name, arch, Some(line))
     } else {
-        simulate_layout(&mut fields, name, arch, Some(line), is_packed)
+        simulate_layout(&mut fields, name, arch, Some(line), pack_n)
     };
 
     // Apply struct-level alignas: the struct's alignment requirement is at
@@ -808,7 +956,7 @@ fn parse_struct_or_union_specifier(
         && al > layout.align
     {
         layout.align = al;
-        if !is_packed {
+        if pack_n == 0 {
             layout.total_size = layout.total_size.next_multiple_of(al);
         }
     }
@@ -825,6 +973,7 @@ fn parse_typedef_struct_or_union(
     node: Node<'_>,
     arch: &'static ArchConfig,
     aliases: &HashMap<String, String>,
+    pragma_pack: usize,
 ) -> Option<StructLayout> {
     let mut specifier_node: Option<Node> = None;
     let mut is_union = false;
@@ -849,7 +998,8 @@ fn parse_typedef_struct_or_union(
     let spec = specifier_node?;
     let typedef_name = typedef_name?;
 
-    let mut layout = parse_struct_or_union_specifier(source, spec, arch, is_union, aliases)?;
+    let mut layout =
+        parse_struct_or_union_specifier(source, spec, arch, is_union, aliases, pragma_pack)?;
     if layout.name == "<anonymous>" {
         layout.name = typedef_name;
     }

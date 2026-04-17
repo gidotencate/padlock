@@ -66,6 +66,11 @@ enum Commands {
         /// Overrides the arch.override config value.
         #[arg(long, value_name = "TRIPLE")]
         target: Option<String>,
+        /// C++ standard library variant for type-size lookups.
+        /// Affects sizes of std::string, std::mutex, etc.
+        /// Choices: libstdc++ (GCC/Linux default), libc++ (Clang/macOS), msvc (Windows).
+        #[arg(long, value_name = "VARIANT")]
+        stdlib: Option<String>,
         #[command(flatten)]
         filter: filter::FilterArgs,
     },
@@ -217,6 +222,7 @@ fn main() -> anyhow::Result<()> {
             word_size,
             fail_on_severity,
             target,
+            stdlib,
             filter,
         } => commands::analyze::run(
             &paths,
@@ -228,6 +234,7 @@ fn main() -> anyhow::Result<()> {
                 word_size,
                 fail_on_severity,
                 target,
+                stdlib: stdlib.as_deref().and_then(parse_stdlib),
             },
             &filter,
         ),
@@ -275,6 +282,7 @@ fn main() -> anyhow::Result<()> {
                 word_size: None,
                 fail_on_severity: None,
                 target: None,
+                stdlib: None,
             },
             &filter,
         ),
@@ -298,5 +306,20 @@ fn main() -> anyhow::Result<()> {
             target,
             &filter,
         ),
+    }
+}
+
+fn parse_stdlib(s: &str) -> Option<padlock_source::CppStdlib> {
+    match s.to_ascii_lowercase().replace(['-', '_', '+'], "").as_str() {
+        "libstdcpp" | "stdcpp" | "gcc" | "gnustl" => Some(padlock_source::CppStdlib::LibStdCpp),
+        "libcpp" | "libc" | "clang" => Some(padlock_source::CppStdlib::LibCpp),
+        "msvc" | "msstl" | "ms" => Some(padlock_source::CppStdlib::Msvc),
+        other => {
+            eprintln!(
+                "padlock: warning: unknown --stdlib '{other}', \
+                 expected libstdc++, libc++, or msvc — using libstdc++ default"
+            );
+            None
+        }
     }
 }

@@ -58,6 +58,11 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Multi-language** | C, C++, Rust, Go, Zig source; compiled binaries via DWARF/PDB/BTF |
 | **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64, Cortex-M, AVR; `--target <triple>` for cross-arch analysis |
 | **repr(Rust) awareness** | Severity downgraded for repr(Rust) structs (compiler may already reorder); `--hide-repr-rust` excludes them entirely |
+| **C++ stdlib variants** | `--stdlib libstdc++\|libc++\|msvc` selects the stdlib for type sizing; `libc++` `std::string` is 24B vs libstdc++ 32B |
+| **Custom sync types** | `custom_sync_types = ["MyMutex", "ProtectedData"]` in `.padlock.toml` — project-specific lock types trigger false-sharing detection |
+| **Rust niche optimization** | `Option<NonZeroXxx>`, `Option<&T>`, `Option<Box<T>>` sized as inner type (no discriminant overhead) |
+| **MSVC `#pragma pack`** | Full pack-stack tracking (`push`/`pop`/`N`) for MSVC-style struct packing in C and C++ source |
+| **Embedding hints** | When a struct with waste is embedded in others, output notes "fixing this would also shrink Foo, Bar" |
 | **Path exclusions** | `exclude_paths = ["proto/**", "vendor/**"]` in `.padlock.toml` skips generated or third-party files |
 | **ABI safety** | `padlock fix` warns before reordering fixed-layout structs (`repr(C)`, C, Go, Zig) that may break FFI or serialization |
 | **CI-ready** | SARIF output, `action.yml`, exit-code gating on high-severity findings |
@@ -200,6 +205,7 @@ Flags:
 - `--word-size <N>` — override pointer/word size in bytes (e.g. `--word-size 4` for 32-bit targets). Affects all pointer-sized fields.
 - `--target <TRIPLE>` — set the target architecture using a Rust target triple or short name. Common values: `aarch64-apple-darwin` (Apple Silicon, 128-byte cache lines), `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, `wasm32-unknown-unknown`. Overrides the `arch.override` setting in `.padlock.toml`.
 - `--hide-repr-rust` — exclude `repr(Rust)` structs from output entirely. Useful when you want to focus on types with a fixed binary layout (C, `repr(C)`, Go, Zig) where findings are fully accurate and directly actionable.
+- `--stdlib libstdc++|libc++|msvc` — set the C++ standard library variant for type sizing. Affects `std::string`, `std::mutex`, `std::shared_ptr`, and other stdlib types that differ in size across implementations. Default: `libstdc++` (GCC/Linux). Use `libc++` for macOS/iOS/Android Clang projects, `msvc` for Windows MSVC projects.
 - `--fail-on-severity high|medium|low` — exit non-zero when any finding meets or exceeds this severity. `high` is the default CI gate (same as exit-on-high-finding behaviour); `medium` and `low` tighten the gate further.
 
 ---
@@ -394,6 +400,12 @@ sort_by = "score"
 
 # Exit non-zero when any finding meets or exceeds this severity: "high" | "medium" | "low"
 fail_on_severity = "high"
+
+# Project-specific lock/sync wrapper type names.
+# Fields whose type name contains any of these strings are classified as
+# Concurrent, enabling false-sharing and locality detection for custom guards.
+custom_sync_types = []
+# Example: custom_sync_types = ["MyMutex", "ProtectedData", "RwLock"]
 
 [arch]
 # Override the target architecture for source analysis.
@@ -904,32 +916,31 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | C / C++ | GCC/Clang extensions: `__int128`, `_Float16`, `__fp16`, `__bf16`, `_Float128` | |
 | C / C++ | Character types: `wchar_t` (4B on POSIX), `char8_t`, `char16_t`, `char32_t` | |
 | C++ | vtable pointer injection for `virtual` classes, single/multiple inheritance base slots, `alignas(N)` on fields and structs | base-class sizes are approximate until nested-struct resolution |
-| C++ stdlib | `std::string`/`std::string_view`, `std::vector<T>`/`std::deque<T>`/`std::list<T>`, `std::map`/`std::set`/unordered variants, `std::unique_ptr`/`std::shared_ptr`/`std::weak_ptr`, `std::optional<T>` (recursive), `std::function`, `std::any`, `std::span<T>`, `std::error_code`, `std::atomic_flag` | sizes based on libstdc++ (GCC/Linux); libc++ (Clang) `std::string` is 24B, use binary analysis for exact values |
-| C / C++ | `__attribute__((packed))` structs and classes | no inter-field padding inserted; struct alignment set to 1 |
+| C++ stdlib | `std::string`/`std::string_view`, `std::vector<T>`/`std::deque<T>`/`std::list<T>`, `std::map`/`std::set`/unordered variants, `std::unique_ptr`/`std::shared_ptr`/`std::weak_ptr`, `std::optional<T>` (recursive), `std::function`, `std::any`, `std::span<T>`, `std::error_code`, `std::atomic_flag` | sizes vary by stdlib; use `--stdlib libstdc++\|libc++\|msvc` to select the correct variant (default: libstdc++) |
+| C / C++ | `__attribute__((packed))` structs and classes; `#pragma pack(N)` / `#pragma pack(push, N)` / `#pragma pack(pop)` | no inter-field padding inserted (packed); `#pragma pack(N)` caps field alignment at N |
 | Rust | All primitive types (`u8`–`u128`, `i8`–`i128`, `f16`, `f32`, `f64`, `f128`, `usize`, `isize`, `char`, `bool`), `repr(C)`, `repr(packed)`, `repr(transparent)`, `repr(align(N))` | |
 | Rust stdlib | `Vec`, `String`, `Box`, `Arc`, `Rc`, all `AtomicXxx`, `PhantomData`, `Duration`, channels, smart pointers, all `NonZeroXxx` | size is independent of type parameter `T` |
 | Rust stdlib | Transparent newtypes: `Cell<T>`, `MaybeUninit<T>`, `UnsafeCell<T>`, `Wrapping<T>`, `Saturating<T>`, `ManuallyDrop<T>` | sized as inner `T` |
+| Rust stdlib | Niche-optimized options: `Option<NonZeroU8/I8>` – `Option<NonZeroUsize/Isize>`, `Option<&T>`, `Option<&mut T>`, `Option<Box<T>>`, `Option<NonNull<T>>`, `Option<Arc<T>>`, `Option<Rc<T>>` | sized as inner type — no extra discriminant byte |
 | Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words), `complex128`, locally-declared named interfaces | qualified cross-package types (e.g. `io.Reader`) flagged as uncertain |
-| Zig | All standard integer/float types, C interop types (`c_int`, `c_uint`, `c_long`, etc.), arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) | arbitrary-width sizes use `ceil(N/8)` bytes, aligned to next power-of-two (capped at 8) |
+| Zig | All standard integer/float types, C interop types (`c_int`, `c_uint`, `c_long`, etc.), arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) | in `packed struct`, arbitrary-width fields occupy exact bits; total = `ceil(bits/8)`; in normal structs, `ceil(N/8)` bytes aligned to next power-of-two |
 
 ### What source analysis skips (instead of showing wrong data)
 
 | Case | Action | Accurate alternative |
 |---|---|---|
 | C/C++ structs with bit-field members | Skipped | Binary (DWARF) analysis |
-| C++ template structs/classes/unions (`template<typename T> struct Foo`) | Skipped | Binary analysis; or analyse concrete instantiations |
-| Rust generic struct definitions (`struct Foo<T>`) | Skipped | Binary analysis; or analyse concrete monomorphizations |
+| C++ template structs/classes/unions (`template<typename T> struct Foo`) | Skipped — note printed to stderr | Binary analysis; or analyse concrete instantiations |
+| Rust generic struct definitions (`struct Foo<T>`) | Skipped — note printed to stderr | Binary analysis; or analyse concrete monomorphizations |
 | Forward-declared / incomplete structs | Skipped | Binary analysis |
 
 ### Known remaining limitations (source analysis)
 
-- **Rust enums** — data enums are modeled with a synthetic `__payload` field (sized to the largest variant) and a `__discriminant` field. Exact niched layouts (e.g. `Option<NonZeroU8>` collapsing to 1 byte) are not modeled; use binary analysis for precise niche-optimized sizes.
+- **Rust enums** — data enums are modeled with a synthetic `__payload` field (sized to the largest variant) and a `__discriminant` field. Common niche types (`Option<NonZeroXxx>`, `Option<&T>`, `Option<Box<T>>`) are now sized correctly; custom niche enums (e.g. `Option<MyNonNull>`) still use approximate sizes — use binary analysis for unusual niches.
 - **Go qualified interface fields** (`io.Reader`, `driver.Connector`, etc.) — cross-package interface types cannot be resolved from source alone; these fields are flagged as `uncertain` in output and sized as 2 words (the correct runtime representation). Use binary analysis for certainty.
 - **Go generics** (Go 1.18+) — generic type parameters (`type Pair[T any] struct { ... }`) cannot be sized from source without instantiation; generic structs are skipped. Use binary analysis for concrete instantiations.
-- **`#pragma pack(N)` on C/C++ structs** — only `__attribute__((packed))` (GCC/Clang style) is detected from source; MSVC-style `#pragma pack` is not. Use binary analysis for accuracy on MSVC-compiled code.
 - **`wchar_t` on Windows** — padlock treats `wchar_t` as 4 bytes (POSIX/GCC). On MSVC Windows targets it is 2 bytes. Use binary analysis for Windows builds.
 - **Rust const-expression padding** (`[u8; 64 - size_of::<Mutex<u64>>()]`) — the expression is not evaluated; the field gets pointer-size as a default.
-- **Zig packed structs with arbitrary-width integers** — bit-packing layout cannot be modelled accurately without a compiler; padlock uses the `ceil(N/8)` approximation.
 - **`repr(Rust)` reordering** — the compiler may reorder fields and eliminate padding automatically; padlock analyzes declaration order, which is what developers read and control.
 
 ---

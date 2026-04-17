@@ -2,6 +2,23 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.7] — 2026-04-17
+
+### Added
+- **`--stdlib libstdc++|libc++|msvc` flag** (`analyze`, `summary`, `check`): selects the C++ standard library variant for type sizing. `libstdc++` (default, GCC/Linux), `libc++` (Clang/macOS/Android), and `msvc` (Windows MSVC) each have different sizes for `std::string`, `std::mutex`, `std::shared_ptr`, and other stdlib types. Use `--stdlib libc++` when analyzing macOS or iOS projects.
+- **MSVC `#pragma pack` support**: `#pragma pack(N)`, `#pragma pack(push, N)`, `#pragma pack(pop)`, and `#pragma pack()` are now fully tracked during C/C++ source analysis. A pack stack mirrors the compiler's state across nesting levels; each struct's pack value is applied as a field-alignment cap, matching MSVC and GCC/Clang behaviour. Complements the existing `__attribute__((packed))` support.
+- **Custom sync type names in `.padlock.toml`**: new `custom_sync_types` list in the `[padlock]` section lets you name project-specific lock wrapper types (e.g. `MyMutex`, `ProtectedData`) that should be treated as concurrent fields for false-sharing detection. Fields whose type name contains any listed string are classified as `Concurrent`.
+- **Rust `Option<T>` niche optimization**: `Option<NonZeroU8/I8>` through `Option<NonZeroUsize/Isize>`, `Option<&T>`, `Option<&mut T>`, `Option<Box<T>>`, `Option<NonNull<T>>`, `Option<Arc<T>>`, and `Option<Rc<T>>` are now sized as their inner type (no extra discriminant byte). Previously these were over-approximated, causing false padding findings on structs using niche-optimized options.
+- **Zig bit-level packed struct layout**: fields in `packed struct` declarations are now laid out bit-accurately. Arbitrary-width integer fields (`u3`, `u11`, etc.) consume exactly N bits; the struct's total size is `ceil(total_bits / 8)`. Previously all fields used `ceil(N/8)` bytes regardless of packing.
+- **Inter-struct embedding hints**: when a struct with padding waste is embedded as a field in other analyzed structs, a `note: embedded in [Foo, Bar] — fixing layout would reduce size of each` line is appended to its output. Helps prioritize fixes whose impact propagates through a type hierarchy.
+- **Skipped-struct diagnostics**: when a generic Rust struct (`struct Foo<T>`) or C++ template (`template<typename T> struct Foo`) is skipped during source analysis, a short `note:` is printed to stderr with the struct name. Makes silent skips visible so engineers know why a specific type is absent from the report.
+- **Deduplication by (file, line)**: when multiple glob patterns or directory entries resolve to the same struct (same source file + line number), duplicates are silently removed. Prevents double-counting in multi-glob configurations or when headers are reached via multiple include paths.
+
+### Changed
+- C++ stdlib table: `std::string` note updated to reflect that `--stdlib libc++` or `--stdlib msvc` now selects the correct sizes at the CLI level, so binary analysis is only needed for unusual configurations.
+- Rust stdlib table: `Option<NonZeroXxx>`, `Option<&T>`, `Option<Box<T>>` now listed as niche-optimized (sized as inner type), not as an approximate.
+- **Limitations** section: removed `#pragma pack(N)` and Zig bit-packed struct entries (now implemented). Updated Rust niche entry to reflect that common niche types are now modeled; only unusual/custom niche types require binary analysis.
+
 ## [0.9.6] — 2026-04-17
 
 ### Added

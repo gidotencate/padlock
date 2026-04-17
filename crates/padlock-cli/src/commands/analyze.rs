@@ -19,6 +19,8 @@ pub struct AnalyzeOpts {
     /// Rust target triple or short arch name (e.g. `aarch64-apple-darwin`).
     /// Overrides the `arch.override` config value.
     pub target: Option<String>,
+    /// C++ stdlib variant for type-size lookups (libstdc++, libc++, msvc).
+    pub stdlib: Option<padlock_source::CppStdlib>,
 }
 
 pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow::Result<()> {
@@ -30,7 +32,14 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
         word_size,
         fail_on_severity,
         target,
+        stdlib,
     } = opts;
+
+    // Apply C++ stdlib variant before any source parsing happens on this thread.
+    if let Some(s) = stdlib {
+        padlock_source::set_cpp_stdlib(s);
+    }
+
     // Load config by searching upward from the first supplied path.
     let cfg = Config::for_path(
         paths
@@ -63,6 +72,13 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
         for layout in &mut layouts {
             layout.arch =
                 padlock_core::arch::with_overrides(layout.arch, cache_line_size, word_size);
+        }
+    }
+
+    // Apply custom sync-type annotations from config (extends built-in heuristic pass).
+    if !cfg.custom_sync_types.is_empty() {
+        for layout in &mut layouts {
+            padlock_source::concurrency::annotate_custom_types(layout, &cfg.custom_sync_types);
         }
     }
 

@@ -10,6 +10,30 @@ use std::path::Path;
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{StructLayout, TypeInfo};
 
+/// C++ standard library implementation variant.
+///
+/// Affects hardcoded sizes of types like `std::string`, `std::mutex`, etc.
+/// The default is `LibStdCpp` (GCC / Linux / glibc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CppStdlib {
+    /// GCC libstdc++ (Linux/glibc default). `std::string` = 32B.
+    #[default]
+    LibStdCpp,
+    /// LLVM libc++ (Clang/macOS/Android). `std::string` = 24B.
+    LibCpp,
+    /// Microsoft MSVC STL (Windows). `std::string` = 32B (SSO = 16 chars).
+    Msvc,
+}
+
+/// Set the C++ stdlib variant used for type-size lookups during source analysis.
+///
+/// This is a thread-local setting; it takes effect for all subsequent calls to
+/// `parse_source` / `parse_source_str` on the current thread.  The default is
+/// `CppStdlib::LibStdCpp`.  Call this from the CLI before invoking analysis.
+pub fn set_cpp_stdlib(stdlib: CppStdlib) {
+    frontends::c_cpp::set_stdlib(stdlib);
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SourceLanguage {
     C,

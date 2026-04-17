@@ -74,6 +74,11 @@ pub struct Config {
     /// Layouts whose source path matches any pattern are excluded from all output.
     /// Example: `["proto/**", "vendor/**", "generated/**"]`
     pub exclude_paths: Vec<String>,
+    /// Additional type-name substrings treated as concurrent synchronization wrappers.
+    /// Any field whose type name contains one of these strings will be annotated as
+    /// Concurrent, enabling false-sharing detection for project-specific lock types.
+    /// Example: `["SeqLock", "TicketLock", "BoundedMPMC"]`
+    pub custom_sync_types: Vec<String>,
 }
 
 impl Default for Config {
@@ -91,6 +96,7 @@ impl Default for Config {
             sort_by: None,
             fail_on_severity: None,
             exclude_paths: Vec::new(),
+            custom_sync_types: Vec::new(),
         }
     }
 }
@@ -215,6 +221,16 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let custom_sync_types = padlock
+            .and_then(|p| p.get("custom_sync_types"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Some(Self {
             min_severity,
             fail_below,
@@ -228,6 +244,7 @@ impl Config {
             sort_by,
             fail_on_severity,
             exclude_paths,
+            custom_sync_types,
         })
     }
 

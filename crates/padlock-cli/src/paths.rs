@@ -117,6 +117,15 @@ pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, 
     // Persist updated cache entries.
     cache.flush();
 
+    // Deduplicate layouts by (source_file, source_line): the same struct parsed
+    // from the same file at the same line is a duplicate.  This happens when a
+    // header is found via multiple overlapping scan paths or passed twice.
+    let mut seen: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
+    all_layouts.retain(|l| match (&l.source_file, l.source_line) {
+        (Some(f), Some(line)) => seen.insert((f.clone(), line)),
+        _ => true,
+    });
+
     Ok((all_layouts, analyzed))
 }
 

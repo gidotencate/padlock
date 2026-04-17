@@ -61,6 +61,36 @@ fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     }
 }
 
+/// Return the exact bit width of a Zig type inside a `packed struct`.
+///
+/// In a packed struct every field is bit-packed without inter-field padding.
+/// Arbitrary-width integers (`u3`, `i11`, …) occupy exactly N bits; all other
+/// types occupy their natural byte size × 8 bits.
+fn zig_type_bit_width(ty: &str, arch: &'static ArchConfig) -> usize {
+    let ty = ty.trim();
+    // Arbitrary-width integers: exact bit count
+    if (ty.starts_with('u') || ty.starts_with('i'))
+        && !ty[1..].is_empty()
+        && ty[1..].bytes().all(|b| b.is_ascii_digit())
+        && let Ok(bits) = ty[1..].parse::<usize>()
+    {
+        return bits;
+    }
+    match ty {
+        "bool" => 1,
+        "f16" => 16,
+        "f32" => 32,
+        "f64" => 64,
+        "f80" => 80,
+        "f128" => 128,
+        _ => {
+            // Fall back to byte size × 8
+            let (bytes, _) = zig_type_size_align(ty, arch);
+            bytes * 8
+        }
+    }
+}
+
 /// Determine size/align of a type node, dispatching by node kind.
 fn type_node_size_align(source: &str, node: Node<'_>, arch: &'static ArchConfig) -> (usize, usize) {
     match node.kind() {
@@ -379,31 +409,60 @@ fn parse_struct_declaration(
     let mut struct_align = 1usize;
     let mut fields: Vec<Field> = Vec::new();
 
-    for (fname, type_text, size, align, field_line) in raw_fields {
-        let eff_align = if is_packed { 1 } else { align };
-        if eff_align > 0 {
-            offset = offset.next_multiple_of(eff_align);
+    if is_packed {
+        // Packed structs: fields are bit-packed with no inter-field padding.
+        // Track the running bit offset; convert to byte offset for Field.offset.
+        // Total struct size = ceil(total_bits / 8).
+        let mut bit_offset = 0usize;
+        for (fname, type_text, _byte_size, _byte_align, field_line) in &raw_fields {
+            let bit_width = zig_type_bit_width(type_text, arch);
+            let byte_offset = bit_offset / 8;
+            let byte_size = bit_width
+                .div_ceil(8)
+                .max(if bit_width == 0 { 0 } else { 1 });
+            fields.push(Field {
+                name: fname.clone(),
+                ty: TypeInfo::Primitive {
+                    name: type_text.clone(),
+                    size: byte_size,
+                    align: 1,
+                },
+                offset: byte_offset,
+                size: byte_size,
+                align: 1,
+                source_file: None,
+                source_line: Some(*field_line),
+                access: padlock_core::ir::AccessPattern::Unknown,
+            });
+            bit_offset += bit_width;
         }
-        struct_align = struct_align.max(eff_align);
-        fields.push(Field {
-            name: fname,
-            ty: TypeInfo::Primitive {
-                name: type_text,
+        offset = bit_offset.div_ceil(8);
+        struct_align = 1;
+    } else {
+        for (fname, type_text, size, align, field_line) in raw_fields {
+            if align > 0 {
+                offset = offset.next_multiple_of(align);
+            }
+            struct_align = struct_align.max(align);
+            fields.push(Field {
+                name: fname,
+                ty: TypeInfo::Primitive {
+                    name: type_text,
+                    size,
+                    align,
+                },
+                offset,
                 size,
                 align,
-            },
-            offset,
-            size,
-            align: eff_align,
-            source_file: None,
-            source_line: Some(field_line),
-            access: padlock_core::ir::AccessPattern::Unknown,
-        });
-        offset += size;
-    }
-
-    if !is_packed && struct_align > 0 {
-        offset = offset.next_multiple_of(struct_align);
+                source_file: None,
+                source_line: Some(field_line),
+                access: padlock_core::ir::AccessPattern::Unknown,
+            });
+            offset += size;
+        }
+        if struct_align > 0 {
+            offset = offset.next_multiple_of(struct_align);
+        }
     }
 
     let _ = is_extern; // affects ABI guarantees, not layout simulation

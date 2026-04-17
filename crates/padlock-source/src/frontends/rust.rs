@@ -78,6 +78,62 @@ fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, 
                 return (size, align, TypeInfo::Primitive { name, size, align });
             }
 
+            // Option<T> niche optimisation: when T has a niche (a bit pattern
+            // that cannot occur in a valid T), the compiler encodes the None
+            // discriminant into that niche without adding a separate tag byte.
+            //
+            // Recognised niche-capable types (conservative subset):
+            //   NonZeroU8/NonZeroI8/… — niche at 0
+            //   &T / &mut T          — niche at null pointer
+            //   Box<T> / NonNull<T>  — niche at null pointer
+            //
+            // For all other Option<T> we fall through to pointer-size, which is
+            // a reasonable default (exact size requires full type inference).
+            if name == "Option"
+                && let Some(inner) = seg.and_then(|s| {
+                    if let syn::PathArguments::AngleBracketed(ref ab) = s.arguments {
+                        ab.args.iter().find_map(|a| {
+                            if let syn::GenericArgument::Type(t) = a {
+                                Some(t)
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                })
+            {
+                if let Some((sz, al)) = option_niche_size(inner, arch) {
+                    return (
+                        sz,
+                        al,
+                        TypeInfo::Primitive {
+                            name,
+                            size: sz,
+                            align: al,
+                        },
+                    );
+                }
+                // No niche — conservative: inner size + 1-byte discriminant
+                // rounded up to inner alignment.
+                let (inner_size, inner_align, _) = rust_type_size_align(inner, arch);
+                let sz = if inner_size == 0 {
+                    1 // Option<()> / Option<ZST> = 1 byte
+                } else {
+                    (inner_size + 1).next_multiple_of(inner_align.max(1))
+                };
+                return (
+                    sz,
+                    inner_align.max(1),
+                    TypeInfo::Primitive {
+                        name,
+                        size: sz,
+                        align: inner_align.max(1),
+                    },
+                );
+            }
+
             // Box<dyn Trait>, Arc<dyn Trait>, Rc<dyn Trait>, Weak<dyn Trait> are fat
             // pointers: they hold both a data pointer and a vtable pointer (2 words).
             let is_fat = matches!(name.as_str(), "Box" | "Arc" | "Rc" | "Weak")
@@ -140,6 +196,49 @@ fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, 
                 },
             )
         }
+    }
+}
+
+/// Return `Some((size, align))` when `Option<inner>` can use a niche optimisation,
+/// meaning the Option occupies no more space than the inner type itself.
+///
+/// Recognised niche-capable types:
+/// - `NonZeroU8` / `NonZeroI8` … `NonZeroUsize` — niche at zero
+/// - `&T` / `&mut T` — niche at null pointer (reference is always non-null)
+/// - `Box<T>` / `NonNull<T>` / `Arc<T>` / `Rc<T>` — non-null pointer niche
+fn option_niche_size(inner: &Type, arch: &'static ArchConfig) -> Option<(usize, usize)> {
+    match inner {
+        Type::Path(tp) => {
+            let name = tp
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default();
+            match name.as_str() {
+                "NonZeroU8" | "NonZeroI8" => Some((1, 1)),
+                "NonZeroU16" | "NonZeroI16" => Some((2, 2)),
+                "NonZeroU32" | "NonZeroI32" => Some((4, 4)),
+                "NonZeroU64" | "NonZeroI64" => Some((8, 8)),
+                "NonZeroU128" | "NonZeroI128" => Some((16, 16)),
+                "NonZeroUsize" | "NonZeroIsize" => {
+                    let ps = arch.pointer_size;
+                    Some((ps, ps))
+                }
+                // Box<T>, NonNull<T>, Arc<T>, Rc<T> — non-null pointer niche
+                "Box" | "NonNull" | "Arc" | "Rc" => {
+                    let ps = arch.pointer_size;
+                    Some((ps, ps))
+                }
+                _ => None,
+            }
+        }
+        // &T and &mut T — references are always non-null → niche at null
+        Type::Reference(_) => {
+            let ps = arch.pointer_size;
+            Some((ps, ps))
+        }
+        _ => None,
     }
 }
 
@@ -367,6 +466,11 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
         // without knowing the concrete type arguments. Skip them rather than
         // producing wrong field sizes for the type parameters.
         if !node.generics.params.is_empty() {
+            eprintln!(
+                "padlock: note: skipping '{}' — generic struct \
+                 (layout depends on type arguments; use binary analysis for accurate results)",
+                node.ident
+            );
             return;
         }
 
@@ -436,6 +540,11 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
 
         // Skip generic enums (layout depends on unknown type arguments)
         if !node.generics.params.is_empty() {
+            eprintln!(
+                "padlock: note: skipping '{}' — generic enum \
+                 (layout depends on type arguments; use binary analysis for accurate results)",
+                node.ident
+            );
             return;
         }
 

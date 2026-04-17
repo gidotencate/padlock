@@ -40,6 +40,34 @@ pub fn annotate_concurrency(layout: &mut StructLayout, language: &SourceLanguage
     }
 }
 
+/// Annotate fields whose type name contains any of `custom_types` as Concurrent.
+///
+/// Called after the built-in heuristic pass to extend detection to project-specific
+/// synchronization wrappers (e.g. `SeqLock`, `TicketLock`) registered in
+/// `.padlock.toml` under `[padlock] custom_sync_types`.
+pub fn annotate_custom_types(layout: &mut StructLayout, custom_types: &[String]) {
+    if custom_types.is_empty() {
+        return;
+    }
+    for field in &mut layout.fields {
+        if !matches!(field.access, AccessPattern::Unknown) {
+            continue; // already annotated by built-in pass or explicit guard
+        }
+        let ty_name = match &field.ty {
+            padlock_core::ir::TypeInfo::Primitive { name, .. }
+            | padlock_core::ir::TypeInfo::Opaque { name, .. } => name.clone(),
+            _ => continue,
+        };
+        if custom_types.iter().any(|ct| ty_name.contains(ct.as_str())) {
+            field.access = AccessPattern::Concurrent {
+                guard: Some(field.name.clone()),
+                is_atomic: false,
+                is_annotated: false,
+            };
+        }
+    }
+}
+
 /// Returns `true` if any field has a `Concurrent` access pattern.
 pub fn has_concurrent_fields(layout: &StructLayout) -> bool {
     layout

@@ -125,6 +125,11 @@ pub struct Report {
     /// Paths that were analyzed to produce this report (populated by the CLI).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub analyzed_paths: Vec<String>,
+    /// Maps each struct name to the list of outer struct names that embed it
+    /// as a field.  Used to surface "fixing this struct also shrinks Foo/Bar"
+    /// hints in the output.  Omitted from JSON serialisation (internal only).
+    #[serde(skip)]
+    pub embedded_in: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Report {
@@ -132,11 +137,34 @@ impl Report {
     pub fn from_layouts(layouts: &[StructLayout]) -> Report {
         let structs: Vec<StructReport> = layouts.iter().map(analyze_one).collect();
         let total_wasted_bytes = structs.iter().map(|s| s.wasted_bytes).sum();
+
+        // Build reverse-embedding map: inner_struct_name → [outer_struct_names].
+        // Any field whose TypeInfo::Opaque name matches a known struct is an embedding.
+        let struct_names: std::collections::HashSet<&str> =
+            structs.iter().map(|s| s.struct_name.as_str()).collect();
+        let mut embedded_in: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for layout in layouts {
+            for field in &layout.fields {
+                let inner_name = match &field.ty {
+                    crate::ir::TypeInfo::Opaque { name, .. } => name.as_str(),
+                    _ => continue,
+                };
+                if struct_names.contains(inner_name) {
+                    embedded_in
+                        .entry(inner_name.to_owned())
+                        .or_default()
+                        .push(layout.name.clone());
+                }
+            }
+        }
+
         Report {
             total_structs: structs.len(),
             total_wasted_bytes,
             structs,
             analyzed_paths: Vec::new(),
+            embedded_in,
         }
     }
 }

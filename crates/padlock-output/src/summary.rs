@@ -37,7 +37,7 @@ pub fn render_report(report: &Report) -> String {
     } else {
         out.push('\n');
         for sr in &report.structs {
-            out.push_str(&render_struct(sr, true));
+            out.push_str(&render_struct_with_embed(sr, true, &report.embedded_in));
             out.push('\n');
         }
     }
@@ -69,18 +69,27 @@ fn render_grouped(out: &mut String, report: &Report) {
         if let Some(structs) = groups.get(key) {
             for sr in structs {
                 // Within a group, suppress the filename (show only line number).
-                out.push_str(&render_struct(sr, false));
+                out.push_str(&render_struct_with_embed(sr, false, &report.embedded_in));
                 out.push('\n');
             }
         }
     }
 }
 
-/// Render one struct report.
+/// Render one struct report (public API, no embedding hints).
 ///
 /// `show_filename`: when `true`, the `source_file` is included in the location hint;
 /// when `false` (inside a file-grouped section), only the line number is shown.
 pub fn render_struct(sr: &StructReport, show_filename: bool) -> String {
+    render_struct_with_embed(sr, show_filename, &std::collections::HashMap::new())
+}
+
+/// Render one struct report with optional embedding-context hints.
+fn render_struct_with_embed(
+    sr: &StructReport,
+    show_filename: bool,
+    embedded_in: &std::collections::HashMap<String, Vec<String>>,
+) -> String {
     let mut out = String::new();
 
     let score_label = match sr.score as u32 {
@@ -137,6 +146,25 @@ pub fn render_struct(sr: &StructReport, show_filename: bool) -> String {
         out.push_str(&format!(
             "    note: uncertain field size(s): {fields} — \
              use binary analysis (DWARF/BTF) or provide type info for accurate results\n"
+        ));
+    }
+
+    // Embedding context: if this struct has padding waste and is embedded in
+    // other structs, note that fixing this struct would shrink those too.
+    let has_waste = sr
+        .findings
+        .iter()
+        .any(|f| matches!(f, Finding::PaddingWaste { .. }));
+    if has_waste
+        && let Some(outer_structs) = embedded_in.get(&sr.struct_name)
+        && !outer_structs.is_empty()
+    {
+        let mut names = outer_structs.clone();
+        names.sort();
+        names.dedup();
+        out.push_str(&format!(
+            "    note: embedded in [{}] — fixing layout would reduce size of each\n",
+            names.join(", ")
         ));
     }
 

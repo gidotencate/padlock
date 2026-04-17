@@ -40,6 +40,7 @@ pub fn run(
             word_size: None,
             fail_on_severity,
             target: None,
+            stdlib: None,
         },
         filter,
     )

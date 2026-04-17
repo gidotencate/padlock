@@ -2,6 +2,28 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.6] — 2026-04-17
+
+### Added
+- **Transparent newtype sizing** (Rust): `Cell<T>`, `MaybeUninit<T>`, `UnsafeCell<T>`, `Wrapping<T>`, `Saturating<T>`, and `ManuallyDrop<T>` now recurse into the inner type argument and report the correct size. `Cell<u8>` is 1 byte, not pointer-size.
+- **C/C++ typedef alias resolution**: phase-0 pre-scan builds a scalar alias map (`typedef uint32_t UserId`). Fields typed via scalar aliases are now sized correctly.
+- **C++ template skipping**: `template<typename T> struct/class/union` declarations are now skipped instead of producing wrong pointer-size placeholder layouts. Non-template types in the same TU are unaffected.
+- **Go local interface sizing**: locally-declared named interfaces (`type Reader interface { ... }`) are sized as 2-word fat pointers. Cross-package types (`io.Reader`) remain 2-word approximations and are flagged as `uncertain_fields`.
+- **`uncertain_fields` on `StructLayout`/`StructReport`**: new field records names whose size could not be determined from source alone; shown as a per-struct note in terminal output and as a JSON array (omitted when empty).
+- **Raw BTF file support**: `padlock analyze /sys/kernel/btf/vmlinux` and `.btf` files now work without an ELF wrapper.
+- **Locality: cache-line mixing detection**: `has_locality_issue` now also flags structs where hot and cold fields share a cache line even without interleaving, provided the struct spans more than one cache line. Architectures without a cache (`cache_line_size = 0`) skip this check.
+- **`PaddingWaste` severity: absolute waste thresholds**: alongside percentage gates (≥30% → High, ≥10% → Medium), absolute gates now apply (≥32B → High, ≥8B → Medium) so large structs with modest-percentage waste are not under-reported.
+
+### Fixed
+- Locality output: `"interleaved with"` changed to `"mixed with … on same cache line(s)"` — accurate for both interleaving and cache-line sharing.
+- `ref_dyn_trait_is_fat_pointer` test now asserts the 16-byte fat pointer size (the old test used a lifetime-parameterized struct which is skipped by the parser, so it asserted nothing).
+
+### Docs
+- All crate READMEs, `docs/architecture.md`, and `docs/findings.md` updated to include Zig in language lists and reflect typedef alias resolution, template skipping, transparent newtypes, and Go interface sizing.
+- Main README: corrected Rust enum description (data enums are modeled via `__payload` + `__discriminant`; only niched layouts are not); added Go 1.18+ generics limitation; moved C++ templates from limitations to the skipped table.
+- `docs/publishing.md`: updated description string and fix language list to include Zig.
+- CLAUDE.md: added all 11 subcommands with descriptions, full `padlock-output` module breakdown, and accuracy notes for all new features.
+
 ## [0.9.5] — 2026-04-14
 
 ### Added

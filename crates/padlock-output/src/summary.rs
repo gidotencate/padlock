@@ -225,7 +225,7 @@ fn render_finding(f: &Finding) -> String {
                 ""
             };
             format!(
-                "[{sev}] Locality: hot [{}] interleaved with cold [{}]{}",
+                "[{sev}] Locality: hot [{}] mixed with cold [{}] on same cache line(s){}",
                 hot_fields.join(", "),
                 cold_fields.join(", "),
                 inferred_note

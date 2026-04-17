@@ -1,6 +1,6 @@
 # padlock-core
 
-Core library for [padlock](https://github.com/gidotencate/padlock) — a struct memory layout analyzer for C, C++, Rust, and Go.
+Core library for [padlock](https://github.com/gidotencate/padlock) — a struct memory layout analyzer for C, C++, Rust, Go, and Zig.
 
 This crate provides:
 

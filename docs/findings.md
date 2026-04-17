@@ -209,7 +209,10 @@ A cache line loaded to access a hot field (concurrently modified or frequently r
 
 **How it is detected**
 
-padlock looks for structs where `Concurrent`-access fields and `Unknown`-access (presumed cold or infrequent) fields are interleaved across different cache lines. Specifically: if the set of concurrent fields does not form a contiguous prefix or suffix of the struct, the hot/cold fields are interleaved.
+padlock checks two conditions:
+
+1. **Interleaving** — if the set of hot fields does not form a contiguous prefix or suffix of the struct (a hot→cold→hot transition exists).
+2. **Cache-line mixing** — when the struct spans more than one cache line, any cache line containing both hot and cold fields is a locality problem even without interleaving (accessing a hot field loads the cold field onto the same cache line as unavoidable baggage).
 
 **Example**
 

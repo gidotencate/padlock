@@ -1,6 +1,6 @@
 # padlock-source
 
-Source analysis backend for [padlock](https://github.com/gidotencate/padlock) — a struct memory layout analyzer for C, C++, Rust, and Go.
+Source analysis backend for [padlock](https://github.com/gidotencate/padlock) — a struct memory layout analyzer for C, C++, Rust, Go, and Zig.
 
 This crate parses source files without invoking a compiler, using tree-sitter (C/C++/Go) and syn (Rust) to extract struct definitions and simulate their memory layout.
 

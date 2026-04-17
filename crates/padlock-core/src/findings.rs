@@ -151,9 +151,12 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
     // Unions: is_union suppresses padding at the find_padding level; no extra check needed.
     if wasted > 0 {
         let waste_pct = wasted as f64 / layout.total_size as f64 * 100.0;
-        let mut severity = if waste_pct >= 30.0 {
+        // Percentage thresholds catch high-density waste in small structs.
+        // Absolute thresholds catch large structs where the percentage looks
+        // modest but the real cache-bandwidth cost is significant.
+        let mut severity = if waste_pct >= 30.0 || wasted >= 32 {
             Severity::High
-        } else if waste_pct >= 10.0 {
+        } else if waste_pct >= 10.0 || wasted >= 8 {
             Severity::Medium
         } else {
             Severity::Low

@@ -95,27 +95,34 @@ export function activate(context: vscode.ExtensionContext): void {
       analyzeWorkspace();
     }),
 
-    // Fix all structs directly (no preview) — existing command, unchanged behaviour
+    // Fix all structs directly (no preview) — applies via WorkspaceEdit (undo-able)
     vscode.commands.registerCommand("padlock.fixFile", async () => {
       const doc = vscode.window.activeTextEditor?.document;
       if (!doc) {
         return;
       }
-      const exe = resolveExecutable();
-      await runCommand(exe, ["fix", doc.uri.fsPath]).catch(() => {});
+      const fixed = await fixWithTempFile(doc.uri.fsPath);
+      if (!fixed || fixed === doc.getText()) {
+        vscode.window.showInformationMessage(
+          "padlock: all structs are already optimally ordered.",
+        );
+        return;
+      }
+      await applyDocumentEdit(doc.uri, fixed);
       analyzeFile(doc.uri.fsPath);
     }),
 
-    // Fix a single struct by name — used by the CodeAction quick-fix
+    // Fix a single struct by name — applies via WorkspaceEdit (undo-able)
     vscode.commands.registerCommand(
       "padlock.fixStruct",
       async (filePath: string, filter: string) => {
-        const exe = resolveExecutable();
-        const args = ["fix", filePath];
-        if (filter) {
-          args.push("--filter", filter);
+        const uri = vscode.Uri.file(filePath);
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const fixed = await fixWithTempFile(filePath, filter);
+        if (!fixed || fixed === doc.getText()) {
+          return;
         }
-        await runCommand(exe, args).catch(() => {});
+        await applyDocumentEdit(uri, fixed);
         analyzeFile(filePath);
       },
     ),
@@ -124,6 +131,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("padlock.fixFilePreview", () => {
       showFixPreview();
     }),
+
+    // Show a diff preview scoped to a single struct, then ask to apply
+    vscode.commands.registerCommand(
+      "padlock.fixStructPreview",
+      (filePath: string, structName: string) => {
+        showFixStructPreview(filePath, structName);
+      },
+    ),
 
     vscode.commands.registerCommand("padlock.clearDiagnostics", () => {
       diagnosticCollection.clear();
@@ -271,90 +286,132 @@ function analyzeWorkspace(): void {
   );
 }
 
-// ── Fix preview ───────────────────────────────────────────────────────────────
+// ── Fix helpers ───────────────────────────────────────────────────────────────
 
+/** Run `padlock fix` on a temp copy of the file and return the fixed content.
+ *  Uses the live editor buffer so unsaved edits are included.
+ *  Returns null if the file has nothing to fix or the command fails. */
+async function fixWithTempFile(
+  filePath: string,
+  filter?: string,
+): Promise<string | null> {
+  const ext = path.extname(filePath);
+  const tmpPath = path.join(os.tmpdir(), `padlock-fix-${Date.now()}${ext}`);
+  const exe = resolveExecutable();
+  try {
+    // Prefer the live editor buffer so unsaved changes are included.
+    const openDoc = vscode.workspace.textDocuments.find(
+      (d) => d.uri.fsPath === filePath,
+    );
+    if (openDoc) {
+      fs.writeFileSync(tmpPath, openDoc.getText(), "utf8");
+    } else {
+      fs.copyFileSync(filePath, tmpPath);
+    }
+    const args = ["fix", tmpPath];
+    if (filter) {
+      args.push("--filter", filter);
+    }
+    await runCommand(exe, args);
+    return fs.readFileSync(tmpPath, "utf8");
+  } catch {
+    return null;
+  } finally {
+    try { fs.unlinkSync(tmpPath); } catch {}
+  }
+}
+
+/** Apply new content to an open document via WorkspaceEdit so the change lands
+ *  on the undo stack and can be reverted with Ctrl+Z. */
+async function applyDocumentEdit(
+  uri: vscode.Uri,
+  newContent: string,
+): Promise<void> {
+  const doc = await vscode.workspace.openTextDocument(uri);
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(
+    uri,
+    new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)),
+    newContent,
+  );
+  await vscode.workspace.applyEdit(edit);
+}
+
+/** Show a before/after diff for all structs in the file, then offer Apply. */
 async function showFixPreview(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     return;
   }
-
-  const filePath = editor.document.uri.fsPath;
-  const exe = resolveExecutable();
-  const ext = path.extname(filePath);
-  const tmpPath = path.join(
-    os.tmpdir(),
-    `padlock-preview-${Date.now()}${ext}`,
+  await showDiffAndApply(
+    editor.document.uri,
+    undefined,
+    `${path.basename(editor.document.uri.fsPath)}  ↔  padlock fix preview`,
+    "Apply padlock field reorderings to this file?",
   );
+}
+
+/** Show a before/after diff scoped to a single struct, then offer Apply. */
+async function showFixStructPreview(
+  filePath: string,
+  structName: string,
+): Promise<void> {
+  await showDiffAndApply(
+    vscode.Uri.file(filePath),
+    `^${escapeRegex(structName)}$`,
+    `${structName}  ↔  padlock fix preview`,
+    `Apply padlock reordering to \`${structName}\`?`,
+  );
+}
+
+/** Core: get fixed content, open VSCode diff editor, ask Apply/Dismiss.
+ *  Changes are applied via WorkspaceEdit — no .bak file created. */
+async function showDiffAndApply(
+  fileUri: vscode.Uri,
+  filter: string | undefined,
+  diffTitle: string,
+  prompt: string,
+): Promise<void> {
+  const filePath = fileUri.fsPath;
+  const doc = await vscode.workspace.openTextDocument(fileUri);
+  const originalContent = doc.getText();
+
+  const fixedContent = await fixWithTempFile(filePath, filter);
+  if (!fixedContent || fixedContent === originalContent) {
+    vscode.window.showInformationMessage(
+      "padlock: all structs are already optimally ordered.",
+    );
+    return;
+  }
+
+  const label = `${path.basename(filePath)} (padlock fix preview)`;
+  const previewUri = vscode.Uri.parse(
+    `${PREVIEW_SCHEME}:${encodeURIComponent(label)}?t=${Date.now()}`,
+  );
+  previewContentMap.set(previewUri.toString(), fixedContent);
 
   try {
-    fs.copyFileSync(filePath, tmpPath);
-
-    // Run fix on the temp copy; padlock creates a .bak alongside it
-    try {
-      await runCommand(exe, ["fix", tmpPath]);
-    } catch {
-      vscode.window.showInformationMessage(
-        "padlock: all structs are already optimally ordered.",
-      );
-      return;
-    }
-
-    const fixedContent = fs.readFileSync(tmpPath, "utf8");
-    const originalContent = editor.document.getText();
-
-    if (fixedContent === originalContent) {
-      vscode.window.showInformationMessage(
-        "padlock: all structs are already optimally ordered.",
-      );
-      return;
-    }
-
-    // Register fixed content under a unique virtual URI
-    const label = `${path.basename(filePath)} (padlock fix preview)`;
-    const previewUri = vscode.Uri.parse(
-      `${PREVIEW_SCHEME}:${encodeURIComponent(label)}?t=${Date.now()}`,
-    );
-    previewContentMap.set(previewUri.toString(), fixedContent);
-
-    // Open the native diff editor: left = current file, right = preview
     await vscode.commands.executeCommand(
       "vscode.diff",
-      editor.document.uri,
+      fileUri,
       previewUri,
-      `${path.basename(filePath)}  ↔  padlock fix preview`,
+      diffTitle,
       { preview: true },
     );
 
-    // Ask the user whether to apply
     const choice = await vscode.window.showInformationMessage(
-      "Apply padlock field reorderings to this file?",
+      prompt,
       { modal: false },
       "Apply",
       "Dismiss",
     );
 
     if (choice === "Apply") {
-      // Back up original, write fixed content
-      const bakPath = filePath.replace(/(\.[^.]+)$/, "$1.bak");
-      fs.copyFileSync(filePath, bakPath);
-      fs.writeFileSync(filePath, fixedContent);
+      await applyDocumentEdit(fileUri, fixedContent);
       analyzeFile(filePath);
-      vscode.window.showInformationMessage(
-        `padlock: rewrote ${path.basename(filePath)}. Backup: ${path.basename(bakPath)}`,
-      );
     }
-
-    // Clean up virtual document entry
-    previewContentMap.delete(previewUri.toString());
   } finally {
-    // Remove temp file and the .bak padlock created next to it
-    try {
-      fs.unlinkSync(tmpPath);
-    } catch {}
-    try {
-      fs.unlinkSync(tmpPath + ".bak");
-    } catch {}
+    previewContentMap.delete(previewUri.toString());
   }
 }
 
@@ -449,7 +506,7 @@ function buildCodeActions(
     const struct = structs.find((s) => s.source_line === line);
 
     if (struct) {
-      // Quick-fix for this specific struct
+      // Direct apply (on undo stack via WorkspaceEdit)
       const fixOne = new vscode.CodeAction(
         `Reorder \`${struct.struct_name}\` fields (padlock)`,
         vscode.CodeActionKind.QuickFix,
@@ -465,6 +522,19 @@ function buildCodeActions(
       fixOne.diagnostics = reorderDiags;
       fixOne.isPreferred = true;
       actions.push(fixOne);
+
+      // Preview diff scoped to this struct before applying
+      const previewOne = new vscode.CodeAction(
+        `Preview reorder of \`${struct.struct_name}\` (padlock)`,
+        vscode.CodeActionKind.QuickFix,
+      );
+      previewOne.command = {
+        command: "padlock.fixStructPreview",
+        title: `Preview reorder of ${struct.struct_name}`,
+        arguments: [document.uri.fsPath, struct.struct_name],
+      };
+      previewOne.diagnostics = reorderDiags;
+      actions.push(previewOne);
     }
   }
 

@@ -41,8 +41,9 @@ Score 67/100 `██████░░░░` · 24B · 10B wasted
 
 When a `ReorderSuggestion` diagnostic is active, the lightbulb (⚡) menu offers:
 
-- **Reorder `StructName` fields (padlock)** — rewrites that struct in-place immediately.
-- **Fix all reorder suggestions in file — preview (padlock)** — opens the diff editor first.
+- **Reorder `StructName` fields (padlock)** — rewrites that struct in-place immediately (applied via WorkspaceEdit, so Ctrl+Z reverts it).
+- **Preview reorder of `StructName` (padlock)** — opens the diff editor scoped to just that struct before applying.
+- **Fix all reorder suggestions in file — preview (padlock)** — opens the diff editor showing every reordering in the file before applying.
 
 ## Requirements
 
@@ -75,13 +76,15 @@ cargo install padlock-cli
 |---|---|
 | `padlock: Analyze current file` | Run analysis on the open file |
 | `padlock: Analyze workspace` | Run analysis across the entire workspace |
-| `padlock: Apply fix (reorder fields)` | Reorder fields in the current file to the optimal layout |
-| `padlock: Fix all (preview)` | Open a diff editor showing all reorder changes before applying |
+| `padlock: Apply fix (reorder all structs)` | Reorder all fixable structs in the current file immediately (undo-able) |
+| `padlock: Preview fix (reorder all structs)` | Open a diff editor showing every reordering before applying |
 | `padlock: Clear findings` | Remove all padlock diagnostics from the Problems panel |
 
-### Fix all with preview
+All commands are also available from the **right-click context menu** when editing a supported file.
 
-`padlock: Fix all (preview)` copies the file to a temp location, runs `padlock fix` on it, and opens the VS Code diff editor so you can review every reordering before committing. Clicking **Apply** writes the changes back with a `.bak` backup of the original.
+### Fix with preview
+
+`padlock: Preview fix (reorder all structs)` runs the fix on a temporary copy of the file and opens the VS Code diff editor so you can review every reordering before committing. Clicking **Apply** applies the changes via WorkspaceEdit — no `.bak` file is created, and you can undo with Ctrl+Z. The same workflow is available per-struct via the lightbulb menu.
 
 ## Settings
 
@@ -142,7 +145,7 @@ Severity: **High** ≥ 30% wasted · **Medium** ≥ 10% · **Low** < 10%
 
 ### ReorderSuggestion
 
-Fields can be reordered by descending alignment to eliminate most padding. padlock computes the optimal order and shows the exact byte savings. Use `padlock: Apply fix` or the lightbulb (⚡) to rewrite the file automatically (a `.bak` backup is saved first).
+Fields can be reordered by descending alignment to eliminate most padding. padlock computes the optimal order and shows the exact byte savings. Use `padlock: Apply fix` or the lightbulb (⚡) to rewrite the file — all fixes are applied via WorkspaceEdit and land on the undo stack, so Ctrl+Z reverts them if needed.
 
 Severity: **High** saves ≥ 8 bytes · **Medium** otherwise
 

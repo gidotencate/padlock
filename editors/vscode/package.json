@@ -2,7 +2,7 @@
   "name": "padlock",
   "displayName": "padlock",
   "description": "The lint pass for struct memory layout — finds padding waste, false sharing, and cache locality problems in C, C++, Rust, Go, and Zig.",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "publisher": "gidotencate",
   "icon": "icon.png",
   "license": "MIT OR Apache-2.0",
@@ -47,17 +47,54 @@
       },
       {
         "command": "padlock.fixFile",
-        "title": "padlock: Apply fix (reorder fields)"
+        "title": "padlock: Apply fix (reorder all structs)"
       },
       {
         "command": "padlock.fixFilePreview",
-        "title": "padlock: Fix all (preview)"
+        "title": "padlock: Preview fix (reorder all structs)"
       },
       {
         "command": "padlock.clearDiagnostics",
         "title": "padlock: Clear findings"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "padlock.analyzeFile",
+          "when": "resourceExtname =~ /\\.(rs|c|cpp|cc|cxx|h|hpp|go|zig)$/",
+          "group": "padlock@1"
+        },
+        {
+          "command": "padlock.fixFilePreview",
+          "when": "resourceExtname =~ /\\.(rs|c|cpp|cc|cxx|h|hpp|go|zig)$/",
+          "group": "padlock@2"
+        },
+        {
+          "command": "padlock.fixFile",
+          "when": "resourceExtname =~ /\\.(rs|c|cpp|cc|cxx|h|hpp|go|zig)$/",
+          "group": "padlock@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "padlock.analyzeFile",
+          "when": "resourceExtname =~ /\\.(rs|c|cpp|cc|cxx|h|hpp|go|zig)$/"
+        },
+        {
+          "command": "padlock.fixFile",
+          "when": "resourceExtname =~ /\\.(rs|c|cpp|cc|cxx|h|hpp|go|zig)$/"
+        },
+        {
+          "command": "padlock.fixFilePreview",
+          "when": "resourceExtname =~ /\\.(rs|c|cpp|cc|cxx|h|hpp|go|zig)$/"
+        },
+        {
+          "command": "padlock.clearDiagnostics",
+          "when": "resourceExtname =~ /\\.(rs|c|cpp|cc|cxx|h|hpp|go|zig)$/"
+        }
+      ]
+    },
     "configuration": {
       "title": "padlock",
       "properties": {

@@ -1,7 +1,6 @@
 // padlock-cli/src/commands/fix.rs
 //
 // Applies optimal field reordering to source files in-place.
-// A `.bak` copy of the original is written before any changes are made.
 
 use std::path::{Path, PathBuf};
 
@@ -10,8 +9,12 @@ use padlock_source::{SourceLanguage, fixgen};
 
 use crate::paths::walk_source_files;
 
-pub fn run(paths: &[PathBuf], dry_run: bool, filter: Option<&str>) -> anyhow::Result<()> {
-    // Compile regex once if a filter was given.
+pub fn run(
+    paths: &[PathBuf],
+    dry_run: bool,
+    backup: bool,
+    filter: Option<&str>,
+) -> anyhow::Result<()> {
     let re = filter
         .map(|p| {
             regex::Regex::new(p).map_err(|_| anyhow::anyhow!("invalid --filter pattern: {p:?}"))
@@ -21,7 +24,7 @@ pub fn run(paths: &[PathBuf], dry_run: bool, filter: Option<&str>) -> anyhow::Re
     let source_files = expand_to_source_files(paths)?;
 
     for file in &source_files {
-        if let Err(e) = fix_file(file, dry_run, re.as_ref()) {
+        if let Err(e) = fix_file(file, dry_run, backup, re.as_ref()) {
             eprintln!("padlock: warning: {}: {e}", file.display());
         }
     }
@@ -29,7 +32,12 @@ pub fn run(paths: &[PathBuf], dry_run: bool, filter: Option<&str>) -> anyhow::Re
     Ok(())
 }
 
-fn fix_file(path: &Path, dry_run: bool, re: Option<&regex::Regex>) -> anyhow::Result<()> {
+fn fix_file(
+    path: &Path,
+    dry_run: bool,
+    backup: bool,
+    re: Option<&regex::Regex>,
+) -> anyhow::Result<()> {
     let lang = padlock_source::detect_language(path).ok_or_else(|| {
         anyhow::anyhow!(
             "fix only works on source files (.c, .cpp, .rs, .go, .zig); got {}",
@@ -123,12 +131,13 @@ fn fix_file(path: &Path, dry_run: bool, re: Option<&regex::Regex>) -> anyhow::Re
         return Ok(());
     }
 
-    // Write .bak backup, then apply in-place rewrite.
-    let bak = path.with_extension(format!(
-        "{}.bak",
-        path.extension().unwrap_or_default().to_string_lossy()
-    ));
-    std::fs::copy(path, &bak)?;
+    if backup {
+        let bak = path.with_extension(format!(
+            "{}.bak",
+            path.extension().unwrap_or_default().to_string_lossy()
+        ));
+        std::fs::copy(path, &bak)?;
+    }
 
     let fixed_source = match lang {
         SourceLanguage::C | SourceLanguage::Cpp => fixgen::apply_fixes_c(&source, &layouts_to_fix),
@@ -139,10 +148,9 @@ fn fix_file(path: &Path, dry_run: bool, re: Option<&regex::Regex>) -> anyhow::Re
 
     std::fs::write(path, &fixed_source)?;
     println!(
-        "Rewrote {} struct(s) in {}. Backup: {}",
+        "Rewrote {} struct(s) in {}.",
         layouts_to_fix.len(),
-        path.display(),
-        bak.display()
+        path.display()
     );
 
     Ok(())

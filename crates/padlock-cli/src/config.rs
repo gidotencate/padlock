@@ -269,6 +269,7 @@ impl Config {
     }
 
     /// Returns true if a finding with the given severity should be reported.
+    #[allow(dead_code)]
     pub fn should_report(&self, severity: &Severity) -> bool {
         severity_rank(severity) >= severity_rank(&self.min_severity)
     }

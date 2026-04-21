@@ -28,7 +28,7 @@ mod output {
 #[command(
     name = "padlock",
     about = "Struct memory layout analyzer for C, C++, Rust, and Go",
-    version
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("BUILD_GIT_SHA"), ")")
 )]
 struct Cli {
     #[command(subcommand)]

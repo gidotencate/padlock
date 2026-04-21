@@ -647,7 +647,8 @@ fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, Stri
             continue;
         }
         // Last element is the alias name; everything before is the base type.
-        let alias_name = type_parts.pop().unwrap();
+        // Safety: len >= 2 guaranteed by the check above.
+        let alias_name = type_parts.pop().expect("len >= 2");
         let base_type = type_parts.join(" ");
         aliases.entry(alias_name).or_insert(base_type);
     }

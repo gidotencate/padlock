@@ -1545,4 +1545,142 @@ mod tests {
         // Package declaration must be preserved
         assert!(fixed.starts_with("package p\n"), "package line preserved");
     }
+
+    // ── regression: no blank line after opening brace ─────────────────────────
+
+    #[test]
+    fn c_fix_no_blank_line_after_opening_brace() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let src = "struct S {\n    char a;\n    double b;\n};\n";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::C, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_c(src, &[&layouts[0]]);
+        // The character immediately after '{' must be '\n' followed by a non-'\n'
+        // character (i.e. no blank line).
+        let brace = fixed.find('{').unwrap();
+        let after_brace = &fixed[brace + 1..];
+        assert!(
+            !after_brace.starts_with("\n\n"),
+            "C fix must not insert a blank line after '{{': got {:?}",
+            &after_brace[..after_brace.len().min(20)]
+        );
+    }
+
+    #[test]
+    fn go_fix_no_blank_line_after_opening_brace() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let src = "type S struct {\n\ta uint8\n\tb uint64\n}\n";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Go, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_go(src, &[&layouts[0]]);
+        let brace = fixed.find('{').unwrap();
+        let after_brace = &fixed[brace + 1..];
+        assert!(
+            !after_brace.starts_with("\n\n"),
+            "Go fix must not insert a blank line after '{{': got {:?}",
+            &after_brace[..after_brace.len().min(20)]
+        );
+    }
+
+    #[test]
+    fn zig_fix_no_blank_line_after_opening_brace() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let src = "const S = struct {\n    a: u8,\n    b: u64,\n};\n";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Zig, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_zig(src, &[&layouts[0]]);
+        let brace = fixed.find('{').unwrap();
+        let after_brace = &fixed[brace + 1..];
+        assert!(
+            !after_brace.starts_with("\n\n"),
+            "Zig fix must not insert a blank line after '{{': got {:?}",
+            &after_brace[..after_brace.len().min(20)]
+        );
+    }
+
+    #[test]
+    fn rust_fix_no_blank_line_after_opening_brace() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let src = "struct S {\n    a: u8,\n    b: u64,\n}\n";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_rust(src, &[&layouts[0]]);
+        let brace = fixed.find('{').unwrap();
+        let after_brace = &fixed[brace + 1..];
+        assert!(
+            !after_brace.starts_with("\n\n"),
+            "Rust fix must not insert a blank line after '{{': got {:?}",
+            &after_brace[..after_brace.len().min(20)]
+        );
+    }
+
+    // ── single-field struct: no-op reorder ────────────────────────────────────
+
+    #[test]
+    fn rust_fix_single_field_struct_unchanged() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let src = "struct S {\n    x: u64,\n}\n";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        // Single-field struct has no ReorderSuggestion, but generate_rust_fix_from_source
+        // must still produce valid (identical) output without panicking.
+        let result = generate_rust_fix_from_source(&layouts[0], src);
+        assert!(result.contains("x: u64"), "single field must be present");
+        assert!(
+            !result.contains("\n\n"),
+            "no blank line in single-field output"
+        );
+    }
+
+    #[test]
+    fn c_fix_single_field_struct_unchanged() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let src = "struct S {\n    double x;\n};\n";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::C, &X86_64_SYSV).unwrap();
+        let result = generate_c_fix_from_source(&layouts[0], src);
+        assert!(result.contains("double x"), "single field must be present");
+        assert!(
+            !result.contains("\n\n"),
+            "no blank line in single-field output"
+        );
+    }
+
+    // ── trailing comma vs no trailing comma ───────────────────────────────────
+
+    #[test]
+    fn rust_fix_preserves_trailing_comma() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        // Last field has a trailing comma — output should keep it
+        let src = "struct S {\n    a: u8,\n    b: u64,\n}\n";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_rust(src, &[&layouts[0]]);
+        // b should come first; trailing comma on a must survive
+        assert!(
+            fixed.contains("b: u64,"),
+            "trailing comma on reordered-first field must be preserved"
+        );
+        assert!(
+            fixed.contains("a: u8,"),
+            "trailing comma on last field must be preserved"
+        );
+    }
+
+    #[test]
+    fn rust_fix_no_trailing_comma_on_last_field() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        // Last field has NO trailing comma — the chunk must not gain one
+        let src = "struct S {\n    a: u8,\n    b: u64\n}\n";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        let fixed = apply_fixes_rust(src, &[&layouts[0]]);
+        // b (no comma in original) should now be first field; verify the chunk is verbatim
+        assert!(
+            fixed.contains("b: u64"),
+            "b field must be present after reorder"
+        );
+        // The output must not have two closing-brace lines (structural integrity)
+        assert_eq!(fixed.chars().filter(|&c| c == '}').count(), 1);
+    }
 }

@@ -53,7 +53,7 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
     filter.apply_config_defaults(&cfg);
 
     // Collect layouts from all paths (dirs expanded, binaries via DWARF).
-    let (mut layouts, analyzed) = collect_layouts(paths)?;
+    let (mut layouts, analyzed, skipped) = collect_layouts(paths)?;
 
     // Apply arch override: CLI --target takes precedence over config arch.override.
     let arch_name_override = target.as_deref().or(cfg.arch_override.as_deref());
@@ -96,6 +96,7 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
     // Run all analysis passes.
     let mut report = Report::from_layouts(&layouts);
     report.analyzed_paths = analyzed;
+    report.skipped = skipped;
 
     // Apply config severity filter (respects per-struct overrides).
     for sr in &mut report.structs {

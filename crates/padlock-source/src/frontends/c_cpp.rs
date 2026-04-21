@@ -286,10 +286,112 @@ fn strip_bitfield_suffix(ty: &str) -> &str {
 }
 
 /// Return `true` when `ty` carries a bit-field width annotation (e.g. `"int:3"`).
-/// Bit-field packing is compiler-controlled and cannot be accurately modelled
-/// without a compiler, so structs containing bit-field members are skipped.
 fn is_bitfield_type(ty: &str) -> bool {
     strip_bitfield_suffix(ty) != ty
+}
+
+/// Collapse consecutive bit-field `RawField` entries into storage-unit-sized
+/// synthetic fields, following the standard GCC/Clang ABI rules:
+///
+/// - Consecutive bitfields that share the same storage-unit size are packed
+///   together until the unit fills up.
+/// - A change in storage-unit size (e.g. `uint8_t` followed by `uint32_t`)
+///   or a full unit forces a new storage unit.
+/// - A zero-width bitfield (`T : 0`) flushes the current group and forces
+///   alignment to the next storage-unit boundary (represented by dropping the
+///   zero-width field).
+/// - Non-bitfield fields are passed through unchanged.
+///
+/// Each resulting synthetic field has:
+/// - **name**: `[a:3|b:5]` — shows what is packed inside the storage unit.
+/// - **type**: the base type of the first field in the group (e.g. `"unsigned int"`).
+/// - **size / align**: determined by `c_type_size_align` on that base type.
+#[allow(unused_assignments)] // final flush!() resets state vars that aren't read again
+fn resolve_bitfield_groups(
+    raw_fields: Vec<RawField>,
+    aliases: &HashMap<String, String>,
+    arch: &'static ArchConfig,
+) -> Vec<RawField> {
+    let mut result: Vec<RawField> = Vec::new();
+
+    // Accumulator for the current storage unit.
+    let mut in_unit = false; // true while we have an open storage unit
+    let mut unit_base_ty = String::new(); // base type of the current unit (for size/align)
+    let mut unit_size: usize = 0; // byte size of the storage unit
+    let mut bits_used: u32 = 0; // bits consumed so far in this unit
+    let mut parts: Vec<String> = Vec::new(); // "name:N" pairs for named fields only
+    let mut first_line: u32 = 0;
+
+    // Flush the current unit. Named members produce a labelled synthetic field;
+    // anonymous-only units produce a `[__pad]` placeholder so that
+    // `simulate_layout` accounts for the storage-unit bytes in the total size.
+    macro_rules! flush {
+        () => {
+            if in_unit {
+                let name = if parts.is_empty() {
+                    "[__pad]".to_string()
+                } else {
+                    format!("[{}]", parts.join("|"))
+                };
+                result.push((name, unit_base_ty.clone(), None, None, first_line));
+                parts.clear();
+                unit_base_ty.clear();
+                unit_size = 0;
+                bits_used = 0;
+                in_unit = false;
+            }
+        };
+    }
+
+    for (fname, ty, guard, alignas, line) in raw_fields {
+        if !is_bitfield_type(&ty) {
+            flush!();
+            result.push((fname, ty, guard, alignas, line));
+            continue;
+        }
+
+        // Parse the bit-width from the "type:N" annotation.
+        let base_raw = strip_bitfield_suffix(&ty).to_string();
+        let bit_width: u32 = ty[ty.rfind(':').unwrap() + 1..].trim().parse().unwrap_or(0);
+
+        // Zero-width bitfield: flush and force alignment to next storage-unit boundary.
+        if bit_width == 0 {
+            flush!();
+            continue;
+        }
+
+        // Resolve the storage-unit size for this field.
+        let resolved = aliases
+            .get(&base_raw)
+            .map(String::as_str)
+            .unwrap_or(&base_raw);
+        let (new_unit_size, _) = c_type_size_align(resolved, arch);
+
+        // Start a new unit when: no current unit, unit-size changes, or current unit is full.
+        let needs_new_unit =
+            !in_unit || new_unit_size != unit_size || bits_used + bit_width > unit_size as u32 * 8;
+
+        if needs_new_unit {
+            flush!();
+            unit_base_ty = base_raw;
+            unit_size = new_unit_size;
+            bits_used = 0;
+            first_line = line;
+            in_unit = true;
+        }
+
+        bits_used += bit_width;
+        // Anonymous padding bitfields (`int : 3;` with no name) still consume
+        // bits in the current unit but are omitted from the display label.
+        if !fname.is_empty() {
+            parts.push(format!("{fname}:{bit_width}"));
+        }
+    }
+
+    // Flush any remaining group.
+    flush!();
+
+    result
 }
 
 /// Simulate C/C++ struct layout given ordered fields.
@@ -487,17 +589,15 @@ fn parse_class_specifier(
         });
     }
 
-    // Skip classes with bit-field members (same reason as structs).
-    if raw_fields
+    // Pack consecutive bit-field members into their storage units.
+    let raw_fields = if raw_fields
         .iter()
         .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
     {
-        eprintln!(
-            "padlock: note: skipping '{class_name}' — contains bit-fields \
-             (bit-field layout is compiler-controlled; use binary analysis for accurate results)"
-        );
-        return None;
-    }
+        resolve_bitfield_groups(raw_fields, aliases, arch)
+    } else {
+        raw_fields
+    };
 
     // Declared member fields
     for (fname, ty_name, guard, alignas, field_line) in raw_fields {
@@ -710,6 +810,11 @@ fn extract_structs_from_tree(
                 "padlock: note: skipping '{tpl_name}' — template \
                  (layout depends on type arguments; use binary analysis for accurate results)"
             );
+            crate::record_skipped(
+                &tpl_name,
+                "C++ template — layout depends on type arguments; \
+                 use binary analysis for accurate results",
+            );
             continue;
         }
 
@@ -885,19 +990,15 @@ fn parse_struct_or_union_specifier(
         return None;
     }
 
-    // Bit-field packing is compiler-controlled and cannot be accurately modelled
-    // without a compiler. Skip the entire struct to avoid producing wrong layout
-    // data. Use `padlock analyze` on the compiled binary for accurate results.
-    if raw_fields
+    // Pack consecutive bit-field members into their storage units.
+    let raw_fields = if raw_fields
         .iter()
         .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
     {
-        eprintln!(
-            "padlock: note: skipping '{name}' — contains bit-fields \
-             (bit-field layout is compiler-controlled; use binary analysis for accurate results)"
-        );
-        return None;
-    }
+        resolve_bitfield_groups(raw_fields, aliases, arch)
+    } else {
+        raw_fields
+    };
 
     let mut fields: Vec<Field> = raw_fields
         .into_iter()
@@ -1231,7 +1332,6 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
     }
 
     let base_ty = ty_parts.join(" ");
-    let fname = field_name?;
     if base_ty.is_empty() {
         return None;
     }
@@ -1241,6 +1341,14 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
         format!("{base_ty}:{w}")
     } else {
         base_ty
+    };
+    // Anonymous bitfields (`int : 3;` with no declarator) are padding bits that
+    // still consume storage-unit bits. Return them with an empty name so
+    // `resolve_bitfield_groups` can account for them without displaying a name.
+    let fname = match field_name {
+        Some(n) => n,
+        None if is_bitfield_type(&ty) => String::new(),
+        None => return None,
     };
 
     // Also check the full field source text (attribute_specifier may not always
@@ -1666,9 +1774,9 @@ class C : public A, public B { int c; };
     }
 
     #[test]
-    fn struct_with_bitfields_is_skipped() {
-        // Bit-field layout is compiler-controlled and cannot be accurately modelled
-        // without a compiler. The struct must be skipped entirely.
+    fn struct_with_bitfields_is_parsed() {
+        // Bitfields are now packed into storage-unit-sized synthetic fields
+        // instead of skipping the whole struct.
         let src = r#"
 struct Flags {
     unsigned int active : 1;
@@ -1678,12 +1786,113 @@ struct Flags {
 };
 "#;
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
-        // Flags must not appear — its layout cannot be accurately computed.
-        assert!(
-            layouts.iter().all(|l| l.name != "Flags"),
-            "struct with bitfields should be skipped; got {:?}",
-            layouts.iter().map(|l| &l.name).collect::<Vec<_>>()
+        let l = layouts
+            .iter()
+            .find(|l| l.name == "Flags")
+            .expect("Flags must be parsed");
+        // active:1 + ready:1 + error:6 = 8 bits, fits in one int storage unit (4 bytes)
+        // Then int value (4 bytes) → total 8 bytes
+        assert_eq!(l.total_size, 8, "Flags should be 8 bytes");
+        // The bitfield group and value field
+        assert_eq!(
+            l.fields.len(),
+            2,
+            "should have 2 fields (bitfield group + value)"
         );
+        assert!(
+            l.fields[0].name.starts_with('['),
+            "first field should be the bitfield group"
+        );
+        assert_eq!(l.fields[1].name, "value");
+    }
+
+    #[test]
+    fn bitfield_group_name_shows_packed_members() {
+        let src = "struct S { unsigned int a : 3; unsigned int b : 5; int c; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").unwrap();
+        assert!(
+            l.fields[0].name.contains("a:3"),
+            "group name should contain a:3, got {}",
+            l.fields[0].name
+        );
+        assert!(
+            l.fields[0].name.contains("b:5"),
+            "group name should contain b:5, got {}",
+            l.fields[0].name
+        );
+    }
+
+    #[test]
+    fn bitfield_different_unit_size_starts_new_group() {
+        // uint8_t and uint32_t have different storage-unit sizes → separate groups.
+        let src = "struct S { uint8_t a : 3; uint32_t b : 5; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").unwrap();
+        // Two separate groups
+        assert_eq!(l.fields.len(), 2, "different unit sizes → 2 groups");
+        // b (uint32_t) aligns to 4 → offset 4; total = 8
+        assert_eq!(l.total_size, 8);
+    }
+
+    #[test]
+    fn bitfield_overflow_starts_new_storage_unit() {
+        // a:5 + b:5 = 10 bits > 8 (uint8_t): b must go into the next byte.
+        let src = "struct S { uint8_t a : 5; uint8_t b : 5; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").unwrap();
+        assert_eq!(l.fields.len(), 2, "overflow → 2 storage units");
+        assert_eq!(l.total_size, 2, "two uint8_t units → 2 bytes");
+    }
+
+    #[test]
+    fn zero_width_bitfield_flushes_group() {
+        // `int : 0` forces alignment to the next int boundary.
+        let src = "struct S { int a : 3; int : 0; int b : 5; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").unwrap();
+        // a:3 in one int unit, b:5 in the next → two groups, each 4 bytes
+        assert_eq!(l.fields.len(), 2, "zero-width bitfield flushes → 2 groups");
+        assert_eq!(l.total_size, 8, "two int units → 8 bytes");
+    }
+
+    #[test]
+    fn anonymous_bitfield_consumes_bits_in_storage_unit() {
+        // `int : 5` is anonymous padding; a:3 + anon:5 = 8 bits, so b:3 still fits
+        // in the same int unit (8 + 3 = 11 <= 32).  Without the anonymous bits
+        // accounted for, a naïve grouper would also pack c into the same unit
+        // even if that overflowed.
+        let src = "struct S { int a : 3; int : 5; int b : 3; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").unwrap();
+        // All three fit in one int storage unit → exactly one synthetic field, 4 bytes.
+        assert_eq!(
+            l.fields.len(),
+            1,
+            "a:3 + anon:5 + b:3 = 11 bits, fits in one int unit"
+        );
+        assert_eq!(l.total_size, 4);
+        // The display name must show a and b but not the anonymous padding.
+        assert!(l.fields[0].name.contains("a:3"), "name should include a:3");
+        assert!(l.fields[0].name.contains("b:3"), "name should include b:3");
+    }
+
+    #[test]
+    fn anonymous_only_bitfield_unit_emits_pad_placeholder() {
+        // `int : 32` fills an entire 4-byte int unit with anonymous padding.
+        // The next field `a : 4` overflows and starts a new unit.
+        // The all-anonymous first unit emits a `[__pad]` placeholder so that
+        // `simulate_layout` counts its bytes in the total size.
+        let src = "struct S { int : 32; int a : 4; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").unwrap();
+        // Two synthetic fields: [__pad] (4 bytes) + [a:4] (4 bytes) = 8 bytes total.
+        assert_eq!(l.fields.len(), 2, "[__pad] + [a:4] → 2 synthetic fields");
+        assert!(
+            l.fields[0].name.contains("__pad"),
+            "first field is the pad placeholder"
+        );
+        assert_eq!(l.total_size, 8, "two int units → 8 bytes");
     }
 
     #[test]
@@ -1707,27 +1916,32 @@ struct Flags {
     }
 
     #[test]
-    fn cpp_class_with_bitfields_is_skipped() {
+    fn cpp_class_with_bitfields_is_parsed() {
+        // Bitfields in C++ classes are now grouped into storage units.
         let src = "class Packed { int x : 4; int y : 4; };";
         let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
-        assert!(
-            layouts.iter().all(|l| l.name != "Packed"),
-            "C++ class with bitfields should be skipped"
+        let l = layouts
+            .iter()
+            .find(|l| l.name == "Packed")
+            .expect("Packed must be parsed");
+        // x:4 + y:4 = 8 bits, fits in one int (4 bytes)
+        assert_eq!(
+            l.total_size, 4,
+            "x:4 + y:4 fit in one int storage unit → 4 bytes"
         );
     }
 
     #[test]
-    fn all_bitfield_struct_is_skipped() {
-        // Struct with ONLY bit-field members (no normal fields).
-        // raw_fields is non-empty but all entries carry the `:N` annotation,
-        // so the bit-field guard must still fire and skip the struct.
+    fn all_bitfield_struct_is_parsed() {
+        // Struct with ONLY bit-field members is now supported.
         let src = "struct BitPacked { int x:4; int y:4; };";
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
-        assert!(
-            layouts.iter().all(|l| l.name != "BitPacked"),
-            "all-bitfield struct should be skipped; got {:?}",
-            layouts.iter().map(|l| &l.name).collect::<Vec<_>>()
-        );
+        let l = layouts
+            .iter()
+            .find(|l| l.name == "BitPacked")
+            .expect("BitPacked must now be parsed");
+        // x:4 + y:4 = 8 bits in one int storage unit → 4 bytes
+        assert_eq!(l.total_size, 4);
     }
 
     // ── __attribute__((packed)) detection ─────────────────────────────────────

@@ -57,7 +57,8 @@ fn fix_file(
 
     let arch = padlock_dwarf::reader::detect_arch_from_host();
     let source = std::fs::read_to_string(path)?;
-    let layouts = padlock_source::parse_source(path, arch)?;
+    let output = padlock_source::parse_source(path, arch)?;
+    let layouts = output.layouts;
     let report = Report::from_layouts(&layouts);
 
     // Collect layouts that have a ReorderSuggestion and (optionally) match the filter.

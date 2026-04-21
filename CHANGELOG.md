@@ -2,6 +2,22 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.0] — 2026-04-21
+
+### Added
+- **PDB enum extraction**: `TypeData::Enumeration` records in Windows PDB files are now extracted as layouts with a single `__discriminant` field, matching the DWARF and source-analysis representation.
+- **DWARF/PDB `uncertain_fields` surfaced**: bitfield groups in both DWARF and PDB where the storage-unit size cannot be determined are now added to `StructLayout::uncertain_fields` and shown in output. Previously they were silently dropped.
+- **Cache persists skipped types**: the on-disk parse cache (`.padlock-cache/layouts.json`) now stores `SkippedStruct` entries alongside layouts. Repeat runs on unchanged files correctly restore both layouts and skip notes without re-parsing.
+- **Zig comptime-generic function detection verified**: `fn Foo(comptime T: type) type` functions are correctly detected and recorded as skipped via AST inspection of the `function_declaration` node. Added a test that confirms end-to-end detection.
+
+### Fixed
+- **PDB array dimensions**: `TypeData::Array::dimensions` holds cumulative byte lengths (not element counts). Array field sizes now use `dimensions.last()` as the total byte size, avoiding double-multiplication.
+- **PDB dead `is_union` code removed**: the Class/Struct/Interface branch no longer computes and discards an `is_union` variable; `is_union: false` is set directly.
+- **`SkippedStruct` derives `Deserialize`**: required for cache round-trip; was `Serialize`-only.
+
+### Changed
+- Documentation comprehensively updated: `docs/architecture.md`, `docs/extending.md`, `docs/findings.md`, main `README.md`, `CLAUDE.md`, and all six crate `README.md` files. Key corrections: DWARF/PDB bitfields are now described as grouped (not skipped); `pdb.rs` → `pdb_reader.rs`; Zig added to all language lists; PDB "not yet supported" note removed; cache stores skipped items; `padlock-output` module table now lists all formatters including `explain`, `markdown`, and `project_summary`.
+
 ## [0.9.9] — 2026-04-21
 
 ### Added

@@ -42,6 +42,22 @@ pub fn render_report(report: &Report) -> String {
         }
     }
 
+    if !report.skipped.is_empty() {
+        out.push_str(&format!(
+            "note: {} type{} skipped (layout cannot be determined from source alone):\n",
+            report.skipped.len(),
+            if report.skipped.len() == 1 { "" } else { "s" }
+        ));
+        for s in &report.skipped {
+            let loc = s
+                .source_file
+                .as_deref()
+                .map(|f| format!(" ({f})"))
+                .unwrap_or_default();
+            out.push_str(&format!("  skipped '{}'{loc}: {}\n", s.name, s.reason));
+        }
+    }
+
     out
 }
 

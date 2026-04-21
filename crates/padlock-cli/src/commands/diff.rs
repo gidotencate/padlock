@@ -18,7 +18,7 @@ pub fn run(paths: &[PathBuf], filter: Option<&str>) -> anyhow::Result<()> {
 
     for file in &source_files {
         let layouts = match padlock_source::parse_source(file, arch) {
-            Ok(l) => l,
+            Ok(output) => output.layouts,
             Err(e) => {
                 eprintln!("padlock: warning: {}: {e}", file.display());
                 continue;

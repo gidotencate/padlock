@@ -222,6 +222,32 @@ fn fix_rewrites_rust_struct_in_place() {
     );
 }
 
+/// `fix` rewrites a Zig file in-place.
+/// Three fields ensure a genuine byte savings so `ReorderSuggestion` is generated.
+#[test]
+fn fix_rewrites_zig_struct_in_place() {
+    let mut f = tempfile::Builder::new().suffix(".zig").tempfile().unwrap();
+    // a:u8, b:f64, c:u8 → optimal b,a,c saves 8 bytes (24→16)
+    write!(
+        f,
+        "const S = struct {{\n    a: u8,\n    b: f64,\n    c: u8,\n}};\n"
+    )
+    .unwrap();
+    let path = f.path().to_str().unwrap().to_string();
+
+    padlock().args(["fix", &path]).assert().success();
+
+    let contents = std::fs::read_to_string(&path).unwrap();
+    let b_pos = contents.find("b: f64").unwrap();
+    let a_pos = contents.find("a: u8").unwrap();
+    assert!(b_pos < a_pos, "f64 field must appear before u8 after fix");
+    let brace = contents.find('{').unwrap();
+    assert!(
+        !contents[brace + 1..].starts_with("\n\n"),
+        "fix must not insert a blank line after '{{'"
+    );
+}
+
 /// `fix --filter` only rewrites structs matching the pattern.
 /// Three-field structs ensure there is a genuine byte savings and a ReorderSuggestion.
 #[test]

@@ -466,10 +466,15 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
         // without knowing the concrete type arguments. Skip them rather than
         // producing wrong field sizes for the type parameters.
         if !node.generics.params.is_empty() {
+            let name = node.ident.to_string();
             eprintln!(
-                "padlock: note: skipping '{}' — generic struct \
-                 (layout depends on type arguments; use binary analysis for accurate results)",
-                node.ident
+                "padlock: note: skipping '{name}' — generic struct \
+                 (layout depends on type arguments; use binary analysis for accurate results)"
+            );
+            crate::record_skipped(
+                &name,
+                "generic struct — layout depends on type arguments; \
+                 use binary analysis for accurate results",
             );
             return;
         }
@@ -540,10 +545,15 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
 
         // Skip generic enums (layout depends on unknown type arguments)
         if !node.generics.params.is_empty() {
+            let name = node.ident.to_string();
             eprintln!(
-                "padlock: note: skipping '{}' — generic enum \
-                 (layout depends on type arguments; use binary analysis for accurate results)",
-                node.ident
+                "padlock: note: skipping '{name}' — generic enum \
+                 (layout depends on type arguments; use binary analysis for accurate results)"
+            );
+            crate::record_skipped(
+                &name,
+                "generic enum — layout depends on type arguments; \
+                 use binary analysis for accurate results",
             );
             return;
         }

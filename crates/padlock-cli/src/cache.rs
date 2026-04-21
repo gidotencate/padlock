@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use padlock_core::findings::SkippedStruct;
 use padlock_core::ir::StructLayout;
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -23,6 +24,8 @@ struct CacheStore {
 struct CacheEntry {
     mtime_secs: u64,
     layouts: Vec<StructLayout>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skipped: Vec<SkippedStruct>,
 }
 
 /// In-process parse cache backed by `.padlock-cache/layouts.json`.
@@ -49,21 +52,21 @@ impl ParseCache {
         }
     }
 
-    /// Return the cached layouts for `path` if the file has not changed
-    /// since the cache was written, `None` otherwise.
-    pub fn get(&self, path: &Path) -> Option<Vec<StructLayout>> {
+    /// Return the cached layouts and skipped items for `path` if the file has
+    /// not changed since the cache was written, `None` otherwise.
+    pub fn get(&self, path: &Path) -> Option<(Vec<StructLayout>, Vec<SkippedStruct>)> {
         let mtime = file_mtime(path)?;
         let key = path.to_string_lossy().into_owned();
         let entry = self.store.entries.get(&key)?;
         if entry.mtime_secs == mtime {
-            Some(entry.layouts.clone())
+            Some((entry.layouts.clone(), entry.skipped.clone()))
         } else {
             None
         }
     }
 
-    /// Store parsed layouts for `path` (uses current mtime as key).
-    pub fn insert(&mut self, path: &Path, layouts: Vec<StructLayout>) {
+    /// Store parsed layouts and skipped items for `path` (uses current mtime).
+    pub fn insert(&mut self, path: &Path, layouts: Vec<StructLayout>, skipped: Vec<SkippedStruct>) {
         let Some(mtime) = file_mtime(path) else {
             return;
         };
@@ -73,6 +76,7 @@ impl ParseCache {
             CacheEntry {
                 mtime_secs: mtime,
                 layouts,
+                skipped,
             },
         );
         self.dirty = true;
@@ -177,7 +181,7 @@ mod tests {
                 cache_path: cache_path.clone(),
                 dirty: false,
             };
-            cache.insert(&src, vec![simple_layout()]);
+            cache.insert(&src, vec![simple_layout()], vec![]);
             cache.flush();
         }
 
@@ -190,7 +194,7 @@ mod tests {
         };
         let result = reload.get(&src);
         assert!(result.is_some());
-        let layouts = result.unwrap();
+        let (layouts, _skipped) = result.unwrap();
         assert_eq!(layouts.len(), 1);
         assert_eq!(layouts[0].name, "Foo");
     }
@@ -211,6 +215,7 @@ mod tests {
             CacheEntry {
                 mtime_secs: 0, // will never match current file's mtime
                 layouts: vec![simple_layout()],
+                skipped: vec![],
             },
         );
         let cache = ParseCache {
@@ -233,5 +238,43 @@ mod tests {
         };
         cache.flush(); // should be a no-op
         assert!(!cache_path.exists(), "no file written when not dirty");
+    }
+
+    #[test]
+    fn cache_persists_skipped_items() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("d.rs");
+        fs::write(&src, "struct D<T> { x: T }").unwrap();
+
+        let cache_path = dir.path().join(".padlock-cache").join("layouts.json");
+        let skipped = vec![SkippedStruct {
+            name: "D".to_string(),
+            reason: "generic struct".to_string(),
+            source_file: Some(src.to_string_lossy().into_owned()),
+        }];
+
+        // Insert with skipped items and flush.
+        {
+            let mut cache = ParseCache {
+                store: CacheStore::default(),
+                cache_path: cache_path.clone(),
+                dirty: false,
+            };
+            cache.insert(&src, vec![], skipped.clone());
+            cache.flush();
+        }
+
+        // Reload from disk and check that skipped items survived.
+        let store: CacheStore = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        let reload = ParseCache {
+            store,
+            cache_path,
+            dirty: false,
+        };
+        let (layouts, loaded_skipped) = reload.get(&src).expect("cache hit expected");
+        assert!(layouts.is_empty());
+        assert_eq!(loaded_skipped.len(), 1);
+        assert_eq!(loaded_skipped[0].name, "D");
+        assert_eq!(loaded_skipped[0].reason, "generic struct");
     }
 }

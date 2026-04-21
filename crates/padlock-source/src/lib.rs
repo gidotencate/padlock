@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use padlock_core::arch::ArchConfig;
+use padlock_core::findings::SkippedStruct;
 use padlock_core::ir::{StructLayout, TypeInfo};
 
 /// C++ standard library implementation variant.
@@ -34,6 +35,43 @@ pub fn set_cpp_stdlib(stdlib: CppStdlib) {
     frontends::c_cpp::set_stdlib(stdlib);
 }
 
+// ── skipped-struct side channel ───────────────────────────────────────────────
+//
+// Frontends call `record_skipped` (via `crate::record_skipped`) when they skip
+// a type they cannot accurately size (generics, templates, etc.).  `parse_source`
+// drains the buffer after each file so callers receive structured skip data
+// alongside the layouts.
+
+thread_local! {
+    static SKIPPED_COLLECTOR: std::cell::RefCell<Vec<SkippedStruct>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record a skipped struct/type into the per-thread buffer.
+///
+/// Called by language frontends when they encounter a type they cannot size
+/// (e.g. generic/template types).  The buffer is drained by `parse_source`.
+pub fn record_skipped(name: &str, reason: &str) {
+    SKIPPED_COLLECTOR.with(|c| {
+        c.borrow_mut().push(SkippedStruct {
+            name: name.to_string(),
+            reason: reason.to_string(),
+            source_file: None,
+        });
+    });
+}
+
+fn take_skipped() -> Vec<SkippedStruct> {
+    SKIPPED_COLLECTOR.with(|c| c.take())
+}
+
+/// Output from a single source-file parse: the extracted layouts plus any
+/// types that were skipped (e.g. generics whose layout is unknown).
+pub struct ParseOutput {
+    pub layouts: Vec<StructLayout>,
+    pub skipped: Vec<SkippedStruct>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SourceLanguage {
     C,
@@ -55,17 +93,23 @@ pub fn detect_language(path: &Path) -> Option<SourceLanguage> {
     }
 }
 
-/// Parse a source file and return struct layouts.
-pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
+/// Parse a source file and return layouts plus any skipped types.
+pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<ParseOutput> {
     let lang = detect_language(path)
         .ok_or_else(|| anyhow::anyhow!("unsupported file type: {}", path.display()))?;
     let source = std::fs::read_to_string(path)?;
+    // Clear any leftover thread-local state from previous direct parse_source_str calls.
+    let _ = take_skipped();
     let mut layouts = parse_source_str(&source, &lang, arch)?;
+    let mut skipped = take_skipped();
     let file_str = path.to_string_lossy().into_owned();
     for layout in &mut layouts {
         layout.source_file = Some(file_str.clone());
     }
-    Ok(layouts)
+    for s in &mut skipped {
+        s.source_file = Some(file_str.clone());
+    }
+    Ok(ParseOutput { layouts, skipped })
 }
 
 /// Parse source text directly (useful for tests and piped input).
@@ -186,6 +230,31 @@ fn resolve_nested_structs(layouts: &mut [StructLayout]) {
 
         if !changed_any {
             break;
+        }
+    }
+
+    // Post-pass: any field still TypeInfo::Opaque whose type name is not among
+    // the parsed structs was not resolved — its size is a pointer-sized fallback.
+    // Flag these so output layers can warn the user.
+    let known_names: std::collections::HashSet<String> =
+        layouts.iter().map(|l| l.name.clone()).collect();
+
+    for layout in layouts.iter_mut() {
+        for field in layout.fields.iter() {
+            if let TypeInfo::Opaque {
+                name: type_name, ..
+            } = &field.ty
+            {
+                if is_known_primitive(type_name)
+                    || type_name == &layout.name
+                    || known_names.contains(type_name.as_str() as &str)
+                {
+                    continue;
+                }
+                if !layout.uncertain_fields.contains(&field.name) {
+                    layout.uncertain_fields.push(field.name.clone());
+                }
+            }
         }
     }
 }

@@ -122,7 +122,8 @@ enum Commands {
         /// Source files or directories to fix (binaries not supported)
         #[arg(num_args = 1.., value_name = "PATH")]
         paths: Vec<PathBuf>,
-        /// Show the diff without writing any files
+        /// Show the diff without writing any files; exits 1 when any reorderings
+        /// are pending (like `git diff --exit-code`), so it can gate CI pipelines
         #[arg(long)]
         dry_run: bool,
         /// Keep a .bak copy of the original file before rewriting

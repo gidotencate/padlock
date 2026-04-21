@@ -102,6 +102,26 @@ fn analyze_go_padded_finds_struct() {
         .stdout(contains("Padded"));
 }
 
+// ── analyze: Zig ─────────────────────────────────────────────────────────────
+
+#[test]
+fn analyze_zig_padded_finds_struct() {
+    padlock()
+        .args(["analyze", &fixture("padded.zig"), "--json"])
+        .assert()
+        .success()
+        .stdout(contains("Padded"));
+}
+
+#[test]
+fn analyze_zig_padded_suggests_reorder() {
+    padlock()
+        .args(["analyze", &fixture("padded.zig"), "--json"])
+        .assert()
+        .success()
+        .stdout(contains("ReorderSuggestion"));
+}
+
 // ── output formats ────────────────────────────────────────────────────────────
 
 #[test]

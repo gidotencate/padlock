@@ -2,6 +2,21 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.9] — 2026-04-21
+
+### Added
+- **`padlock --version` includes git SHA**: `padlock --version` now outputs `padlock 0.9.9 (abc1234)` for traceability in bug reports. Falls back to `unknown` in vendored source tarballs where git is unavailable.
+- **Zig integration test fixture** (`tests/fixtures/padded.zig`): covers the Zig source path in integration test runs.
+
+### Fixed
+- **`padlock fix --dry-run` now exits 1 when reorderings are pending** (previously always 0). This matches the `git diff --exit-code` / `cargo fmt --check` convention and makes `--dry-run` usable as a CI gate. Exits 0 only when every struct is already optimally ordered.
+- **`cargo padlock` now respects per-struct severity overrides** from `.padlock.toml` (e.g. `[structs.MyStruct] min_severity = "low"`). Previously, per-struct `min_severity` overrides in the `[structs]` table were silently ignored by the `cargo padlock` binary; only the global `min_severity` was applied.
+- **`padlock fix` blank line after `{`** in C, Go, and Zig source-aware rewrite output (Rust was already fixed in 0.9.8). The rewritten struct body no longer starts with a blank line.
+- **`padlock explain` "no issues" message**: terminal output for structs with no padding waste now reads "no layout issues — struct is already optimally laid out" instead of the bare "no padding waste".
+
+### Changed
+- `--dry-run` help text updated to document the exit-code behaviour.
+
 ## [0.9.8] — 2026-04-21
 
 ### Added

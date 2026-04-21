@@ -200,3 +200,106 @@ The tool is feature-complete for its stated scope. Remaining pre-publish steps:
 1. Check whether any binary artifact (`libsource.a`, `*.o`) is tracked in git and remove it
 2. Run `cargo publish --dry-run -p padlock-cli` to catch metadata issues
 3. Run `cargo publish --dry-run -p padlock-core` through all crates to catch metadata issues
+
+---
+
+## Version Bump Checklist
+
+Six files must be updated together when cutting a new version. All crates inherit from the workspace, so only two files need numeric changes:
+
+```
+Cargo.toml                          # [workspace.package] version = "x.y.z"
+                                    # [workspace.dependencies] all four padlock-* versions
+editors/vscode/package.json         # "version": "x.y.z"
+```
+
+Crates use `version.workspace = true` and pick up the change automatically. After editing, run:
+
+```bash
+cargo build          # verify the workspace compiles cleanly at the new version
+cargo fmt --all --check
+cargo clippy --workspace -- -D warnings
+```
+
+---
+
+## Publishing the VS Code Extension
+
+### Prerequisites
+
+```bash
+npm install -g @vscode/vsce   # or use npx vsce below — no global install needed
+```
+
+You need a Personal Access Token from the [VS Code Marketplace publisher dashboard](https://marketplace.visualstudio.com/manage).
+
+### Build and package
+
+```bash
+cd editors/vscode
+npm install                  # install dev dependencies (TypeScript, @types/vscode, vsce)
+npm run compile              # tsc -p ./ → compiles src/extension.ts to out/extension.js
+npx vsce package             # produces padlock-x.y.z.vsix
+```
+
+The `.vsix` file can be installed locally for testing:
+
+```bash
+code --install-extension padlock-x.y.z.vsix
+```
+
+### Publish to the VS Code Marketplace
+
+```bash
+npx vsce publish             # prompts for the PAT, then publishes
+# or pass the token directly:
+npx vsce publish --pat <your-pat>
+```
+
+The extension is listed at:
+`https://marketplace.visualstudio.com/items?itemName=gidotencate.padlock`
+
+### Open VSX Registry (optional — for VSCodium / Eclipse Theia users)
+
+```bash
+npx ovsx publish padlock-x.y.z.vsix --pat <open-vsx-token>
+```
+
+---
+
+## Full Release Flow
+
+This is the end-to-end sequence for a numbered release (e.g. v0.9.8):
+
+```bash
+# 1. On a feature branch — do the work, update CHANGELOG.md and bump versions
+#    in Cargo.toml and editors/vscode/package.json
+
+# 2. Verify everything is clean
+cargo fmt --all --check
+cargo clippy --workspace -- -D warnings
+cargo test
+cd editors/vscode && npm run compile && npx vsce package && cd ../..
+
+# 3. Commit and push the feature branch; open a PR
+git push -u origin feat/your-branch
+# merge via GitHub PR after review
+
+# 4. After merge, tag main
+git checkout main && git pull
+git tag -a vX.Y.Z -m "vX.Y.Z — <one-line summary>"
+git push origin vX.Y.Z
+# The release.yml GitHub Action triggers on the tag and builds platform binaries
+
+# 5. Publish crates (wait ~30s between each for index propagation)
+cargo publish -p padlock-core
+cargo publish -p padlock-macros
+cargo publish -p padlock-dwarf
+cargo publish -p padlock-source
+cargo publish -p padlock-output
+cargo publish -p padlock-cli
+
+# 6. Publish VS Code extension
+cd editors/vscode
+npx vsce publish --pat <your-pat>
+```

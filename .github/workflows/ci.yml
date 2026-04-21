@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -33,11 +36,11 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
+      - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
 
-  release:
-    name: Release build
+  build:
+    name: Release build (smoke check)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

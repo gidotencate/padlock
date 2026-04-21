@@ -670,9 +670,7 @@ dependencies = [
 name = "padlock-core"
 version = "0.9.8"
 dependencies = [
- "rayon",
  "serde",
- "serde_json",
 ]
 
 [[package]]

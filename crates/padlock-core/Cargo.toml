@@ -13,6 +13,4 @@ readme                = "README.md"
 test-helpers = []
 
 [dependencies]
-serde     = { version = "1", features = ["derive"] }
-serde_json = "1"
-rayon     = "1"
+serde = { version = "1", features = ["derive"] }

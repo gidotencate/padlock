@@ -25,6 +25,12 @@ padlock explain src/connection.rs Connection
 # Reorder fields in-place to the optimal layout
 padlock fix src/connection.rs
 
+# Preview the reorderings without writing any files
+padlock fix --dry-run src/connection.rs
+
+# Write a .bak backup before rewriting (opt-in)
+padlock fix --backup src/connection.rs
+
 # Rust projects: analyze via cargo
 cargo padlock
 ```

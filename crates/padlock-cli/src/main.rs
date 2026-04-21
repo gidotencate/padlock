@@ -125,6 +125,9 @@ enum Commands {
         /// Show the diff without writing any files
         #[arg(long)]
         dry_run: bool,
+        /// Keep a .bak copy of the original file before rewriting
+        #[arg(long)]
+        backup: bool,
         /// Include only structs whose names match this regex pattern
         #[arg(long, short = 'F', value_name = "PATTERN")]
         filter: Option<String>,
@@ -265,8 +268,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Fix {
             paths,
             dry_run,
+            backup,
             filter,
-        } => commands::fix::run(&paths, dry_run, filter.as_deref()),
+        } => commands::fix::run(&paths, dry_run, backup, filter.as_deref()),
 
         Commands::Report {
             paths,

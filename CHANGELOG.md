@@ -2,6 +2,19 @@
 
 All notable changes to padlock are documented here.
 
+## [0.9.8] — 2026-04-21
+
+### Added
+- **`padlock fix --backup` flag**: opt-in `.bak` copy of the original file before rewriting. The backup is no longer created automatically — use `--dry-run` to preview without touching any files, or `--backup` if you want a safety copy alongside your rewrite.
+- **VS Code: per-struct fix preview**: the lightbulb (⚡) CodeAction menu now offers "Preview reorder of `StructName`" alongside the direct-apply action. Opens the VS Code diff editor scoped to just that struct's changes before applying.
+- **VS Code: editor context menu**: Analyze, Preview fix, and Apply fix are now available from the right-click context menu when editing a supported file.
+- **VS Code: command palette `when` guards**: fix and analyze commands are hidden from the command palette when the active file is not a supported language.
+
+### Changed
+- **VS Code: fixes applied via `WorkspaceEdit`**: all fix paths — `padlock.fixFile`, `padlock.fixStruct`, and the Apply button in the preview flow — now apply changes through the VS Code `WorkspaceEdit` API rather than writing directly to disk. Changes land on the editor undo stack; Ctrl+Z reverts them. No `.bak` file is created.
+- **VS Code: fix reads live editor buffer**: the fix and preview flows read the document's current in-memory content, so unsaved edits are included rather than the last-saved version on disk.
+- **VS Code: command titles** updated: "Apply fix (reorder fields)" → "Apply fix (reorder all structs)", "Fix all (preview)" → "Preview fix (reorder all structs)".
+
 ## [0.9.7] — 2026-04-17
 
 ### Added

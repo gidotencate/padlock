@@ -286,9 +286,9 @@ $ padlock diff src/models.rs
 
 ---
 
-### `padlock fix <path>… [--dry-run] [--filter PATTERN]`
+### `padlock fix <path>… [--dry-run] [--backup] [--filter PATTERN]`
 
-Shows the reorder diff and — without `--dry-run` — rewrites the source file in-place, saving a `.bak` backup first. Accepts directories and multiple files; `--filter` limits which structs are rewritten.
+Shows the reorder diff and — without `--dry-run` — rewrites the source file in-place. Accepts directories and multiple files; `--filter` limits which structs are rewritten. Pass `--backup` to save a `.bak` copy of the original before rewriting (opt-in; use `--dry-run` to preview changes without touching any files).
 
 **ABI safety warning:** Before rewriting any struct with a fixed binary layout (C structs, `repr(C)`, Go, Zig), padlock emits a warning to stderr:
 

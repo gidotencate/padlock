@@ -14,18 +14,22 @@
 
 use std::path::{Path, PathBuf};
 
+use padlock_core::findings::SkippedStruct;
 use padlock_core::ir::StructLayout;
 use rayon::prelude::*;
 
 /// Collect StructLayouts from a list of paths and return them together with
-/// the list of paths that were actually analyzed (for reporting purposes).
+/// the list of paths that were actually analyzed and any skipped types.
 ///
 /// Directories are expanded recursively and parsed in parallel.  Source files
 /// are served from an on-disk mtime cache when possible, skipping unchanged
 /// files.  Errors from individual files are printed as warnings and skipped.
-pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, Vec<String>)> {
+pub fn collect_layouts(
+    paths: &[PathBuf],
+) -> anyhow::Result<(Vec<StructLayout>, Vec<String>, Vec<SkippedStruct>)> {
     let mut all_layouts: Vec<StructLayout> = Vec::new();
     let mut analyzed: Vec<String> = Vec::new();
+    let mut all_skipped: Vec<SkippedStruct> = Vec::new();
     let mut cache = crate::cache::ParseCache::load();
 
     for path in paths {
@@ -41,11 +45,15 @@ pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, 
             let arch = padlock_dwarf::reader::detect_arch_from_host();
 
             // Partition files into cache hits and misses.
-            let mut hits: Vec<(PathBuf, Vec<StructLayout>)> = Vec::new();
+            let mut hits: Vec<(
+                PathBuf,
+                Vec<StructLayout>,
+                Vec<padlock_core::findings::SkippedStruct>,
+            )> = Vec::new();
             let mut misses: Vec<PathBuf> = Vec::new();
             for file in &files {
-                if let Some(cached) = cache.get(file) {
-                    hits.push((file.clone(), cached));
+                if let Some((layouts, skipped)) = cache.get(file) {
+                    hits.push((file.clone(), layouts, skipped));
                 } else {
                     misses.push(file.clone());
                 }
@@ -60,23 +68,25 @@ pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, 
                 })
                 .collect();
 
-            // Store new results in cache.
+            // Store new results in cache (layouts + skipped).
             for (file, result) in &miss_results {
-                if let Ok(layouts) = result {
-                    cache.insert(file, layouts.clone());
+                if let Ok(output) = result {
+                    cache.insert(file, output.layouts.clone(), output.skipped.clone());
                 }
             }
 
             // Merge hits and misses back in original file order.
             for file in &files {
-                if let Some((_, layouts)) = hits.iter().find(|(f, _)| f == file) {
+                if let Some((_, layouts, skipped)) = hits.iter().find(|(f, _, _)| f == file) {
                     analyzed.push(file.display().to_string());
                     all_layouts.extend(layouts.clone());
+                    all_skipped.extend(skipped.clone());
                 } else if let Some((_, result)) = miss_results.iter().find(|(f, _)| f == file) {
                     match result {
-                        Ok(layouts) => {
+                        Ok(output) => {
                             analyzed.push(file.display().to_string());
-                            all_layouts.extend(layouts.clone());
+                            all_layouts.extend(output.layouts.clone());
+                            all_skipped.extend(output.skipped.clone());
                         }
                         Err(e) => eprintln!("padlock: warning: {}: {e}", file.display()),
                     }
@@ -85,27 +95,40 @@ pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, 
         } else if padlock_source::detect_language(path).is_some() {
             let arch = padlock_dwarf::reader::detect_arch_from_host();
             // Try cache for single source files too.
-            let layouts = if let Some(cached) = cache.get(path) {
-                cached
+            let (layouts, skipped) = if let Some((layouts, skipped)) = cache.get(path) {
+                (layouts, skipped)
             } else {
-                let layouts = padlock_source::parse_source(path, arch)?;
-                cache.insert(path, layouts.clone());
-                layouts
+                let output = padlock_source::parse_source(path, arch)?;
+                cache.insert(path, output.layouts.clone(), output.skipped.clone());
+                (output.layouts, output.skipped)
             };
             analyzed.push(path.display().to_string());
             all_layouts.extend(layouts);
+            all_skipped.extend(skipped);
         } else {
-            // Binary — try BTF first (eBPF objects and raw BTF files), then DWARF.
+            // Binary — route by format.
             let data = std::fs::read(path)?;
-            let arch = padlock_dwarf::reader::detect_arch(&data)
-                .unwrap_or_else(|_| padlock_dwarf::reader::detect_arch_from_host());
-            let layouts = if is_raw_btf(&data) {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let layouts = if ext == "pdb" {
+                // PDB (Windows MSVC debug database)
+                let arch = padlock_dwarf::reader::detect_arch_from_host();
+                padlock_dwarf::pdb_reader::extract_from_pdb(&data, arch)?
+            } else if is_raw_btf(&data) {
                 // Raw BTF file (not an ELF container): `.btf` files produced by
                 // `bpftool btf dump`, `/sys/kernel/btf/vmlinux`, etc.
+                let arch = padlock_dwarf::reader::detect_arch_from_host();
                 padlock_dwarf::btf::extract_from_btf(&data, arch)?
             } else if has_btf_section(&data) {
+                let arch = padlock_dwarf::reader::detect_arch(&data)
+                    .unwrap_or_else(|_| padlock_dwarf::reader::detect_arch_from_host());
                 extract_btf_layouts(&data, arch)?
             } else {
+                let arch = padlock_dwarf::reader::detect_arch(&data)
+                    .unwrap_or_else(|_| padlock_dwarf::reader::detect_arch_from_host());
                 let dwarf = padlock_dwarf::reader::load(&data)?;
                 padlock_dwarf::extractor::Extractor::new(&dwarf, arch).extract_all()?
             };
@@ -126,7 +149,7 @@ pub fn collect_layouts(paths: &[PathBuf]) -> anyhow::Result<(Vec<StructLayout>, 
         _ => true,
     });
 
-    Ok((all_layouts, analyzed))
+    Ok((all_layouts, analyzed, all_skipped))
 }
 
 /// Walk `dir` recursively and return paths of all source files found.
@@ -292,7 +315,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("s.rs");
         fs::write(&file, "struct S { x: i32, y: i32 }").unwrap();
-        let (layouts, analyzed) = collect_layouts(&[file]).unwrap();
+        let (layouts, analyzed, _skipped) = collect_layouts(&[file]).unwrap();
         assert!(!layouts.is_empty());
         assert_eq!(analyzed.len(), 1);
         assert!(layouts.iter().any(|l| l.name == "S"));
@@ -303,7 +326,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("a.rs"), "struct A { x: i32 }").unwrap();
         fs::write(dir.path().join("b.rs"), "struct B { y: i64 }").unwrap();
-        let (layouts, analyzed) = collect_layouts(&[dir.path().to_path_buf()]).unwrap();
+        let (layouts, analyzed, _skipped) = collect_layouts(&[dir.path().to_path_buf()]).unwrap();
         assert!(layouts.iter().any(|l| l.name == "A"));
         assert!(layouts.iter().any(|l| l.name == "B"));
         assert_eq!(analyzed.len(), 2);
@@ -316,7 +339,7 @@ mod tests {
         let b = dir.path().join("b.rs");
         fs::write(&a, "struct A { x: i32 }").unwrap();
         fs::write(&b, "struct B { y: i64 }").unwrap();
-        let (layouts, _) = collect_layouts(&[a, b]).unwrap();
+        let (layouts, _, _skipped) = collect_layouts(&[a, b]).unwrap();
         assert!(layouts.iter().any(|l| l.name == "A"));
         assert!(layouts.iter().any(|l| l.name == "B"));
     }

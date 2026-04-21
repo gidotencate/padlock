@@ -147,17 +147,33 @@ fn parse_type_spec(
 ) -> Option<StructLayout> {
     let mut name: Option<String> = None;
     let mut struct_node: Option<Node> = None;
+    let mut is_generic = false;
 
     for i in 0..node.child_count() {
         let child = node.child(i)?;
         match child.kind() {
             "type_identifier" => name = Some(source[child.byte_range()].to_string()),
             "struct_type" => struct_node = Some(child),
+            "type_parameter_list" => is_generic = true,
             _ => {}
         }
     }
 
     let name = name?;
+
+    if is_generic {
+        eprintln!(
+            "padlock: note: skipping '{name}' — generic struct \
+             (layout depends on type arguments; use binary analysis for accurate results)"
+        );
+        crate::record_skipped(
+            &name,
+            "generic struct — layout depends on type arguments; \
+             use binary analysis for accurate results",
+        );
+        return None;
+    }
+
     let struct_node = struct_node?;
     parse_struct_type(
         source,
@@ -737,6 +753,34 @@ type Outer struct {
         assert_eq!(l.fields.len(), 2);
         assert_eq!(l.fields[0].name, "A");
         assert_eq!(l.fields[1].name, "B");
+    }
+
+    // ── Go generics ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn go_generic_struct_is_skipped() {
+        // Generic structs cannot be sized without type instantiation.
+        let src = "package p\ntype Pair[T any] struct { First T; Second T }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.iter().all(|l| l.name != "Pair"),
+            "generic struct must be skipped"
+        );
+    }
+
+    #[test]
+    fn go_concrete_struct_alongside_generic_is_parsed() {
+        // The generic is skipped but a concrete sibling struct is still parsed.
+        let src = "package p\ntype Pair[T any] struct { First T }\ntype Point struct { X int32; Y int32 }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.iter().all(|l| l.name != "Pair"),
+            "Pair must be skipped"
+        );
+        assert!(
+            layouts.iter().any(|l| l.name == "Point"),
+            "Point must be parsed"
+        );
     }
 
     // ── bad weather: embedded fields ──────────────────────────────────────────

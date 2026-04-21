@@ -2,7 +2,7 @@
 //
 // Produces SARIF 2.1.0 — https://docs.oasis-open.org/sarif/sarif/v2.1.0/
 
-use padlock_core::findings::{Finding, Report};
+use padlock_core::findings::{Finding, Report, SkippedStruct};
 use serde::Serialize;
 
 // ── SARIF schema types ────────────────────────────────────────────────────────
@@ -19,6 +19,14 @@ struct SarifRoot {
 struct SarifRun {
     tool: SarifTool,
     results: Vec<SarifResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notifications: Vec<SarifNotification>,
+}
+
+#[derive(Serialize)]
+struct SarifNotification {
+    message: SarifMessage,
+    level: &'static str,
 }
 
 #[derive(Serialize)]
@@ -207,6 +215,20 @@ fn message_for(finding: &Finding) -> String {
     }
 }
 
+fn notification_for_skipped(s: &SkippedStruct) -> SarifNotification {
+    let loc = s
+        .source_file
+        .as_deref()
+        .map(|f| format!(" ({f})"))
+        .unwrap_or_default();
+    SarifNotification {
+        message: SarifMessage {
+            text: format!("skipped '{}'{loc}: {}", s.name, s.reason),
+        },
+        level: "note",
+    }
+}
+
 /// Serialize findings to a SARIF 2.1.0 JSON string.
 pub fn to_sarif(report: &Report) -> anyhow::Result<String> {
     let mut results = Vec::new();
@@ -232,6 +254,12 @@ pub fn to_sarif(report: &Report) -> anyhow::Result<String> {
         }
     }
 
+    let notifications: Vec<SarifNotification> = report
+        .skipped
+        .iter()
+        .map(notification_for_skipped)
+        .collect();
+
     let root = SarifRoot {
         schema: "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
         version: "2.1.0",
@@ -244,6 +272,7 @@ pub fn to_sarif(report: &Report) -> anyhow::Result<String> {
                 },
             },
             results,
+            notifications,
         }],
     };
 

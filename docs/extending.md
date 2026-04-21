@@ -221,15 +221,19 @@ padlock/
 │   │       ├── scorer.rs
 │   │       └── impact.rs    ← per-1K/1M instance estimates
 │   ├── padlock-source/src/
-│   │   ├── lib.rs           ← parse_file dispatcher
+│   │   ├── lib.rs           ← parse_source dispatcher, ParseOutput, record_skipped
 │   │   ├── concurrency.rs   ← type-name heuristic for AccessPattern
 │   │   ├── fixgen.rs        ← source-preserving field reorder
 │   │   └── frontends/
-│   │       ├── rust.rs
-│   │       ├── c_cpp.rs
-│   │       ├── go.rs
-│   │       └── zig.rs
-│   ├── padlock-dwarf/       ← DWARF/PDB/BTF binary reader
+│   │       ├── rust.rs      ← syn parser; generics/enums; guard annotations
+│   │       ├── c_cpp.rs     ← tree-sitter-c/cpp; bitfields; GUARDED_BY
+│   │       ├── go.rs        ← tree-sitter-go; interfaces; guard comments
+│   │       └── zig.rs       ← tree-sitter-zig; packed/extern; comptime detection
+│   ├── padlock-dwarf/src/
+│   │   ├── reader.rs        ← ELF/Mach-O DWARF loader
+│   │   ├── extractor.rs     ← DWARF walk; bitfield grouping; uncertain_fields
+│   │   ├── btf.rs           ← BTF section/raw-file parser
+│   │   └── pdb_reader.rs    ← Windows PDB type-info reader
 │   ├── padlock-output/src/
 │   │   ├── summary.rs       ← human terminal output
 │   │   ├── markdown.rs

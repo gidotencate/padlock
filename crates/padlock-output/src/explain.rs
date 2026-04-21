@@ -245,7 +245,7 @@ pub fn render_explain(layout: &StructLayout) -> String {
     } else if layout.is_packed {
         out.push_str("packed — no padding\n");
     } else {
-        out.push_str("no padding waste\n");
+        out.push_str("no layout issues — struct is already optimally laid out\n");
     }
 
     out

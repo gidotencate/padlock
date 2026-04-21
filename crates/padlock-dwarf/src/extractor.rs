@@ -102,17 +102,122 @@ impl<'a, R: Reader> Extractor<'a, R> {
         });
 
         let mut fields = Vec::new();
+        let mut uncertain_fields: Vec<String> = Vec::new();
+
+        // Accumulates consecutive bitfield members at the same byte offset before
+        // flushing them as a single synthetic storage-unit field.
+        struct BitfieldGroup {
+            parts: Vec<String>, // "name:bits" labels
+            byte_offset: usize,
+            storage_bytes: usize, // from DW_AT_byte_size on member; 0 = unknown
+        }
+        let mut pending_bf: Option<BitfieldGroup> = None;
+
+        let flush_bf =
+            |group: BitfieldGroup, fields: &mut Vec<Field>, uncertain: &mut Vec<String>| {
+                if group.storage_bytes == 0 {
+                    // Storage unit size unknown; flag as uncertain so the user knows.
+                    uncertain.push(format!("[bf@{}]", group.byte_offset));
+                    return;
+                }
+                let field_name = if group.parts.is_empty() {
+                    "[__pad]".to_string()
+                } else {
+                    format!("[{}]", group.parts.join("|"))
+                };
+                use padlock_core::ir::TypeInfo;
+                fields.push(Field {
+                    name: field_name,
+                    ty: TypeInfo::Primitive {
+                        name: format!("uint{}_t", group.storage_bytes * 8),
+                        size: group.storage_bytes,
+                        align: group.storage_bytes,
+                    },
+                    offset: group.byte_offset,
+                    size: group.storage_bytes,
+                    align: group.storage_bytes,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                });
+            };
+
         let mut children = unit.entries_tree(Some(entry.offset()))?;
         let root = children.root()?;
         let mut child_iter = root.children();
 
         while let Some(child) = child_iter.next()? {
             let child_entry = child.entry();
-            if child_entry.tag() == gimli::DW_TAG_member
-                && let Some(field) = self.extract_field(unit, child_entry)?
-            {
-                fields.push(field);
+            if child_entry.tag() != gimli::DW_TAG_member {
+                continue;
             }
+
+            let is_bitfield = child_entry.attr(gimli::DW_AT_bit_size)?.is_some();
+
+            if is_bitfield {
+                let byte_offset = match child_entry.attr_value(gimli::DW_AT_data_member_location)? {
+                    Some(gimli::AttributeValue::Udata(n)) => n as usize,
+                    Some(gimli::AttributeValue::Sdata(n)) => n as usize,
+                    _ => {
+                        // No byte offset — flush pending group and skip this member.
+                        if let Some(g) = pending_bf.take() {
+                            flush_bf(g, &mut fields, &mut uncertain_fields);
+                        }
+                        continue;
+                    }
+                };
+
+                let bit_size = match child_entry.attr_value(gimli::DW_AT_bit_size)? {
+                    Some(gimli::AttributeValue::Udata(n)) => n as usize,
+                    _ => 0,
+                };
+
+                // DW_AT_byte_size on a bitfield member gives the storage unit size.
+                let storage_bytes = match child_entry.attr_value(gimli::DW_AT_byte_size)? {
+                    Some(gimli::AttributeValue::Udata(n)) => n as usize,
+                    Some(gimli::AttributeValue::Data1(n)) => n as usize,
+                    Some(gimli::AttributeValue::Data2(n)) => n as usize,
+                    Some(gimli::AttributeValue::Data4(n)) => n as usize,
+                    _ => 0,
+                };
+
+                let member_name = self
+                    .attr_string(unit, child_entry, gimli::DW_AT_name)?
+                    .unwrap_or_default();
+
+                // If the pending group is at a different byte offset, flush it first.
+                if let Some(ref g) = pending_bf
+                    && g.byte_offset != byte_offset
+                {
+                    let g = pending_bf.take().unwrap();
+                    flush_bf(g, &mut fields, &mut uncertain_fields);
+                }
+
+                let group = pending_bf.get_or_insert(BitfieldGroup {
+                    parts: Vec::new(),
+                    byte_offset,
+                    storage_bytes: 0,
+                });
+                if !member_name.is_empty() && bit_size > 0 {
+                    group.parts.push(format!("{member_name}:{bit_size}"));
+                }
+                if storage_bytes > group.storage_bytes {
+                    group.storage_bytes = storage_bytes;
+                }
+            } else {
+                // Non-bitfield member — flush any pending bitfield group first.
+                if let Some(g) = pending_bf.take() {
+                    flush_bf(g, &mut fields, &mut uncertain_fields);
+                }
+                if let Some(field) = self.extract_field(unit, child_entry)? {
+                    fields.push(field);
+                }
+            }
+        }
+
+        // Flush any remaining bitfield group.
+        if let Some(g) = pending_bf.take() {
+            flush_bf(g, &mut fields, &mut uncertain_fields);
         }
 
         fields.sort_by_key(|f| f.offset);
@@ -129,7 +234,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
             is_union: false,
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
-            uncertain_fields: Vec::new(),
+            uncertain_fields,
         }))
     }
 
@@ -147,14 +252,6 @@ impl<'a, R: Reader> Extractor<'a, R> {
             Some(gimli::AttributeValue::Sdata(n)) => n as usize,
             _ => return Ok(None),
         };
-
-        // Bit-field members carry DW_AT_bit_size. They share byte offsets with
-        // adjacent fields and cannot be represented in the byte-level IR without
-        // losing accuracy. Skip them entirely — use source analysis for structs
-        // that contain bit-fields.
-        if entry.attr(gimli::DW_AT_bit_size)?.is_some() {
-            return Ok(None);
-        }
 
         let type_offset = match entry.attr_value(gimli::DW_AT_type)? {
             Some(gimli::AttributeValue::UnitRef(off)) => off,

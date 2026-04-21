@@ -10,6 +10,17 @@ use tree_sitter::{Node, Parser};
 
 // ── type resolution ───────────────────────────────────────────────────────────
 
+/// Returns `true` for Zig types that are compile-time-only and cannot be given
+/// a runtime size. Fields with these types are sized as pointer-sized in the
+/// layout simulation, and their names are added to `uncertain_fields` so the
+/// user knows the sizing is a placeholder.
+fn is_zig_comptime_type(ty: &str) -> bool {
+    matches!(
+        ty.trim(),
+        "type" | "anytype" | "comptime_int" | "comptime_float"
+    )
+}
+
 fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     let ty = ty.trim();
     match ty {
@@ -204,9 +215,71 @@ fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> V
             && let Some(layout) = parse_variable_declaration(source, node, arch)
         {
             layouts.push(layout);
+        } else if node.kind() == "function_declaration" {
+            // Detect `fn Foo(comptime T: type) type { ... }` — a comptime-generic
+            // function returning a struct type.  These are invisible as named types
+            // and cannot be sized without knowing the type arguments.  Emit a note
+            // so users know the inner struct was seen but not analyzed.
+            note_comptime_generic_fn(source, node);
         }
     }
     layouts
+}
+
+/// Emit a `record_skipped` note if `node` is a function that:
+///   - has at least one `comptime` parameter, AND
+///   - returns the built-in `type` identifier.
+fn note_comptime_generic_fn(source: &str, node: Node<'_>) {
+    // Extract function name (first identifier child).
+    let fn_name = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .find(|c| c.kind() == "identifier")
+        .map(|c| source[c.byte_range()].to_string());
+
+    let Some(fn_name) = fn_name else {
+        return;
+    };
+
+    // Look for a parameter list containing a comptime parameter.
+    let has_comptime_param = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .filter(|c| c.kind() == "parameters")
+        .any(|params| {
+            (0..params.child_count())
+                .filter_map(|j| params.child(j))
+                .any(|param| {
+                    // A comptime parameter has a child with kind "comptime"
+                    (0..param.child_count())
+                        .filter_map(|k| param.child(k))
+                        .any(|tok| tok.kind() == "comptime")
+                })
+        });
+
+    if !has_comptime_param {
+        return;
+    }
+
+    // Check that the return type is the `type` keyword/identifier.
+    let returns_type = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .any(|c| {
+            // The return type node typically has kind "identifier" or a keyword node.
+            // We look for any child whose source text is exactly "type".
+            source[c.byte_range()].trim() == "type"
+                && matches!(c.kind(), "identifier" | "primitive_type" | "builtin_type")
+        });
+
+    if returns_type {
+        eprintln!(
+            "padlock: note: skipping '{fn_name}' — comptime-generic function \
+             (returns a struct type; layout depends on type arguments)"
+        );
+        crate::record_skipped(
+            &fn_name,
+            "comptime-generic function — returns a struct type; \
+             layout depends on type arguments",
+        );
+    }
 }
 
 fn parse_variable_declaration(
@@ -382,6 +455,7 @@ fn parse_struct_declaration(
     let mut is_extern = false;
     // (field_name, type_text, size, align, source_line)
     let mut raw_fields: Vec<(String, String, usize, usize, u32)> = Vec::new();
+    let mut uncertain_fields: Vec<String> = Vec::new();
 
     for i in 0..node.child_count() {
         let child = node.child(i)?;
@@ -390,6 +464,9 @@ fn parse_struct_declaration(
             "extern" => is_extern = true,
             "container_field" => {
                 if let Some(f) = parse_container_field(source, child, arch, is_packed) {
+                    if is_zig_comptime_type(&f.1) {
+                        uncertain_fields.push(f.0.clone());
+                    }
                     raw_fields.push(f);
                 }
             }
@@ -479,7 +556,7 @@ fn parse_struct_declaration(
         is_union: false,
         is_repr_rust: false,
         suppressed_findings: Vec::new(), // set by parse_variable_declaration
-        uncertain_fields: Vec::new(),
+        uncertain_fields,
     })
 }
 
@@ -784,5 +861,45 @@ mod tests {
         assert_eq!(l.fields[0].size, 4); // c_uint
         assert_eq!(l.fields[1].size, 2); // c_ushort
         assert_eq!(l.fields[2].size, 1); // u8
+    }
+
+    // ── comptime fields ───────────────────────────────────────────────────────
+
+    #[test]
+    fn zig_comptime_type_field_is_flagged_uncertain() {
+        // `type` fields are compile-time-only; runtime size is unknown → uncertain.
+        let src = "const Meta = struct { tag: type, value: u64 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Meta").expect("Meta");
+        assert!(
+            l.uncertain_fields.contains(&"tag".to_string()),
+            "comptime `type` field must be flagged as uncertain"
+        );
+        assert!(
+            !l.uncertain_fields.contains(&"value".to_string()),
+            "normal u64 field must not be flagged"
+        );
+    }
+
+    #[test]
+    fn zig_comptime_int_field_is_flagged_uncertain() {
+        let src = "const S = struct { n: comptime_int, x: u32 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").expect("S");
+        assert!(l.uncertain_fields.contains(&"n".to_string()));
+        assert!(!l.uncertain_fields.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn zig_comptime_generic_fn_is_detected() {
+        crate::SKIPPED_COLLECTOR.with(|cell| cell.borrow_mut().clear());
+        let src =
+            "pub fn ArrayList(comptime T: type) type { return struct { items: []T, len: usize }; }";
+        let _layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        let skipped = crate::take_skipped();
+        assert!(
+            skipped.iter().any(|s| s.name == "ArrayList"),
+            "comptime-generic function must be recorded as skipped; got: {skipped:?}"
+        );
     }
 }

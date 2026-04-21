@@ -120,7 +120,7 @@ fn analyse_and_print(path: &Path, json: bool) {
 fn run_analysis(path: &Path) -> anyhow::Result<Report> {
     let layouts = if padlock_source::detect_language(path).is_some() {
         let arch = padlock_dwarf::reader::detect_arch_from_host();
-        padlock_source::parse_source(path, arch)?
+        padlock_source::parse_source(path, arch)?.layouts
     } else {
         // Binary path — may not exist yet if the build hasn't finished.
         if !path.exists() {

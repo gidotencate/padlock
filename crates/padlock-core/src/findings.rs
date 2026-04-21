@@ -117,6 +117,16 @@ pub struct StructReport {
     pub uncertain_fields: Vec<String>,
 }
 
+/// A struct/type that was skipped during analysis because its layout cannot be
+/// accurately determined from source alone (e.g. generic/template types).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SkippedStruct {
+    pub name: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct Report {
     pub structs: Vec<StructReport>,
@@ -125,6 +135,10 @@ pub struct Report {
     /// Paths that were analyzed to produce this report (populated by the CLI).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub analyzed_paths: Vec<String>,
+    /// Structs that were skipped during analysis (e.g. generics/templates whose
+    /// layout cannot be determined from source alone). Populated by the CLI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedStruct>,
     /// Maps each struct name to the list of outer struct names that embed it
     /// as a field.  Used to surface "fixing this struct also shrinks Foo/Bar"
     /// hints in the output.  Omitted from JSON serialisation (internal only).
@@ -164,6 +178,7 @@ impl Report {
             total_wasted_bytes,
             structs,
             analyzed_paths: Vec::new(),
+            skipped: Vec::new(),
             embedded_in,
         }
     }

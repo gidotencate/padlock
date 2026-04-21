@@ -7,7 +7,7 @@ This crate provides:
 - **Intermediate representation** (`StructLayout`, `Field`, `AccessPattern`) — the shared data model all frontends and backends produce and consume
 - **Architecture constants** (`ArchConfig`) for x86-64, AArch64, Apple Silicon, WASM32, RISC-V 64
 - **Analysis passes**: padding detection, reorder suggestions, false-sharing detection, locality analysis, and impact scoring
-- **Report types** (`Report`, `StructReport`, `Finding`) — the output of running all analysis passes over a set of layouts
+- **Report types** (`Report`, `StructReport`, `Finding`, `SkippedStruct`) — the output of running all analysis passes over a set of layouts. `Report::skipped` carries types that were encountered but not analyzed (generics/templates); `StructReport::uncertain_fields` lists fields whose sizes could not be accurately determined from source alone.
 
 ## Usage
 

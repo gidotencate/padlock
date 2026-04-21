@@ -55,7 +55,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Explicit guard annotation** | `#[lock_protected_by]`, `GUARDED_BY()`, `// padlock:guard=` — converts inferred findings to confirmed |
 | **Locality** | Flags hot/cold field interleaving that hurts cache utilisation |
 | **Scoring** | Each struct gets a 0–100 score (100 = no issues) |
-| **Multi-language** | C, C++, Rust, Go, Zig source; compiled binaries via DWARF/PDB/BTF |
+| **Multi-language** | C, C++, Rust, Go, Zig source; compiled binaries via DWARF/BTF |
 | **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64, Cortex-M, AVR; `--target <triple>` for cross-arch analysis |
 | **repr(Rust) awareness** | Severity downgraded for repr(Rust) structs (compiler may already reorder); `--hide-repr-rust` excludes them entirely |
 | **C++ stdlib variants** | `--stdlib libstdc++\|libc++\|msvc` selects the stdlib for type sizing; `libc++` `std::string` is 24B vs libstdc++ 32B |
@@ -188,7 +188,7 @@ padlock analyze src/stats.rs
 padlock analyze src/                      # entire directory
 padlock analyze a.rs b.rs c.c            # multiple files
 padlock analyze target/debug/myapp        # compiled binary (DWARF)
-padlock analyze mylib.pdb                 # Windows PDB
+padlock analyze mylib.pdb                 # Windows PDB (MSVC debug database)
 ```
 
 Flags:
@@ -893,9 +893,9 @@ Unions are parsed and simulated correctly — all fields at offset 0, total size
 
 ### Bit Fields (C/C++)
 
-Structs containing bit-field members (`int flags : 3`) are **skipped** in source analysis. Bit-field packing is entirely compiler-controlled — which bits share a storage unit, and how padding works between them, cannot be correctly modelled without invoking a compiler. Showing wrong layout data is worse than showing nothing.
+Structs containing bit-field members are parsed using GCC/Clang ABI rules: consecutive bitfields of the same storage-unit type are grouped into a single synthetic field (e.g. `[a:3|b:5]`), and the group is sized and aligned to the storage unit (`int` → 4 bytes, `uint8_t` → 1 byte). A change in storage-unit size, overflow of the current unit, or a zero-width flush (`int : 0`) starts a new group. Anonymous padding bits (`int : 3` with no name) consume bits within the current unit but are omitted from the label; all-anonymous groups emit a `[__pad]` placeholder so that the total size remains correct.
 
-Use binary analysis (`padlock analyze target/debug/myapp`) for accurate layout data on structs that contain bit fields; the compiler encodes the real offsets and sizes in DWARF. In DWARF binary mode, bit-field members (those carrying `DW_AT_bit_size`) are also silently skipped — the remaining byte-aligned fields in the struct are still extracted and analyzed.
+**Limitations:** MSVC uses different rules for mixed-type bitfield packing. `#pragma pack` affects whole-unit alignment but not intra-unit bit order. For compiler-accurate bit-level offsets, use binary analysis (`padlock analyze target/debug/myapp`); the compiler encodes real offsets in DWARF/PDB. In binary mode (DWARF, PDB, BTF), bitfield members are grouped into synthetic `[a:3|b:5]` storage-unit fields using the same rules; groups where the storage-unit size cannot be determined are flagged as uncertain fields.
 
 ---
 
@@ -923,15 +923,16 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | Rust stdlib | Transparent newtypes: `Cell<T>`, `MaybeUninit<T>`, `UnsafeCell<T>`, `Wrapping<T>`, `Saturating<T>`, `ManuallyDrop<T>` | sized as inner `T` |
 | Rust stdlib | Niche-optimized options: `Option<NonZeroU8/I8>` – `Option<NonZeroUsize/Isize>`, `Option<&T>`, `Option<&mut T>`, `Option<Box<T>>`, `Option<NonNull<T>>`, `Option<Arc<T>>`, `Option<Rc<T>>` | sized as inner type — no extra discriminant byte |
 | Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words), `complex128`, locally-declared named interfaces | qualified cross-package types (e.g. `io.Reader`) flagged as uncertain |
-| Zig | All standard integer/float types, C interop types (`c_int`, `c_uint`, `c_long`, etc.), arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) | in `packed struct`, arbitrary-width fields occupy exact bits; total = `ceil(bits/8)`; in normal structs, `ceil(N/8)` bytes aligned to next power-of-two |
+| Zig | All standard integer/float types, C interop types (`c_int`, `c_uint`, `c_long`, etc.), arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) | in `packed struct`, arbitrary-width fields occupy exact bits; total = `ceil(bits/8)`; in normal structs, `ceil(N/8)` bytes aligned to next power-of-two; comptime-only field types (`type`, `anytype`, `comptime_int`, `comptime_float`) are flagged as uncertain |
 
 ### What source analysis skips (instead of showing wrong data)
 
 | Case | Action | Accurate alternative |
 |---|---|---|
-| C/C++ structs with bit-field members | Skipped | Binary (DWARF) analysis |
+| C/C++ structs with bit-field members | Parsed — consecutive bitfields of the same storage-unit type are grouped into a synthetic field (`[a:3\|b:5]`); MSVC mixed-type packing not modelled | Binary (DWARF) analysis for compiler-accurate bit offsets |
 | C++ template structs/classes/unions (`template<typename T> struct Foo`) | Skipped — note printed to stderr | Binary analysis; or analyse concrete instantiations |
 | Rust generic struct definitions (`struct Foo<T>`) | Skipped — note printed to stderr | Binary analysis; or analyse concrete monomorphizations |
+| Go generic structs (`type Pair[T any] struct`) | Skipped — note printed to stderr | Binary analysis |
 | Forward-declared / incomplete structs | Skipped | Binary analysis |
 
 ### Known remaining limitations (source analysis)
@@ -951,7 +952,7 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 padlock-cli       — padlock binary + cargo-padlock subcommand; watch mode
 ├── padlock-source  — source frontend: tree-sitter (C/C++/Go), syn (Rust)
 │                     explicit guard annotation: #[lock_protected_by], GUARDED_BY(), // padlock:guard=
-├── padlock-dwarf   — binary frontend: DWARF via gimli+object, PDB via pdb
+├── padlock-dwarf   — binary frontend: DWARF via gimli+object, BTF via custom reader
 ├── padlock-output  — formatters: terminal, JSON, SARIF, diff
 ├── padlock-macros  — proc macros: #[assert_no_padding], #[assert_size(N)]
 └── padlock-core    — IR types, analysis passes, findings, scoring

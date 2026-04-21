@@ -23,21 +23,31 @@ pub fn run(
 
     let source_files = expand_to_source_files(paths)?;
 
+    let mut any_fixable = false;
     for file in &source_files {
-        if let Err(e) = fix_file(file, dry_run, backup, re.as_ref()) {
-            eprintln!("padlock: warning: {}: {e}", file.display());
+        match fix_file(file, dry_run, backup, re.as_ref()) {
+            Ok(had_changes) => any_fixable |= had_changes,
+            Err(e) => eprintln!("padlock: warning: {}: {e}", file.display()),
         }
+    }
+
+    // In --dry-run mode exit 1 when there are pending changes, matching the
+    // convention of `git diff --exit-code` and `cargo fmt --check`.
+    if dry_run && any_fixable {
+        std::process::exit(1);
     }
 
     Ok(())
 }
 
+/// Returns `Ok(true)` when at least one struct needed reordering (whether or not
+/// `dry_run` prevented the write), `Ok(false)` when everything was already optimal.
 fn fix_file(
     path: &Path,
     dry_run: bool,
     backup: bool,
     re: Option<&regex::Regex>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let lang = padlock_source::detect_language(path).ok_or_else(|| {
         anyhow::anyhow!(
             "fix only works on source files (.c, .cpp, .rs, .go, .zig); got {}",
@@ -47,7 +57,8 @@ fn fix_file(
 
     let arch = padlock_dwarf::reader::detect_arch_from_host();
     let source = std::fs::read_to_string(path)?;
-    let layouts = padlock_source::parse_source(path, arch)?;
+    let output = padlock_source::parse_source(path, arch)?;
+    let layouts = output.layouts;
     let report = Report::from_layouts(&layouts);
 
     // Collect layouts that have a ReorderSuggestion and (optionally) match the filter.
@@ -75,7 +86,7 @@ fn fix_file(
             "{}: nothing to fix — all structs are already optimally ordered.",
             path.display()
         );
-        return Ok(());
+        return Ok(false);
     }
 
     // Emit an ABI-compatibility warning for fixed-layout types. Reordering their
@@ -128,7 +139,7 @@ fn fix_file(
 
     if dry_run {
         println!("(dry-run: no files written)");
-        return Ok(());
+        return Ok(true);
     }
 
     if backup {
@@ -153,7 +164,7 @@ fn fix_file(
         path.display()
     );
 
-    Ok(())
+    Ok(true)
 }
 
 fn expand_to_source_files(paths: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {

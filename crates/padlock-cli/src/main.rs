@@ -28,7 +28,7 @@ mod output {
 #[command(
     name = "padlock",
     about = "Struct memory layout analyzer for C, C++, Rust, and Go",
-    version
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("BUILD_GIT_SHA"), ")")
 )]
 struct Cli {
     #[command(subcommand)]
@@ -122,7 +122,8 @@ enum Commands {
         /// Source files or directories to fix (binaries not supported)
         #[arg(num_args = 1.., value_name = "PATH")]
         paths: Vec<PathBuf>,
-        /// Show the diff without writing any files
+        /// Show the diff without writing any files; exits 1 when any reorderings
+        /// are pending (like `git diff --exit-code`), so it can gate CI pipelines
         #[arg(long)]
         dry_run: bool,
         /// Keep a .bak copy of the original file before rewriting

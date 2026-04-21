@@ -18,7 +18,7 @@ pub fn run(paths: &[PathBuf], filter: &FilterArgs) -> anyhow::Result<()> {
     );
     let mut filter = filter.clone();
     filter.apply_config_defaults(&cfg);
-    let (mut layouts, _) = collect_layouts(paths)?;
+    let (mut layouts, _, _skipped) = collect_layouts(paths)?;
     layouts.retain(|l| {
         !cfg.is_ignored(&l.name)
             && !l

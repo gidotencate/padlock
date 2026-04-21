@@ -154,10 +154,11 @@ fn main() -> anyhow::Result<()> {
 
     let report = padlock_core::findings::Report::from_layouts(&layouts);
 
-    // Apply severity filter
+    // Apply severity filter — honour per-struct overrides from .padlock.toml.
     let mut report = report;
     for sr in &mut report.structs {
-        sr.findings.retain(|f| cfg.should_report(f.severity()));
+        sr.findings
+            .retain(|f| cfg.should_report_for(&sr.struct_name, f.severity()));
     }
 
     if args.sarif {

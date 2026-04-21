@@ -569,7 +569,9 @@ fn try_source_aware_rust(layout: &StructLayout, struct_source: &str) -> Option<S
 
     let header = &struct_source[..=brace_open];
     let mut result = header.to_string();
-    result.push('\n');
+    if !body.starts_with('\n') {
+        result.push('\n');
+    }
     for field in &optimal {
         result.push_str(chunk_map[field.name.as_str()]);
     }
@@ -723,7 +725,9 @@ fn try_source_aware_c(layout: &StructLayout, struct_source: &str) -> Option<Stri
 
     let header = &struct_source[..=brace_open];
     let mut result = header.to_string();
-    result.push('\n');
+    if !body.starts_with('\n') {
+        result.push('\n');
+    }
     for field in &optimal {
         result.push_str(chunk_map[field.name.as_str()]);
     }
@@ -771,7 +775,9 @@ fn try_source_aware_go(layout: &StructLayout, struct_source: &str) -> Option<Str
 
     let header = &struct_source[..=brace_open];
     let mut result = header.to_string();
-    result.push('\n');
+    if !body.starts_with('\n') {
+        result.push('\n');
+    }
     for field in &optimal {
         result.push_str(chunk_map[field.name.as_str()]);
     }
@@ -819,7 +825,9 @@ fn try_source_aware_zig(layout: &StructLayout, struct_source: &str) -> Option<St
 
     let header = &struct_source[..=brace_open];
     let mut result = header.to_string();
-    result.push('\n');
+    if !body.starts_with('\n') {
+        result.push('\n');
+    }
     for field in &optimal {
         result.push_str(chunk_map[field.name.as_str()]);
     }

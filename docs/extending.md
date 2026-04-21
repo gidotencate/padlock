@@ -235,10 +235,13 @@ padlock/
 │   │   ├── btf.rs           ← BTF section/raw-file parser
 │   │   └── pdb_reader.rs    ← Windows PDB type-info reader
 │   ├── padlock-output/src/
-│   │   ├── summary.rs       ← human terminal output
-│   │   ├── markdown.rs
-│   │   ├── sarif.rs
-│   │   └── json.rs          ← (via serde on Report)
+│   │   ├── summary.rs           ← human terminal output
+│   │   ├── project_summary.rs   ← aggregate score, letter grade, worst-N tables
+│   │   ├── explain.rs           ← visual field layout table with CL markers
+│   │   ├── diff.rs              ← unified diff of current vs optimal order
+│   │   ├── markdown.rs          ← GitHub-Flavored Markdown report
+│   │   ├── sarif.rs             ← SARIF 2.1.0 for code scanning
+│   │   └── json.rs              ← (via serde on Report)
 │   └── padlock-cli/src/
 │       ├── main.rs          ← clap subcommands
 │       ├── config.rs        ← .padlock.toml parsing

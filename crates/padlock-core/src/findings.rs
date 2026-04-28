@@ -2,6 +2,7 @@
 
 use crate::analysis::{false_sharing, locality, padding, reorder, scorer};
 use crate::ir::{AccessPattern, PaddingGap, SharingConflict, StructLayout};
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Severity {
@@ -149,7 +150,7 @@ pub struct Report {
 impl Report {
     /// Run all analysis passes over `layouts` and assemble the full report.
     pub fn from_layouts(layouts: &[StructLayout]) -> Report {
-        let structs: Vec<StructReport> = layouts.iter().map(analyze_one).collect();
+        let structs: Vec<StructReport> = layouts.par_iter().map(analyze_one).collect();
         let total_wasted_bytes = structs.iter().map(|s| s.wasted_bytes).sum();
 
         // Build reverse-embedding map: inner_struct_name → [outer_struct_names].

@@ -33,7 +33,7 @@ comfy-table    = "7"
 toml           = "1"
 glob           = "0.3"
 notify         = { version = "6", features = ["macos_fsevent"] }
-rayon          = "1"
+rayon          = { workspace = true }
 
 [dev-dependencies]
 tempfile     = "3"

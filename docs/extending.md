@@ -246,7 +246,7 @@ padlock/
 │       ├── main.rs          ← clap subcommands
 │       ├── config.rs        ← .padlock.toml parsing
 │       ├── filter.rs        ← FilterArgs, FailSeverity
-│       ├── paths.rs         ← collect_layouts, walk_source_files, is_generated_file
+│       ├── paths.rs         ← collect_layouts, walk_source_files, should_skip_source_file
 │       └── commands/        ← one file per subcommand
 └── crates/padlock-macros/   ← assert_no_padding, assert_size proc macros
 ```

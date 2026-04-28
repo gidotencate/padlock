@@ -5,8 +5,21 @@
 
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use tree_sitter::{Node, Parser};
+
+// One parser per rayon thread — avoids re-allocating and re-validating the
+// grammar on every file.  Parser::parse with old_tree=None always does a full
+// fresh parse, so no reset is needed between files.
+thread_local! {
+    static PARSER: RefCell<Parser> = RefCell::new({
+        let mut p = Parser::new();
+        p.set_language(&tree_sitter_go::LANGUAGE.into())
+            .expect("Go grammar is always valid");
+        p
+    });
+}
 
 // ── type resolution ───────────────────────────────────────────────────────────
 
@@ -387,10 +400,8 @@ fn collect_field_declarations(
 // ── public API ────────────────────────────────────────────────────────────────
 
 pub fn parse_go(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_go::LANGUAGE.into())?;
-    let tree = parser
-        .parse(source, None)
+    let tree = PARSER
+        .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter-go parse failed"))?;
     Ok(extract_structs(source, tree.root_node(), arch))
 }

@@ -6,7 +6,7 @@
 
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use tree_sitter::{Node, Parser};
 
@@ -14,6 +14,18 @@ use crate::CppStdlib;
 
 thread_local! {
     static STDLIB: Cell<CppStdlib> = const { Cell::new(CppStdlib::LibStdCpp) };
+    static C_PARSER: RefCell<Parser> = RefCell::new({
+        let mut p = Parser::new();
+        p.set_language(&tree_sitter_c::LANGUAGE.into())
+            .expect("C grammar is always valid");
+        p
+    });
+    static CPP_PARSER: RefCell<Parser> = RefCell::new({
+        let mut p = Parser::new();
+        p.set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .expect("C++ grammar is always valid");
+        p
+    });
 }
 
 /// Set the active C++ stdlib variant for this thread.  Called from `lib.rs::set_cpp_stdlib`.
@@ -1374,10 +1386,8 @@ fn extract_identifier(source: &str, node: Node<'_>) -> Option<String> {
 // ── public API ────────────────────────────────────────────────────────────────
 
 pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_c::LANGUAGE.into())?;
-    let tree = parser
-        .parse(source, None)
+    let tree = C_PARSER
+        .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
     let mut layouts = Vec::new();
     extract_structs_from_tree(source, tree.root_node(), arch, &mut layouts);
@@ -1385,10 +1395,8 @@ pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<St
 }
 
 pub fn parse_cpp(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_cpp::LANGUAGE.into())?;
-    let tree = parser
-        .parse(source, None)
+    let tree = CPP_PARSER
+        .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
     let mut layouts = Vec::new();
     extract_structs_from_tree(source, tree.root_node(), arch, &mut layouts);

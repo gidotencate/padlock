@@ -2,6 +2,17 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.1] — 2026-04-28
+
+### Added
+- **Source coverage ratio in output headers**: when any types are skipped (generics/templates), `analyze` output now appends `[N of M types, X% source coverage]` to the header line, with a "consider binary analysis" hint when coverage drops below 70%. `padlock summary` appends `· X% coverage` to the score header.
+- **Live progress indicator during large scans**: directory scans with ≥ 20 cache-miss files show a live stderr counter `padlock: scanning N / M files…` (overwritten with `\r`). Only activates when stderr is a terminal; automatically suppressed for `--json`, `--sarif`, and piped output. Counter starts at cache-hit count so N/M reflects total files, not just misses.
+- **`--show-skipped` flag** (`padlock analyze`): expands the skipped-types section from a count + breakdown to the full per-entry list. By default, at most 10 entries are shown with an "… and N more" trailer.
+- **Skipped types now shown in `padlock summary` and `padlock check`**: `summary` appends a count+breakdown note; `check` was previously discarding skipped data and now attaches it to the report.
+
+### Changed
+- **Skipped-type output is now two-tier**: per-struct `eprintln!` calls during parallel parsing are removed (they fired unordered from rayon threads and duplicated `record_skipped` data). Default output shows one summary line with count and category breakdown (`1 200 C++ template, 47 Rust generic`). Use `--show-skipped` for the full list or `--json` for the complete `skipped` array.
+
 ## [0.10.0] — 2026-04-21
 
 ### Added

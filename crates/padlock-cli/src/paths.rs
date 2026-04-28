@@ -12,6 +12,7 @@
 // aborting the whole run, so a single unparseable file doesn't block analysis
 // of the rest of the project.
 
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -115,18 +116,24 @@ pub fn collect_layouts(
                 }
             }
 
+            // Build O(1) lookup maps before merging — avoids O(n²) linear scans
+            // over hits/miss_results for each file in the 64 K-entry walk order.
+            let hit_map: HashMap<&PathBuf, (&Vec<StructLayout>, &Vec<SkippedStruct>)> =
+                hits.iter().map(|(p, l, s)| (p, (l, s))).collect();
+            let mut miss_map: HashMap<PathBuf, _> = miss_results.into_iter().collect();
+
             // Merge hits and misses back in original file order.
             for file in &files {
-                if let Some((_, layouts, skipped)) = hits.iter().find(|(f, _, _)| f == file) {
+                if let Some((layouts, skipped)) = hit_map.get(file) {
                     analyzed.push(file.display().to_string());
-                    all_layouts.extend(layouts.clone());
-                    all_skipped.extend(skipped.clone());
-                } else if let Some((_, result)) = miss_results.iter().find(|(f, _)| f == file) {
+                    all_layouts.extend((*layouts).clone());
+                    all_skipped.extend((*skipped).clone());
+                } else if let Some(result) = miss_map.remove(file) {
                     match result {
                         Ok(output) => {
                             analyzed.push(file.display().to_string());
-                            all_layouts.extend(output.layouts.clone());
-                            all_skipped.extend(output.skipped.clone());
+                            all_layouts.extend(output.layouts);
+                            all_skipped.extend(output.skipped);
                         }
                         Err(e) => eprintln!("padlock: warning: {}: {e}", file.display()),
                     }

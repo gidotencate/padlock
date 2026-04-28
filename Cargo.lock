@@ -670,6 +670,7 @@ dependencies = [
 name = "padlock-core"
 version = "0.10.3"
 dependencies = [
+ "rayon",
  "serde",
 ]
 

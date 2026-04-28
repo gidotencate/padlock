@@ -6,7 +6,17 @@
 
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{Field, StructLayout, TypeInfo};
+use std::cell::RefCell;
 use tree_sitter::{Node, Parser};
+
+thread_local! {
+    static PARSER: RefCell<Parser> = RefCell::new({
+        let mut p = Parser::new();
+        p.set_language(&tree_sitter_zig::LANGUAGE.into())
+            .expect("Zig grammar is always valid");
+        p
+    });
+}
 
 // ── type resolution ───────────────────────────────────────────────────────────
 
@@ -606,10 +616,8 @@ fn parse_container_field(
 // ── public API ────────────────────────────────────────────────────────────────
 
 pub fn parse_zig(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_zig::LANGUAGE.into())?;
-    let tree = parser
-        .parse(source, None)
+    let tree = PARSER
+        .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter-zig parse failed"))?;
     Ok(extract_structs(source, tree.root_node(), arch))
 }

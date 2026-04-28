@@ -36,11 +36,13 @@ pub struct ParseCache {
 }
 
 impl ParseCache {
-    /// Load the cache from the default location.
+    /// Load the cache from `root/.padlock-cache/layouts.json`.
     ///
+    /// `root` should be the root of the directory being analyzed (not CWD) so
+    /// that repeated runs from different working directories share one cache.
     /// If the file is missing or corrupt, an empty cache is returned.
-    pub fn load() -> Self {
-        let cache_path = PathBuf::from(".padlock-cache").join("layouts.json");
+    pub fn load(root: &Path) -> Self {
+        let cache_path = root.join(".padlock-cache").join("layouts.json");
         let store = std::fs::read(&cache_path)
             .ok()
             .and_then(|data| serde_json::from_slice(&data).ok())
@@ -84,18 +86,27 @@ impl ParseCache {
 
     /// Write the cache back to disk if any entries were updated.
     ///
+    /// Also prunes stale entries for files that no longer exist — prevents the
+    /// cache from growing unboundedly when source files are deleted or moved.
+    /// Uses a streaming writer to avoid building the full JSON string in memory.
+    ///
     /// Silently ignores I/O errors so that cache failures never break analysis.
-    pub fn flush(&self) {
+    pub fn flush(&mut self) {
         if !self.dirty {
             return;
         }
+        // Prune entries whose source file no longer exists.
+        self.store
+            .entries
+            .retain(|k, _| std::path::Path::new(k).exists());
         if let Some(dir) = self.cache_path.parent()
             && std::fs::create_dir_all(dir).is_err()
         {
             return;
         }
-        if let Ok(json) = serde_json::to_string(&self.store) {
-            let _ = std::fs::write(&self.cache_path, json);
+        if let Ok(file) = std::fs::File::create(&self.cache_path) {
+            let writer = std::io::BufWriter::new(file);
+            let _ = serde_json::to_writer(writer, &self.store);
         }
     }
 }
@@ -231,7 +242,7 @@ mod tests {
     fn cache_flush_is_idempotent_when_not_dirty() {
         let dir = TempDir::new().unwrap();
         let cache_path = dir.path().join(".padlock-cache").join("layouts.json");
-        let cache = ParseCache {
+        let mut cache = ParseCache {
             store: CacheStore::default(),
             cache_path: cache_path.clone(),
             dirty: false,

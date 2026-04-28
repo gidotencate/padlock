@@ -25,6 +25,7 @@ padlock-core   = { path = "crates/padlock-core",   version = "0.10.3" }
 padlock-dwarf  = { path = "crates/padlock-dwarf",  version = "0.10.3" }
 padlock-source = { path = "crates/padlock-source", version = "0.10.3" }
 padlock-output = { path = "crates/padlock-output", version = "0.10.3" }
+rayon          = "1"
 
 [profile.release]
 lto   = "thin"

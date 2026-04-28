@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.2] — 2026-04-28
+
+### Fixed
+- **O(n²) merge stall on large codebases**: after parallel parsing, hit/miss results were reassembled into walk order using `Vec::find()` — O(n) per file, O(n²) overall. On a 64 K-file codebase (e.g. the Linux kernel source tree) this produced ~4 billion comparisons in the merge step alone, stalling `padlock` after parsing finished. Both lookups are now O(1) via `HashMap`.
+
 ## [0.10.1] — 2026-04-28
 
 ### Added

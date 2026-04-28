@@ -77,7 +77,7 @@ pub fn run(
     let mut filter = filter.clone();
     filter.apply_config_defaults(&cfg);
 
-    let (mut layouts, analyzed, _skipped) = collect_layouts(paths)?;
+    let (mut layouts, analyzed, skipped) = collect_layouts(paths)?;
 
     // Apply arch override: CLI --target takes precedence over config arch.override.
     let arch_name_override = target.as_deref().or(cfg.arch_override.as_deref());
@@ -106,6 +106,7 @@ pub fn run(
 
     let mut report = Report::from_layouts(&layouts);
     report.analyzed_paths = analyzed;
+    report.skipped = skipped;
     filter.apply_to_report(&mut report);
 
     // ── save-baseline mode ────────────────────────────────────────────────────

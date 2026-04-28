@@ -117,9 +117,18 @@ pub fn render_summary(input: &SummaryInput<'_>) -> String {
     let bar_width = 20usize;
     let divider = "━".repeat(57);
 
+    // Coverage: fraction of the type surface padlock could analyze from source.
+    let coverage_part = if !report.skipped.is_empty() {
+        let total_seen = total + report.skipped.len();
+        let pct = total * 100 / total_seen;
+        format!(" · {pct}% coverage")
+    } else {
+        String::new()
+    };
+
     // Header line
     out.push_str(&format!(
-        "{divider}\n  Score   {score_int} / 100   {grade}    {} structs · {} files · {}B wasted\n{divider}\n\n",
+        "{divider}\n  Score   {score_int} / 100   {grade}    {} structs · {} files · {}B wasted{coverage_part}\n{divider}\n\n",
         total,
         file_scores.len(),
         report.total_wasted_bytes

@@ -10,6 +10,26 @@ pub fn render_report(report: &Report, show_skipped: bool) -> String {
     let mut out = String::new();
     let multi_file = report.analyzed_paths.len() > 1;
 
+    // Coverage suffix: shown when any types were skipped so the engineer knows
+    // what fraction of the type surface padlock could actually see.
+    let coverage_suffix = if !report.skipped.is_empty() {
+        let total = report.total_structs + report.skipped.len();
+        let pct = report.total_structs * 100 / total;
+        if pct < 70 {
+            format!(
+                " [{} of {} types, {}% source coverage — consider binary analysis for the rest]",
+                report.total_structs, total, pct
+            )
+        } else {
+            format!(
+                " [{} of {} types, {}% source coverage]",
+                report.total_structs, total, pct
+            )
+        }
+    } else {
+        String::new()
+    };
+
     // Header line
     if multi_file {
         out.push_str(&format!("Analyzed {} files, ", report.analyzed_paths.len()));
@@ -28,11 +48,11 @@ pub fn render_report(report: &Report, show_skipped: bool) -> String {
 
     if report.total_wasted_bytes > 0 {
         out.push_str(&format!(
-            " — {} bytes wasted across all structs\n",
-            report.total_wasted_bytes
+            " — {} bytes wasted across all structs{}\n",
+            report.total_wasted_bytes, coverage_suffix
         ));
     } else {
-        out.push_str(" — no padding waste found\n");
+        out.push_str(&format!(" — no padding waste found{}\n", coverage_suffix));
     }
 
     if multi_file {

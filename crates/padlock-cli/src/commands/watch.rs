@@ -108,7 +108,7 @@ fn analyse_and_print(path: &Path, json: bool) {
                     Err(e) => eprintln!("padlock watch: JSON error: {e}"),
                 }
             } else {
-                print!("{}", padlock_output::render_report(&report));
+                print!("{}", padlock_output::render_report(&report, false));
             }
         }
         Err(e) => {

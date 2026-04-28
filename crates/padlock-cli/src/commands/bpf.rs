@@ -41,6 +41,7 @@ pub fn run(
             fail_on_severity,
             target: None,
             stdlib: None,
+            show_skipped: false,
         },
         filter,
     )

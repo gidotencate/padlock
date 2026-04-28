@@ -12,7 +12,10 @@
 // aborting the whole run, so a single unparseable file doesn't block analysis
 // of the rest of the project.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use padlock_core::findings::SkippedStruct;
 use padlock_core::ir::StructLayout;
@@ -59,14 +62,51 @@ pub fn collect_layouts(
                 }
             }
 
-            // Parse cache-miss files in parallel.
+            // Parse cache-miss files in parallel, with a progress indicator on
+            // stderr when there are enough misses to be worth showing (≥20) and
+            // stderr is a terminal.  The counter starts at the number of cache
+            // hits so the displayed N/M reflects all files, not just misses.
+            let total_files = files.len();
+            let n_hits = hits.len();
+            let parsed_count = Arc::new(AtomicUsize::new(n_hits));
+            let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+            let progress_thread = if misses.len() >= 20 && std::io::stderr().is_terminal() {
+                let counter = parsed_count.clone();
+                let stop = stop_flag.clone();
+                Some(std::thread::spawn(move || {
+                    use std::io::Write;
+                    loop {
+                        let n = counter.load(Ordering::Relaxed);
+                        eprint!("\r  padlock: scanning {n} / {total_files} files…");
+                        let _ = std::io::stderr().flush();
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    // Clear the progress line.
+                    eprint!("\r{:<60}\r", "");
+                    let _ = std::io::stderr().flush();
+                }))
+            } else {
+                None
+            };
+
+            let counter_ref = parsed_count.clone();
             let miss_results: Vec<_> = misses
                 .par_iter()
                 .map(|file| {
                     let r = padlock_source::parse_source(file, arch);
+                    counter_ref.fetch_add(1, Ordering::Relaxed);
                     (file.clone(), r)
                 })
                 .collect();
+
+            stop_flag.store(true, Ordering::Relaxed);
+            if let Some(handle) = progress_thread {
+                let _ = handle.join();
+            }
 
             // Store new results in cache (layouts + skipped).
             for (file, result) in &miss_results {

@@ -168,7 +168,7 @@ fn main() -> anyhow::Result<()> {
         let json = padlock_output::to_json(&report).context("JSON serialisation failed")?;
         println!("{json}");
     } else {
-        print!("{}", padlock_output::render_report(&report));
+        print!("{}", padlock_output::render_report(&report, false));
     }
 
     // Exit non-zero when fail_below threshold is breached or any high-severity finding exists.

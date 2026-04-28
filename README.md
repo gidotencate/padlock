@@ -72,7 +72,8 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Source-preserving fixes** | `padlock fix` reorders field chunks verbatim, keeping `pub`, `#[serde(...)]`, `/// doc-comments`, and guard annotations intact |
 | **Project health summary** | `padlock summary` shows aggregate score, severity bar chart, worst files, and worst structs in one terminal screen |
 | **Severity CI gate** | `--fail-on-severity medium\|low` exits non-zero when any finding meets or exceeds the threshold |
-| **Parallel parsing** | Directory walks parse source files in parallel (rayon), with an on-disk mtime cache (`.padlock-cache/`) to skip unchanged files on repeat runs |
+| **Parallel parsing** | Directory walks parse source files in parallel (rayon), with an on-disk mtime cache (`.padlock-cache/`) to skip unchanged files on repeat runs; live `scanning N / M files…` progress shown on stderr for large scans |
+| **Source coverage** | Header shows `N of M types, X% source coverage` when types are skipped; `< 70%` triggers a "consider binary analysis" hint |
 | **Cache-line visualization** | `padlock explain` adds a `CL` column (zero-indexed cache-line number per field/padding row) and inserts a separator row each time a field crosses into a new 64-byte (or 128-byte) cache line |
 | **VS Code extension** | Findings in the Problems panel on save, status bar health score, hover popups, quick-fix lightbulb, and diff-preview fix-all |
 
@@ -207,6 +208,7 @@ Flags:
 - `--hide-repr-rust` — exclude `repr(Rust)` structs from output entirely. Useful when you want to focus on types with a fixed binary layout (C, `repr(C)`, Go, Zig) where findings are fully accurate and directly actionable.
 - `--stdlib libstdc++|libc++|msvc` — set the C++ standard library variant for type sizing. Affects `std::string`, `std::mutex`, `std::shared_ptr`, and other stdlib types that differ in size across implementations. Default: `libstdc++` (GCC/Linux). Use `libc++` for macOS/iOS/Android Clang projects, `msvc` for Windows MSVC projects.
 - `--fail-on-severity high|medium|low` — exit non-zero when any finding meets or exceeds this severity. `high` is the default CI gate (same as exit-on-high-finding behaviour); `medium` and `low` tighten the gate further.
+- `--show-skipped` — print the full list of skipped types (generics/templates that could not be sized from source). By default only the count and a category breakdown are shown.
 
 ---
 

@@ -4,7 +4,7 @@
 // Shows aggregate score, severity distribution with a bar chart, worst files,
 // and worst structs — all fitting in one terminal screen.
 
-use padlock_core::findings::{Report, Severity, StructReport};
+use padlock_core::findings::{Report, Severity, SkippedStruct, StructReport};
 
 /// Input for the project summary renderer.
 pub struct SummaryInput<'a> {
@@ -117,9 +117,18 @@ pub fn render_summary(input: &SummaryInput<'_>) -> String {
     let bar_width = 20usize;
     let divider = "━".repeat(57);
 
+    // Coverage: fraction of the type surface padlock could analyze from source.
+    let coverage_part = if !report.skipped.is_empty() {
+        let total_seen = total + report.skipped.len();
+        let pct = total * 100 / total_seen;
+        format!(" · {pct}% coverage")
+    } else {
+        String::new()
+    };
+
     // Header line
     out.push_str(&format!(
-        "{divider}\n  Score   {score_int} / 100   {grade}    {} structs · {} files · {}B wasted\n{divider}\n\n",
+        "{divider}\n  Score   {score_int} / 100   {grade}    {} structs · {} files · {}B wasted{coverage_part}\n{divider}\n\n",
         total,
         file_scores.len(),
         report.total_wasted_bytes
@@ -205,7 +214,49 @@ pub fn render_summary(input: &SummaryInput<'_>) -> String {
         ));
     }
 
+    // Skipped types — count + breakdown only; summary is designed to fit one screen.
+    if !report.skipped.is_empty() {
+        let breakdown = skipped_breakdown(&report.skipped);
+        out.push_str(&format!(
+            "\n  note: {} type{} skipped: {}  (use `padlock analyze --show-skipped` for full list)\n",
+            report.skipped.len(),
+            if report.skipped.len() == 1 { "" } else { "s" },
+            breakdown,
+        ));
+    }
+
     out
+}
+
+fn skipped_breakdown(skipped: &[SkippedStruct]) -> String {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for s in skipped {
+        let cat = if s.reason.starts_with("C++ template") {
+            "C++ template"
+        } else if s.reason.starts_with("comptime-generic") {
+            "Zig comptime-generic"
+        } else if s.reason.starts_with("generic enum") {
+            "Rust generic enum"
+        } else if s.reason.starts_with("generic struct") {
+            if s.source_file
+                .as_deref()
+                .map(|f| f.ends_with(".go"))
+                .unwrap_or(false)
+            {
+                "Go generic"
+            } else {
+                "Rust generic"
+            }
+        } else {
+            "other"
+        };
+        *counts.entry(cat).or_insert(0) += 1;
+    }
+    counts
+        .iter()
+        .map(|(cat, cnt)| format!("{cnt} {cat}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn letter_grade(score: usize) -> &'static str {

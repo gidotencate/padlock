@@ -15,7 +15,7 @@ pub fn run(paths: &[PathBuf], filter: Option<&str>) -> anyhow::Result<()> {
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid --filter pattern: {e}"))?;
 
-    let (layouts, _, _skipped) = collect_layouts(paths)?;
+    let (layouts, _, _skipped) = collect_layouts(paths, false)?;
 
     let filtered: Vec<_> = layouts
         .iter()

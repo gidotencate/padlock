@@ -28,7 +28,7 @@ pub fn run(
     );
 
     // Collect layouts from all paths (dirs expanded, binaries via DWARF).
-    let (mut layouts, analyzed, skipped) = collect_layouts(paths)?;
+    let (mut layouts, analyzed, skipped) = collect_layouts(paths, filter.include_generated)?;
 
     // Apply arch override: CLI --target takes precedence over config arch.override.
     let arch_name_override = target.as_deref().or(cfg.arch_override.as_deref());

@@ -162,10 +162,6 @@ fn parse_type_spec(
     let name = name?;
 
     if is_generic {
-        eprintln!(
-            "padlock: note: skipping '{name}' — generic struct \
-             (layout depends on type arguments; use binary analysis for accurate results)"
-        );
         crate::record_skipped(
             &name,
             "generic struct — layout depends on type arguments; \

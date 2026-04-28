@@ -270,10 +270,6 @@ fn note_comptime_generic_fn(source: &str, node: Node<'_>) {
         });
 
     if returns_type {
-        eprintln!(
-            "padlock: note: skipping '{fn_name}' — comptime-generic function \
-             (returns a struct type; layout depends on type arguments)"
-        );
         crate::record_skipped(
             &fn_name,
             "comptime-generic function — returns a struct type; \

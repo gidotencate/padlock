@@ -105,6 +105,16 @@ All commands are also available from the **right-click context menu** when editi
 }
 ```
 
+### Example: include machine-generated files (e.g. protobuf output)
+
+By default padlock skips files that declare themselves as machine-generated (`// Code generated`, `// @generated`, `.pb.h`/`.pb.cc`, etc.). To include them — for example when auditing generated protobuf code — add `--include-generated`:
+
+```json
+{
+  "padlock.extraArgs": ["--include-generated"]
+}
+```
+
 ### Example: cross-architecture analysis (STM32F4 firmware)
 
 Use `padlock.extraArgs` to set a target architecture. For Cortex-M4 firmware (32-byte cache lines, 4-byte pointers), false-sharing findings are active. For Cortex-M0/M3 (no cache), they are suppressed automatically.

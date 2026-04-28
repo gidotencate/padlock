@@ -21,6 +21,8 @@ pub struct AnalyzeOpts {
     pub target: Option<String>,
     /// C++ stdlib variant for type-size lookups (libstdc++, libc++, msvc).
     pub stdlib: Option<padlock_source::CppStdlib>,
+    /// When true, list every skipped type in output rather than just the count.
+    pub show_skipped: bool,
 }
 
 pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow::Result<()> {
@@ -33,6 +35,7 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
         fail_on_severity,
         target,
         stdlib,
+        show_skipped,
     } = opts;
 
     // Apply C++ stdlib variant before any source parsing happens on this thread.
@@ -140,7 +143,7 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
     } else if markdown {
         print!("{}", padlock_output::to_markdown(&report));
     } else {
-        print!("{}", padlock_output::render_report(&report));
+        print!("{}", padlock_output::render_report(&report, show_skipped));
     }
 
     if failed {

@@ -1,9 +1,12 @@
 // padlock-output/src/summary.rs
 
-use padlock_core::findings::{Finding, Report, Severity, StructReport};
+use padlock_core::findings::{Finding, Report, Severity, SkippedStruct, StructReport};
 
 /// Render a full report as a human-readable multi-line string.
-pub fn render_report(report: &Report) -> String {
+///
+/// `show_skipped`: when `true`, list every skipped type; when `false`, show only
+/// a count + category breakdown with a hint to pass `--show-skipped`.
+pub fn render_report(report: &Report, show_skipped: bool) -> String {
     let mut out = String::new();
     let multi_file = report.analyzed_paths.len() > 1;
 
@@ -43,19 +46,7 @@ pub fn render_report(report: &Report) -> String {
     }
 
     if !report.skipped.is_empty() {
-        out.push_str(&format!(
-            "note: {} type{} skipped (layout cannot be determined from source alone):\n",
-            report.skipped.len(),
-            if report.skipped.len() == 1 { "" } else { "s" }
-        ));
-        for s in &report.skipped {
-            let loc = s
-                .source_file
-                .as_deref()
-                .map(|f| format!(" ({f})"))
-                .unwrap_or_default();
-            out.push_str(&format!("  skipped '{}'{loc}: {}\n", s.name, s.reason));
-        }
+        out.push_str(&render_skipped(&report.skipped, show_skipped));
     }
 
     out
@@ -187,6 +178,74 @@ fn render_struct_with_embed(
     out
 }
 
+const SKIPPED_INLINE_LIMIT: usize = 10;
+
+/// Categorise a skipped entry into a short human-readable label.
+fn skip_category(s: &SkippedStruct) -> &'static str {
+    let r = s.reason.as_str();
+    if r.starts_with("C++ template") {
+        "C++ template"
+    } else if r.starts_with("comptime-generic") {
+        "Zig comptime-generic"
+    } else if r.starts_with("generic enum") {
+        "Rust generic enum"
+    } else if r.starts_with("generic struct") {
+        let is_go = s
+            .source_file
+            .as_deref()
+            .map(|f| f.ends_with(".go"))
+            .unwrap_or(false);
+        if is_go { "Go generic" } else { "Rust generic" }
+    } else {
+        "other"
+    }
+}
+
+/// Render the skipped-types section.
+///
+/// Always shows a count + breakdown by category.  When `show_all` is false,
+/// lists at most `SKIPPED_INLINE_LIMIT` entries and appends a hint; when true,
+/// lists all entries.
+fn render_skipped(skipped: &[SkippedStruct], show_all: bool) -> String {
+    let n = skipped.len();
+    let mut out = String::new();
+
+    // Build category counts (sorted for stable output).
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for s in skipped {
+        *counts.entry(skip_category(s)).or_insert(0) += 1;
+    }
+    let breakdown: Vec<String> = counts
+        .iter()
+        .map(|(cat, cnt)| format!("{cnt} {cat}"))
+        .collect();
+
+    out.push_str(&format!(
+        "note: {n} type{} skipped (layout cannot be determined from source alone): {}\n",
+        if n == 1 { "" } else { "s" },
+        breakdown.join(", "),
+    ));
+
+    let limit = if show_all { n } else { SKIPPED_INLINE_LIMIT };
+    for s in skipped.iter().take(limit) {
+        let loc = s
+            .source_file
+            .as_deref()
+            .map(|f| format!(" ({f})"))
+            .unwrap_or_default();
+        out.push_str(&format!("  skipped '{}'{loc}: {}\n", s.name, s.reason));
+    }
+
+    if !show_all && n > SKIPPED_INLINE_LIMIT {
+        out.push_str(&format!(
+            "  … and {} more (use --show-skipped to list all, or --json for full data)\n",
+            n - SKIPPED_INLINE_LIMIT,
+        ));
+    }
+
+    out
+}
+
 fn render_finding(f: &Finding) -> String {
     let sev = match f.severity() {
         Severity::High => "HIGH",
@@ -289,28 +348,28 @@ mod tests {
     #[test]
     fn render_report_contains_struct_name() {
         let report = Report::from_layouts(&[connection_layout()]);
-        let out = render_report(&report);
+        let out = render_report(&report, false);
         assert!(out.contains("Connection"));
     }
 
     #[test]
     fn render_report_mentions_wasted_bytes() {
         let report = Report::from_layouts(&[connection_layout()]);
-        let out = render_report(&report);
+        let out = render_report(&report, false);
         assert!(out.contains("waste") || out.contains("Padding"));
     }
 
     #[test]
     fn render_report_shows_reorder_suggestion() {
         let report = Report::from_layouts(&[connection_layout()]);
-        let out = render_report(&report);
+        let out = render_report(&report, false);
         assert!(out.contains("Reorder") || out.contains("saves"));
     }
 
     #[test]
     fn render_report_no_issues_on_packed() {
         let report = Report::from_layouts(&[packed_layout()]);
-        let out = render_report(&report);
+        let out = render_report(&report, false);
         assert!(out.contains("no issues"));
     }
 
@@ -339,7 +398,7 @@ mod tests {
     fn render_report_multi_file_header() {
         let mut report = Report::from_layouts(&[connection_layout()]);
         report.analyzed_paths = vec!["a.rs".into(), "b.rs".into()];
-        let out = render_report(&report);
+        let out = render_report(&report, false);
         assert!(out.contains("2 files"));
     }
 
@@ -347,21 +406,21 @@ mod tests {
     fn high_reorder_finding_shows_mb_hint() {
         // Connection saves 8B (High severity) → should show MB/1M hint
         let report = Report::from_layouts(&[connection_layout()]);
-        let out = render_report(&report);
+        let out = render_report(&report, false);
         assert!(out.contains("MB/1M instances"));
     }
 
     #[test]
     fn mb_hint_absent_for_packed_struct() {
         let report = Report::from_layouts(&[packed_layout()]);
-        let out = render_report(&report);
+        let out = render_report(&report, false);
         assert!(!out.contains("MB/1M instances"));
     }
 
     #[test]
     fn padding_waste_shows_gap_locations() {
         let report = Report::from_layouts(&[connection_layout()]);
-        let out = render_report(&report);
+        let out = render_report(&report, false);
         // Should show "XB after `field` (offset N)" for each gap.
         assert!(out.contains("after `"), "gap location detail missing");
         assert!(out.contains("offset "), "gap offset missing");
@@ -370,7 +429,7 @@ mod tests {
     #[test]
     fn reorder_shows_before_and_after_sizes() {
         let report = Report::from_layouts(&[connection_layout()]);
-        let out = render_report(&report);
+        let out = render_report(&report, false);
         // New format: "NB → NB (saves NB)"
         assert!(out.contains("saves"), "savings clause missing");
     }

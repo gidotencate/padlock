@@ -163,7 +163,7 @@ pub fn run(
                 };
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                print!("{}", padlock_output::render_report(&report));
+                print!("{}", padlock_output::render_report(&report, false));
                 if has_high {
                     eprintln!(
                         "\npadlock: check failed — High severity findings present (use --save-baseline to establish a baseline)"

@@ -71,6 +71,10 @@ enum Commands {
         /// Choices: libstdc++ (GCC/Linux default), libc++ (Clang/macOS), msvc (Windows).
         #[arg(long, value_name = "VARIANT")]
         stdlib: Option<String>,
+        /// List every skipped type (generics/templates) in output instead of just
+        /// the count summary. Useful when debugging why a specific type is absent.
+        #[arg(long)]
+        show_skipped: bool,
         #[command(flatten)]
         filter: filter::FilterArgs,
     },
@@ -227,6 +231,7 @@ fn main() -> anyhow::Result<()> {
             fail_on_severity,
             target,
             stdlib,
+            show_skipped,
             filter,
         } => commands::analyze::run(
             &paths,
@@ -239,6 +244,7 @@ fn main() -> anyhow::Result<()> {
                 fail_on_severity,
                 target,
                 stdlib: stdlib.as_deref().and_then(parse_stdlib),
+                show_skipped,
             },
             &filter,
         ),
@@ -288,6 +294,7 @@ fn main() -> anyhow::Result<()> {
                 fail_on_severity: None,
                 target: None,
                 stdlib: None,
+                show_skipped: false,
             },
             &filter,
         ),

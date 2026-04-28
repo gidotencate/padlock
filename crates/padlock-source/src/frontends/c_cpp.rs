@@ -806,10 +806,6 @@ fn extract_structs_from_tree(
                 .find(|c| c.kind() == "type_identifier")
                 .map(|c| source[c.byte_range()].to_string())
                 .unwrap_or_else(|| "(unknown)".to_string());
-            eprintln!(
-                "padlock: note: skipping '{tpl_name}' — template \
-                 (layout depends on type arguments; use binary analysis for accurate results)"
-            );
             crate::record_skipped(
                 &tpl_name,
                 "C++ template — layout depends on type arguments; \

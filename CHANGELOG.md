@@ -2,6 +2,16 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.4] — 2026-04-29
+
+### Performance
+- **Parallel directory walk**: `walk_source_files` now fans out across subdirectories concurrently via rayon, with a final `sort_unstable` for deterministic order.
+- **Thread-local tree-sitter parsers**: Go, Zig, C, and C++ frontends hold one `Parser` per rayon worker thread instead of constructing one per file.
+- **Parallel analysis passes**: `Report::from_layouts` runs per-struct analysis concurrently via `par_iter()`.
+- **Cache rooted at analyzed directory**: `.padlock-cache/layouts.json` is now placed relative to the first analyzed path, not the working directory.
+- **Cache eviction of deleted files**: stale entries are pruned from the cache on flush.
+- **Cache streaming write**: uses `serde_json::to_writer(BufWriter::new(...))` instead of building the full JSON in RAM.
+
 ## [0.10.3] — 2026-04-28
 
 ### Added

@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version       = "0.10.4"
+version       = "0.10.5"
 edition       = "2024"
 rust-version  = "1.88"
 license     = "MIT OR Apache-2.0"
@@ -21,10 +21,10 @@ categories  = ["development-tools", "development-tools::profiling"]
 readme      = "README.md"
 
 [workspace.dependencies]
-padlock-core   = { path = "crates/padlock-core",   version = "0.10.4" }
-padlock-dwarf  = { path = "crates/padlock-dwarf",  version = "0.10.4" }
-padlock-source = { path = "crates/padlock-source", version = "0.10.4" }
-padlock-output = { path = "crates/padlock-output", version = "0.10.4" }
+padlock-core   = { path = "crates/padlock-core",   version = "0.10.5" }
+padlock-dwarf  = { path = "crates/padlock-dwarf",  version = "0.10.5" }
+padlock-source = { path = "crates/padlock-source", version = "0.10.5" }
+padlock-output = { path = "crates/padlock-output", version = "0.10.5" }
 rayon          = "1"
 
 [profile.release]

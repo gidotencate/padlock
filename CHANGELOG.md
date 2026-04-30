@@ -2,6 +2,23 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.5] — 2026-04-30
+
+### Fixed
+- **Go embedded pointer field names**: fields declared as `*T` now use `T` as the field name (per Go spec — embedded pointer promotion strips the `*`). Previously the asterisk was included, producing incorrect field names.
+- **`resolve_nested_structs` infinite loop**: iteration is now capped at `len * 2` to prevent an infinite loop when tree-sitter error-recovery produces circular field references (e.g. mutually-recursive pointer types where the `*` is stripped from the error tree).
+- **Child-iteration early-exit in Go, C/C++, Zig frontends**: `node.child(i)?` inside `for` loops silently aborted the enclosing function on any `None` child. Replaced with `else { continue }` so a missing node skips that child and continues parsing.
+
+### Performance
+- **`padlock:ignore` scan**: source is now scanned once for all ignored names (O(source_len)) rather than once per struct (O(N × source_len)). HashSet lookup replaces per-struct linear search.
+- **`should_skip_source_file` filter**: parallelised via rayon — ~15× speedup on cold-cache runs over large source trees.
+- **Parse cache entry cap**: `ParseCache::flush` now drops entries beyond 100k to bound disk and RAM usage on very large projects.
+
+### Dependencies
+- `tree-sitter` → 0.25 (fixes `LanguageError { version: 15 }` crash with ABI-15 grammars)
+- `tree-sitter-c` → 0.24
+- `tree-sitter-go` → 0.25
+
 ## [0.10.4] — 2026-04-29
 
 ### Performance

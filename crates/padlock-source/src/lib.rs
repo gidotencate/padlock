@@ -125,7 +125,6 @@ pub fn parse_source_str(
         SourceLanguage::Go => frontends::go::parse_go(source, arch)?,
         SourceLanguage::Zig => frontends::zig::parse_zig(source, arch)?,
     };
-
     // Resolve fields whose type names match other structs in this file.
     // This makes nested struct sizes accurate (instead of defaulting to pointer size).
     resolve_nested_structs(&mut layouts);
@@ -135,8 +134,10 @@ pub fn parse_source_str(
         concurrency::annotate_concurrency(layout, lang);
     }
 
-    // Remove structs explicitly opted out via `// padlock:ignore`
-    layouts.retain(|layout| !is_padlock_ignored(source, &layout.name));
+    // Remove structs explicitly opted out via `// padlock:ignore`.
+    // Pre-scan the source once instead of rescanning per struct (O(M) vs O(N×M)).
+    let ignored = collect_padlock_ignored_names(source);
+    layouts.retain(|layout| !ignored.contains(&layout.name));
 
     Ok(layouts)
 }
@@ -172,7 +173,16 @@ fn is_known_primitive(name: &str) -> bool {
 /// Runs in a loop until stable to handle transitive nesting (struct A contains
 /// B which contains C). In practice, 2–3 iterations suffice for typical code.
 fn resolve_nested_structs(layouts: &mut [StructLayout]) {
+    // Bound iterations to guard against size oscillation from parse-error trees.
+    // Real transitive nesting resolves in ≤ depth iterations; depth is bounded by
+    // the number of distinct struct types in the file.
+    let max_iters = layouts.len().max(4) * 2;
+    let mut iters = 0;
     loop {
+        if iters >= max_iters {
+            break;
+        }
+        iters += 1;
         // Build name → (total_size, align) from whatever we have so far.
         let known: HashMap<String, (usize, usize)> = layouts
             .iter()
@@ -298,6 +308,75 @@ fn resimulate_layout(layout: &mut StructLayout) {
     layout.align = struct_align;
 }
 
+/// Scan `source` once and return all struct/type names annotated with
+/// `// padlock:ignore`.  O(source_len) regardless of struct count.
+///
+/// Handles both forms:
+/// - inline: `struct Foo { … }; // padlock:ignore`
+/// - preceding line: `// padlock:ignore\nstruct Foo { … }`
+fn collect_padlock_ignored_names(source: &str) -> std::collections::HashSet<String> {
+    let mut ignored = std::collections::HashSet::new();
+    let mut pos = 0;
+    while let Some(rel) = source[pos..].find("padlock:ignore") {
+        let abs = pos + rel;
+        let after = abs + "padlock:ignore".len();
+        // Skip per-finding annotations: `padlock:ignore[...]` (bare `padlock:ignore` only)
+        if source[after..].starts_with('[') {
+            pos = after;
+            continue;
+        }
+        let line_start = source[..abs].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_end = source[abs..]
+            .find('\n')
+            .map(|i| abs + i)
+            .unwrap_or(source.len());
+        let line_trimmed = source[line_start..line_end].trim();
+
+        if let Some(name) = struct_name_on_line(source, line_start, line_end) {
+            // Inline annotation on a struct declaration line.
+            ignored.insert(name);
+        } else if line_trimmed.starts_with("//") && line_end + 1 < source.len() {
+            // Pure comment line — look at the immediately following line.
+            let next_start = line_end + 1;
+            let next_end = source[next_start..]
+                .find('\n')
+                .map(|i| next_start + i)
+                .unwrap_or(source.len());
+            if let Some(name) = struct_name_on_line(source, next_start, next_end) {
+                ignored.insert(name);
+            }
+        }
+        pos = after;
+    }
+    ignored
+}
+
+/// Extract the declared struct/union/type name from a source line, if present.
+fn struct_name_on_line(source: &str, line_start: usize, line_end: usize) -> Option<String> {
+    let line = &source[line_start..line_end];
+    for kw in &["struct ", "union ", "type "] {
+        if let Some(kw_pos) = line.find(kw) {
+            let rest = &line[kw_pos + kw.len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            let after = kw_pos + kw.len() + name.len();
+            let is_boundary = line[after..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            if is_boundary {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
 /// Returns `true` if a `// padlock:ignore` comment appears on the line
 /// immediately before (or inline on the same line as) the struct/union/type
 /// declaration for `struct_name`.
@@ -307,6 +386,7 @@ fn resimulate_layout(layout: &mut StructLayout) {
 /// // padlock:ignore
 /// struct MySpecialLayout { ... };
 /// ```
+#[cfg(test)]
 fn is_padlock_ignored(source: &str, struct_name: &str) -> bool {
     // Keywords that introduce named type definitions across all supported languages
     for keyword in &["struct", "union", "type"] {

@@ -164,7 +164,7 @@ fn parse_array_type(
     let mut elem: Option<(usize, usize)> = None;
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "integer" | "integer_literal" => {
                 let text = source[child.byte_range()].trim();
@@ -300,7 +300,7 @@ fn parse_variable_declaration(
     let mut union_node: Option<Node> = None;
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "identifier" if name.is_none() => {
                 // The first identifier after `const`/`var` is the name
@@ -343,7 +343,7 @@ fn parse_union_declaration(
     let mut raw_fields: Vec<(String, String, usize, usize, u32)> = Vec::new();
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             // `union(enum)` — `enum` keyword is a direct child
             "enum" => is_tagged = true,
@@ -464,7 +464,7 @@ fn parse_struct_declaration(
     let mut uncertain_fields: Vec<String> = Vec::new();
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "packed" => is_packed = true,
             "extern" => is_extern = true,
@@ -578,7 +578,7 @@ fn parse_container_field(
     let mut size_align: Option<(usize, usize)> = None;
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "identifier" if field_name.is_none() => {
                 field_name = Some(source[child.byte_range()].to_string());

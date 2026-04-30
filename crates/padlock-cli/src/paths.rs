@@ -61,7 +61,11 @@ pub fn collect_layouts(
         if path.is_dir() {
             let mut files = walk_source_files(path);
             if !include_generated {
-                files.retain(|f| !should_skip_source_file(f));
+                files = files
+                    .into_par_iter()
+                    .filter(|f| !should_skip_source_file(f))
+                    .collect();
+                files.sort_unstable();
             }
             if files.is_empty() {
                 eprintln!(

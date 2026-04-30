@@ -135,7 +135,7 @@ fn parse_type_declaration(
     let decl_start_byte = node.start_byte();
     // type_declaration has a type_spec child
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         if child.kind() == "type_spec" {
             return parse_type_spec(
                 source,
@@ -163,7 +163,7 @@ fn parse_type_spec(
     let mut is_generic = false;
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "type_identifier" => name = Some(source[child.byte_range()].to_string()),
             "struct_type" => struct_node = Some(child),
@@ -207,10 +207,12 @@ fn parse_struct_type(
     let mut raw_fields: Vec<(String, String, Option<String>, u32)> = Vec::new();
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         if child.kind() == "field_declaration_list" {
             for j in 0..child.child_count() {
-                let field_node = child.child(j)?;
+                let Some(field_node) = child.child(j) else {
+                    continue;
+                };
                 if field_node.kind() == "field_declaration" {
                     collect_field_declarations(source, field_node, &mut raw_fields);
                 }
@@ -388,11 +390,16 @@ fn collect_field_declarations(
             }
         }
     } else if let Some(ty) = ty_text {
-        // Embedded (anonymous) field: `sync.Mutex` or `Base`.
-        // Go field name is the unqualified type name.
-        // The nested-struct resolution pass in lib.rs will later fill in
-        // the correct size/align from other parsed struct layouts.
-        let simple_name = ty.split('.').next_back().unwrap_or(&ty).to_string();
+        // Embedded (anonymous) field: `sync.Mutex`, `Base`, or `*Base`.
+        // Go field name is the unqualified type name WITHOUT the pointer `*`
+        // (Go spec: for `*T`, the implicit field name is `T`, not `*T`).
+        // The type string retains `*` so go_type_size_align returns pointer size.
+        let simple_name = ty
+            .trim_start_matches('*')
+            .split('.')
+            .next_back()
+            .unwrap_or(&ty)
+            .to_string();
         out.push((simple_name, ty, guard, field_line));
     }
 }
@@ -402,7 +409,7 @@ fn collect_field_declarations(
 pub fn parse_go(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let tree = PARSER
         .with(|p| p.borrow_mut().parse(source, None))
-        .ok_or_else(|| anyhow::anyhow!("tree-sitter-go parse failed"))?;
+        .ok_or_else(|| anyhow::anyhow!("tree-sitter-go failed to parse source"))?;
     Ok(extract_structs(source, tree.root_node(), arch))
 }
 
@@ -791,6 +798,53 @@ type Outer struct {
     }
 
     // ── bad weather: embedded fields ──────────────────────────────────────────
+
+    #[test]
+    fn embedded_ptr_field_name_is_type_without_star() {
+        // Go spec: for `*T`, the implicit field name is `T`, not `*T`.
+        let src = "package p\ntype A struct { *B }\ntype B struct { X uint8 }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let a = layouts.iter().find(|l| l.name == "A").expect("A");
+        assert_eq!(
+            a.fields[0].name, "B",
+            "embedded pointer field name must be 'B' not '*B'"
+        );
+        // Size must be pointer-size (8), NOT B's struct size (1).
+        assert_eq!(
+            a.fields[0].size, 8,
+            "embedded pointer is always pointer-sized"
+        );
+    }
+
+    #[test]
+    fn embedded_ptr_struct_does_not_hang() {
+        // Regression: tree-sitter-go <=0.23 had a quadratic parse bug on structs
+        // containing embedded pointer fields paired with non-builtin field types.
+        let src = "package p\ntype A struct { *B }\ntype B struct { X uint8 }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        assert!(layouts.iter().any(|l| l.name == "B"));
+    }
+
+    #[test]
+    fn embedded_ptr_mutual_recursion_does_not_hang() {
+        // Regression: parse-error trees from tree-sitter-go can strip the `*` from
+        // embedded pointer types, making Rec1/Rec2 appear to embed each other
+        // non-transitively. resolve_nested_structs must not loop forever.
+        use crate::{SourceLanguage, parse_source_str};
+        let src = "package p\ntype Rec1 struct { *Rec2 }\ntype Rec2 struct { F string; *Rec1 }";
+        let _ = parse_source_str(src, &SourceLanguage::Go, &X86_64_SYSV).unwrap();
+    }
+
+    #[test]
+    fn embedded_ptr_combined_patterns_does_not_hang() {
+        use crate::{SourceLanguage, parse_source_str};
+        let src = "package main\n\n\
+                   type Rec1 struct { *Rec2 }\n\
+                   type Rec2 struct { F string; *Rec1 }\n\n\
+                   type A struct { *B }\n\
+                   type B struct { X uint8 }\n";
+        let _ = parse_source_str(src, &SourceLanguage::Go, &X86_64_SYSV).unwrap();
+    }
 
     #[test]
     fn embedded_unknown_type_falls_back_to_pointer_size() {

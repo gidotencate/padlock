@@ -88,6 +88,7 @@ impl ParseCache {
     ///
     /// Also prunes stale entries for files that no longer exist — prevents the
     /// cache from growing unboundedly when source files are deleted or moved.
+    /// Caps total entries at MAX_CACHE_ENTRIES to bound RAM and disk usage.
     /// Uses a streaming writer to avoid building the full JSON string in memory.
     ///
     /// Silently ignores I/O errors so that cache failures never break analysis.
@@ -99,6 +100,16 @@ impl ParseCache {
         self.store
             .entries
             .retain(|k, _| std::path::Path::new(k).exists());
+        // Cap total entries to prevent unbounded growth on very large projects.
+        // Entries over the limit are dropped; they'll be re-parsed on the next run.
+        const MAX_CACHE_ENTRIES: usize = 100_000;
+        if self.store.entries.len() > MAX_CACHE_ENTRIES {
+            let mut keys: Vec<&String> = self.store.entries.keys().collect();
+            keys.sort_unstable();
+            let keep: std::collections::HashSet<String> =
+                keys.into_iter().take(MAX_CACHE_ENTRIES).cloned().collect();
+            self.store.entries.retain(|k, _| keep.contains(k));
+        }
         if let Some(dir) = self.cache_path.parent()
             && std::fs::create_dir_all(dir).is_err()
         {

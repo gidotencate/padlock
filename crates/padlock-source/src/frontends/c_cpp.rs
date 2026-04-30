@@ -514,7 +514,7 @@ fn parse_class_specifier(
     let mut struct_alignas: Option<usize> = None;
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "type_identifier" => class_name = source[child.byte_range()].to_string(),
             "base_class_clause" => {
@@ -957,7 +957,7 @@ fn parse_struct_or_union_specifier(
     let mut struct_alignas: Option<usize> = None;
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "type_identifier" => name = source[child.byte_range()].to_string(),
             "field_declaration_list" => body_node = Some(child),
@@ -1090,7 +1090,7 @@ fn parse_typedef_struct_or_union(
     let mut typedef_name: Option<String> = None;
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "struct_specifier" => {
                 specifier_node = Some(child);
@@ -1209,7 +1209,7 @@ fn parse_anonymous_nested(
 ) -> Option<Vec<RawField>> {
     // Find a struct_specifier or union_specifier child.
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         if child.kind() != "struct_specifier" && child.kind() != "union_specifier" {
             continue;
         }
@@ -1277,7 +1277,7 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
     let mut alignas_override: Option<usize> = None;
 
     for i in 0..node.child_count() {
-        let child = node.child(i)?;
+        let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "type_specifier" | "primitive_type" | "type_identifier" | "sized_type_specifier" => {
                 ty_parts.push(source[child.byte_range()].trim().to_string());

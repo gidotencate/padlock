@@ -106,4 +106,5 @@ jobs:
       - name: Upload release asset
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: padlock-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive }}

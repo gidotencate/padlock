@@ -315,10 +315,9 @@ fn parse_variable_declaration(
     let name = name?;
     let mut layout = if let Some(sn) = struct_node {
         parse_struct_declaration(source, sn, name, arch, source_line)?
-    } else if let Some(un) = union_node {
-        parse_union_declaration(source, un, name, arch, source_line)?
     } else {
-        return None;
+        let un = union_node?;
+        parse_union_declaration(source, un, name, arch, source_line)?
     };
     layout.suppressed_findings =
         super::suppress::suppressed_from_preceding_source(source, decl_start_byte);

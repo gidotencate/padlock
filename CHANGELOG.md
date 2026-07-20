@@ -2,6 +2,21 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.6] — 2026-07-20
+
+### Fixed
+- **Zig frontend `question_mark` lint**: the `else if let Some(un) = union_node { ... } else { return None }` pattern in the type-node dispatcher has been rewritten as idiomatic `let un = union_node?`, satisfying `clippy::question_mark`.
+
+### Security
+- **`fast-uri`** 3.1.0 → 3.1.2: addresses GHSA-v39h-62p7-jpjc and GHSA-q3j6-qgpj-74h6 (VSCode extension transitive dependency).
+- **`qs`** → 6.15.2 and **`tmp`** → 0.2.7: security patches for VSCode extension dependencies.
+- **`markdown-it`**: bumped to patched version in VSCode extension.
+
+### Maintenance
+- **`dependabot.yml` added**: automatic weekly dependency updates for Cargo, npm (VSCode extension), and GitHub Actions, with `rebase-strategy: auto` to keep PR branches rebased on main.
+- **Explicit CodeQL workflow**: `.github/workflows/codeql.yml` added with `security-events: write` permission, replacing GitHub Default Setup which lacked that permission on PR heads from forks.
+- **`padlock-example.yml` updated**: action reference bumped from `gidotencate/padlock@v0.9.3` to `gidotencate/padlock@v0.10.2`.
+
 ## [0.10.5] — 2026-04-30
 
 ### Fixed

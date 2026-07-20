@@ -32,7 +32,7 @@ owo-colors     = "4"
 comfy-table    = "7"
 toml           = "1"
 glob           = "0.3"
-notify         = { version = "6", features = ["macos_fsevent"] }
+notify         = { version = "8", features = ["macos_fsevent"] }
 rayon          = { workspace = true }
 
 [dev-dependencies]

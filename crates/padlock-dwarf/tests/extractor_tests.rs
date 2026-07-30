@@ -339,22 +339,24 @@ struct AtomicFields instance;
 
 /// `_Atomic long` fields must be sized as `long` (8 bytes on 64-bit x86_64).
 #[test]
-fn atomic_long_field_sized_correctly() {
+fn atomic_long_long_field_sized_correctly() {
+    // Use `long long` (always 64-bit) instead of `long` which is 32-bit on
+    // Windows (MSVC ABI) even on 64-bit targets.
     let Some(binary) = compile_c(
         r#"
 #include <stdatomic.h>
-struct AtomicLong {
-    _Atomic long value;
-    int          tag;
+struct AtomicLongLong {
+    _Atomic long long value;
+    int               tag;
 };
-struct AtomicLong instance;
+struct AtomicLongLong instance;
 "#,
     ) else {
         eprintln!("[skip] cc not available");
         return;
     };
 
-    let layouts = extract(&binary, "AtomicLong");
+    let layouts = extract(&binary, "AtomicLongLong");
     assert_eq!(layouts.len(), 1);
     let l = &layouts[0];
 
@@ -363,6 +365,6 @@ struct AtomicLong instance;
         .iter()
         .find(|f| f.name == "value")
         .expect("value field must be present");
-    assert_eq!(value.size, 8, "_Atomic long must be 8 bytes on 64-bit");
+    assert_eq!(value.size, 8, "_Atomic long long must be 8 bytes");
     assert_eq!(value.offset, 0);
 }

@@ -295,3 +295,74 @@ struct Wasteful instance;
         "should suggest reordering"
     );
 }
+
+/// `_Atomic int` fields (C11) must be sized as `int` (4 bytes), not 0 bytes.
+/// DW_TAG_atomic_type is a qualifier wrapper — previously it fell to the `_`
+/// catch-all which read DW_AT_byte_size on the wrapper itself (absent), giving
+/// size=0 and inflating the apparent gap after the field by 4 bytes.
+#[test]
+fn atomic_int_field_sized_correctly() {
+    let Some(binary) = compile_c(
+        r#"
+#include <stdatomic.h>
+struct AtomicFields {
+    _Atomic int  counter;
+    int          regular;
+};
+struct AtomicFields instance;
+"#,
+    ) else {
+        eprintln!("[skip] cc not available");
+        return;
+    };
+
+    let layouts = extract(&binary, "AtomicFields");
+    assert_eq!(layouts.len(), 1, "expected exactly one AtomicFields layout");
+    let l = &layouts[0];
+
+    let counter = l
+        .fields
+        .iter()
+        .find(|f| f.name == "counter")
+        .expect("counter field must be present");
+    let regular = l
+        .fields
+        .iter()
+        .find(|f| f.name == "regular")
+        .expect("regular field must be present");
+
+    assert_eq!(counter.size, 4, "_Atomic int must be 4 bytes");
+    assert_eq!(counter.offset, 0, "counter must start at offset 0");
+    assert_eq!(regular.offset, 4, "regular follows immediately (no gap)");
+    assert_eq!(l.total_size, 8, "total size must be 8 bytes");
+}
+
+/// `_Atomic long` fields must be sized as `long` (8 bytes on 64-bit x86_64).
+#[test]
+fn atomic_long_field_sized_correctly() {
+    let Some(binary) = compile_c(
+        r#"
+#include <stdatomic.h>
+struct AtomicLong {
+    _Atomic long value;
+    int          tag;
+};
+struct AtomicLong instance;
+"#,
+    ) else {
+        eprintln!("[skip] cc not available");
+        return;
+    };
+
+    let layouts = extract(&binary, "AtomicLong");
+    assert_eq!(layouts.len(), 1);
+    let l = &layouts[0];
+
+    let value = l
+        .fields
+        .iter()
+        .find(|f| f.name == "value")
+        .expect("value field must be present");
+    assert_eq!(value.size, 8, "_Atomic long must be 8 bytes on 64-bit");
+    assert_eq!(value.offset, 0);
+}

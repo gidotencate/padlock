@@ -42,8 +42,26 @@ fn active_stdlib() -> CppStdlib {
 /// Map a C/C++ type name to (size, align) using the target arch.
 fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     let ty = ty.trim();
-    // Strip qualifiers
-    for qual in &["const ", "volatile ", "restrict ", "unsigned ", "signed "] {
+    // Anonymous nested union encoded as "__anon_union<size,align>" by parse_anonymous_nested.
+    if let Some(rest) = ty.strip_prefix("__anon_union<")
+        && let Some(inner) = rest.strip_suffix('>')
+    {
+        let mut parts = inner.splitn(2, ',');
+        if let (Some(sz), Some(al)) = (parts.next(), parts.next())
+            && let (Ok(n), Ok(a)) = (sz.trim().parse::<usize>(), al.trim().parse::<usize>())
+        {
+            return (n, a);
+        }
+    }
+    // Strip qualifiers (including C11 _Atomic used as a type qualifier).
+    for qual in &[
+        "const ",
+        "volatile ",
+        "restrict ",
+        "unsigned ",
+        "signed ",
+        "_Atomic ",
+    ] {
         if let Some(rest) = ty.strip_prefix(qual) {
             return c_type_size_align(rest, arch);
         }
@@ -1144,6 +1162,29 @@ fn extract_guard_from_c_field_text(field_source: &str) -> Option<String> {
     None
 }
 
+/// Parse an alignment override from GCC/Clang `__attribute__((aligned(N)))` or
+/// `__aligned__(N)` on a field declaration.  Returns `None` when no such
+/// attribute is present or the value cannot be parsed.
+///
+/// This is separate from C++11 `alignas(N)`, which is handled via tree-sitter
+/// `alignas_qualifier` nodes in `parse_field_declaration`.
+fn extract_aligned_from_c_field_text(field_source: &str) -> Option<usize> {
+    // Use "aligned(" as the search key so we don't false-match identifiers
+    // like "is_aligned" that do not have an immediately following '('.
+    for kw in &["aligned(", "__aligned__("] {
+        if let Some(pos) = field_source.find(kw) {
+            let after = &field_source[pos + kw.len()..];
+            if let Some(end) = after.find(')') {
+                let n_str = after[..end].trim();
+                if let Ok(n) = n_str.parse::<usize>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Parse a numeric value from an `alignas_qualifier` node: `alignas(N)`.
 /// tree-sitter-cpp uses the node kind `alignas_qualifier` for C++11 `alignas`.
 /// Returns `None` when the specifier contains a type expression rather than
@@ -1205,7 +1246,7 @@ fn parse_anonymous_nested(
     source: &str,
     node: Node<'_>,
     arch: &'static ArchConfig,
-    parent_is_union: bool,
+    _parent_is_union: bool,
 ) -> Option<Vec<RawField>> {
     // Find a struct_specifier or union_specifier child.
     for i in 0..node.child_count() {
@@ -1249,17 +1290,38 @@ fn parse_anonymous_nested(
             }
         }
 
-        // If nested is a union, the fields all share offset 0 (relative to the
-        // union's placement in the parent). We can't easily track this through
-        // raw field lists, so we emit them as a synthetic __anon_union_N field
-        // when the parent cares about offsets, or just flatten for unions.
-        //
-        // For simplicity: flatten all fields — the layout simulator will compute
-        // correct offsets if the parent is a struct, and union semantics are
-        // preserved when the parent is a union.
-        let _ = (nested_is_union, parent_is_union);
-
         if !nested_raw.is_empty() {
+            if nested_is_union {
+                // All union variants overlap at offset 0.  Compute the union's
+                // total size (= max field size, rounded to max alignment) and
+                // emit a single synthetic field so the parent layout simulator
+                // accounts for the correct footprint.  Previously all fields
+                // were flattened sequentially, giving wrong struct sizes and
+                // padding reports for the common anonymous-union pattern.
+                let mut max_size = 0usize;
+                let mut max_align = 1usize;
+                for (_, ty, _, alignas, _) in &nested_raw {
+                    let resolved = ty.trim();
+                    let (sz, al) = c_type_size_align(resolved, arch);
+                    let eff_align = alignas.unwrap_or(al);
+                    max_size = max_size.max(sz);
+                    max_align = max_align.max(eff_align);
+                }
+                let union_size = if max_align > 0 {
+                    max_size.next_multiple_of(max_align)
+                } else {
+                    max_size
+                };
+                let first_line = nested_raw[0].4;
+                // Encode size+align into the type string; c_type_size_align decodes it.
+                return Some(vec![(
+                    "__anon_union".to_string(),
+                    format!("__anon_union<{union_size},{max_align}>"),
+                    None,
+                    None,
+                    first_line,
+                )]);
+            }
             return Some(nested_raw);
         }
     }
@@ -1287,6 +1349,25 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
             "qualified_identifier" | "template_type" => {
                 ty_parts.push(source[child.byte_range()].trim().to_string());
             }
+            // C11 _Atomic(T) type-specifier form: tree-sitter produces an `atomic_type`
+            // node wrapping the inner type in parentheses.  Extract the inner type so
+            // `_Atomic(int)` is sized as `int` (4B), not as pointer-size.
+            "atomic_type" => {
+                for j in 0..child.child_count() {
+                    if let Some(sub) = child.child(j) {
+                        match sub.kind() {
+                            "primitive_type"
+                            | "type_identifier"
+                            | "sized_type_specifier"
+                            | "qualified_identifier" => {
+                                ty_parts.push(source[sub.byte_range()].trim().to_string());
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             // Nested struct/union used as a field type: `struct Vec2 tl;`
             // Extract just the type_identifier name (e.g. "Vec2") so the
             // nested-struct resolution pass can match it by name.
@@ -1306,6 +1387,30 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
             "pointer_declarator" => {
                 field_name = extract_identifier(source, child);
                 ty_parts.push("*".to_string());
+            }
+            // `char a __attribute__((aligned(64)));` — tree-sitter-c wraps the
+            // field identifier and any trailing attributes into a single
+            // `attributed_declarator` node.  Extract both the name and the
+            // attribute text so guard/aligned extraction works correctly.
+            "attributed_declarator" => {
+                for j in 0..child.child_count() {
+                    if let Some(sub) = child.child(j) {
+                        match sub.kind() {
+                            "field_identifier" => {
+                                field_name = Some(source[sub.byte_range()].trim().to_string());
+                            }
+                            "pointer_declarator" => {
+                                field_name = extract_identifier(source, sub);
+                                ty_parts.push("*".to_string());
+                            }
+                            "attribute_specifier" | "attribute" => {
+                                attr_text.push_str(source[sub.byte_range()].trim());
+                                attr_text.push(' ');
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
             // Bit-field clause: `: N`  (tree-sitter-c/cpp node)
             "bitfield_clause" => {
@@ -1365,8 +1470,15 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
     let guard = extract_guard_from_c_field_text(&attr_text)
         .or_else(|| extract_guard_from_c_field_text(&field_src));
 
+    // __attribute__((aligned(N))) — GCC/Clang extension, separate from C++11 alignas.
+    // Only applies when no alignas_qualifier was already found.
+    let effective_alignas = alignas_override.or_else(|| {
+        extract_aligned_from_c_field_text(&attr_text)
+            .or_else(|| extract_aligned_from_c_field_text(&field_src))
+    });
+
     let line = node.start_position().row as u32 + 1;
-    Some((ty, fname, guard, alignas_override, line))
+    Some((ty, fname, guard, effective_alignas, line))
 }
 
 fn extract_identifier(source: &str, node: Node<'_>) -> Option<String> {
@@ -2097,7 +2209,10 @@ class alignas(32) Aligned {
     // ── anonymous nested structs/unions ───────────────────────────────────────
 
     #[test]
-    fn anonymous_nested_union_fields_flattened() {
+    fn anonymous_nested_union_emits_synthetic_field() {
+        // Anonymous nested unions are now represented as a single `__anon_union`
+        // synthetic field sized to max(variants).  Previously all variants were
+        // flattened into the parent sequentially, giving wrong sizes.
         let src = r#"
 struct Packet {
     union {
@@ -2109,14 +2224,19 @@ struct Packet {
 "#;
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
         let l = layouts.iter().find(|l| l.name == "Packet").expect("Packet");
-        // raw, bytes (or similar) and timestamp must all be present
+        // The anonymous union appears as a single synthetic __anon_union field.
         assert!(
-            l.fields.iter().any(|f| f.name == "raw"),
-            "raw field must be flattened into Packet"
+            l.fields.iter().any(|f| f.name == "__anon_union"),
+            "__anon_union synthetic field must be present in Packet"
         );
         assert!(
             l.fields.iter().any(|f| f.name == "timestamp"),
             "timestamp must be present"
+        );
+        // Individual union members must not appear directly in Packet.
+        assert!(
+            !l.fields.iter().any(|f| f.name == "raw"),
+            "raw must not be flattened directly into Packet"
         );
     }
 
@@ -2521,5 +2641,134 @@ struct Concrete { int x; double y; };
             .find(|l| l.name == "Concrete")
             .expect("Concrete must be parsed");
         assert_eq!(concrete.fields.len(), 2);
+    }
+
+    // ── _Atomic qualifier and type-specifier form ─────────────────────────────
+
+    #[test]
+    fn atomic_qualifier_form_sized_as_base_type() {
+        // `_Atomic int x` — C11 qualifier form.  tree-sitter parses `_Atomic` as a
+        // type_qualifier node (ignored in field parsing) and `int` as primitive_type,
+        // so the field correctly resolves to 4B.
+        let src = "struct S { _Atomic int counter; int regular; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let l = &layouts[0];
+        let counter = l.fields.iter().find(|f| f.name == "counter").unwrap();
+        assert_eq!(counter.size, 4, "_Atomic int must be 4B");
+        assert_eq!(counter.offset, 0);
+        // regular follows at offset 4 with no gap
+        let regular = l.fields.iter().find(|f| f.name == "regular").unwrap();
+        assert_eq!(regular.offset, 4);
+        assert_eq!(l.total_size, 8);
+    }
+
+    #[test]
+    fn atomic_qualifier_strip_in_type_string() {
+        // Ensure the `_Atomic ` prefix is stripped in c_type_size_align so that
+        // `_Atomic int` arriving as a compound type string resolves to 4B.
+        assert_eq!(c_type_size_align("_Atomic int", &X86_64_SYSV), (4, 4));
+        assert_eq!(c_type_size_align("_Atomic uint64_t", &X86_64_SYSV), (8, 8));
+        assert_eq!(c_type_size_align("_Atomic char", &X86_64_SYSV), (1, 1));
+    }
+
+    // ── anonymous nested union correct layout ─────────────────────────────────
+
+    #[test]
+    fn anonymous_nested_union_correct_total_size() {
+        // struct Packet { union { int raw; float f; }; char tag; };
+        // Union size = max(4,4)=4, align=4.  tag@4(1B)+pad(3B) → total=8B.
+        // Previously all union fields were flattened sequentially: raw@0(4)+f@4(4)+tag@8 → 12B.
+        let src = r#"
+struct Packet {
+    union { int raw; float f; };
+    char tag;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Packet").expect("Packet");
+        assert_eq!(
+            l.total_size, 8,
+            "Packet must be 8B (union=4B + char+3pad=4B)"
+        );
+    }
+
+    #[test]
+    fn anonymous_nested_union_double_dominates() {
+        // The double (8B) dominates: union size=8B, align=8.
+        // struct Event { union { int i; double d; }; char flag; };
+        // → union@0(8B) + flag@8(1B) + pad(7B) = 16B total.
+        let src = r#"
+struct Event {
+    union { int i; double d; };
+    char flag;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Event").expect("Event");
+        assert_eq!(
+            l.total_size, 16,
+            "Event must be 16B (union=8B + char+7pad=8B)"
+        );
+    }
+
+    #[test]
+    fn anonymous_nested_union_no_spurious_padding_finding() {
+        // Fields inside an anonymous union don't produce a padding-waste finding
+        // for the union itself (it has is_union semantics).
+        let src = r#"
+struct Clean {
+    union { int a; int b; };
+    int c;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Clean").expect("Clean");
+        assert_eq!(l.total_size, 8, "Clean must be 8B (union=4B + int=4B)");
+    }
+
+    // ── __attribute__((aligned(N))) on fields ─────────────────────────────────
+
+    #[test]
+    fn extract_aligned_attribute_value() {
+        assert_eq!(
+            extract_aligned_from_c_field_text("int x __attribute__((aligned(64)));"),
+            Some(64)
+        );
+        assert_eq!(
+            extract_aligned_from_c_field_text("char c __attribute__((aligned(8)));"),
+            Some(8)
+        );
+        assert_eq!(extract_aligned_from_c_field_text("int x;"), None);
+    }
+
+    #[test]
+    fn field_aligned_attribute_shifts_following_field() {
+        // `char a __attribute__((aligned(64)))` overrides `a`'s alignment to 64.
+        // `a` is still 1 byte in size; `b` (int) follows at offset 4 (1 + 3 pad).
+        // The struct alignment becomes 64 so total size rounds up to 64B.
+        let src = r#"
+struct CacheAligned {
+    char a __attribute__((aligned(64)));
+    int  b;
+};
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let l = &layouts[0];
+        let a = l.fields.iter().find(|f| f.name == "a").expect("field a");
+        let b = l.fields.iter().find(|f| f.name == "b").expect("field b");
+        assert_eq!(
+            a.align, 64,
+            "char __attribute__((aligned(64))) must have align=64"
+        );
+        assert_eq!(a.offset, 0);
+        // b follows: offset = (0+1).next_multiple_of(4) = 4
+        assert_eq!(b.offset, 4, "int b must start at offset 4");
+        // struct align = 64 → total rounds up to 64
+        assert_eq!(
+            l.total_size, 64,
+            "struct must be padded to 64B (struct align=64)"
+        );
     }
 }

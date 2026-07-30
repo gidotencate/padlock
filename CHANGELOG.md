@@ -2,6 +2,16 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.7] — 2026-07-30
+
+### Fixed
+- **DWARF `DW_TAG_atomic_type` (C11 `_Atomic T`)**: the qualifier wrapper tag was not in padlock's passthrough arm, so it fell to the catch-all which read `DW_AT_byte_size` on the wrapper itself — absent on qualifier tags — and sized the field as 0 bytes. The gap after it then appeared inflated by the real field size. Added to the `const`/`volatile`/`restrict` passthrough arm; the inner type is resolved correctly now.
+- **DWARF `DW_TAG_rvalue_reference_type` (C++ rvalue references)**: rvalue reference fields (`T&&`) fell to the `_` catch-all and were sized as 0 bytes. Added to the pointer arm alongside `DW_TAG_reference_type`; sized as `pointer_size` on all architectures.
+- **C/C++ source `_Atomic(T)` function-form**: tree-sitter represents the `_Atomic(T)` specifier form as an `atomic_type` node (distinct from the `type_qualifier` keyword form). The parser did not handle this node, so the field type was lost and the field was dropped entirely. Added an `atomic_type` handler that extracts the wrapped base type.
+- **C/C++ source `__attribute__((aligned(N)))` on fields**: tree-sitter wraps a field identifier that carries `__attribute__((...))` in an `attributed_declarator` node. The old parser only checked direct children of `field_declaration`, so the field was silently dropped when an attribute was present. Added an `attributed_declarator` handler that extracts both the identifier and the attribute text; added `extract_aligned_from_c_field_text` to parse `aligned(N)` / `__aligned__(N)` from attribute text.
+- **C/C++ source anonymous nested union sizing**: anonymous `union { … }` members inside structs were previously flattened sequentially into the parent (wrong offsets, wrong total size). They are now treated as a single synthetic `__anon_union<size,align>` field sized as `max(variant sizes)` rounded to alignment — correct ABI behaviour.
+- **Go source `sync.Mutex`, `sync.RWMutex`, `sync.Once`, `atomic.*` sizing**: qualified external types that are concrete structs with well-known sizes were treated as unknown opaque types (sized as one pointer) and added to `uncertain_fields`. Added a lookup table for common `sync` and `atomic` package types with their correct sizes; these are no longer added to `uncertain_fields`.
+
 ## [0.10.6] — 2026-07-20
 
 ### Fixed

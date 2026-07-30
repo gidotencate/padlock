@@ -30,7 +30,9 @@ impl<'a, R: Reader> Extractor<'a, R> {
                 Ok((size, align, TypeInfo::Primitive { name, size, align }))
             }
 
-            gimli::DW_TAG_pointer_type | gimli::DW_TAG_reference_type => {
+            gimli::DW_TAG_pointer_type
+            | gimli::DW_TAG_reference_type
+            | gimli::DW_TAG_rvalue_reference_type => {
                 let size = self.arch.pointer_size;
                 Ok((size, size, TypeInfo::Pointer { size, align: size }))
             }
@@ -45,7 +47,13 @@ impl<'a, R: Reader> Extractor<'a, R> {
 
             gimli::DW_TAG_const_type
             | gimli::DW_TAG_volatile_type
-            | gimli::DW_TAG_restrict_type => {
+            | gimli::DW_TAG_restrict_type
+            | gimli::DW_TAG_atomic_type => {
+                // _Atomic T (C11): DW_TAG_atomic_type wraps the base type exactly like
+                // const/volatile. Without this arm it fell to the `_` catch-all which
+                // reads DW_AT_byte_size on the atomic wrapper itself — that attribute is
+                // absent on qualifier tags, so the field was sized as 0 bytes and the
+                // gap after it appeared 4–8 bytes too large.
                 let inner_offset = match entry.attr_value(gimli::DW_AT_type)? {
                     Some(gimli::AttributeValue::UnitRef(off)) => off,
                     _ => return Err(anyhow::anyhow!("qualifier with no type")),

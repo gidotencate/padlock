@@ -462,10 +462,16 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
         syn::visit::visit_item_struct(self, node); // recurse into nested items
 
-        // Generic structs (e.g. `struct Foo<T>`) cannot be accurately laid out
-        // without knowing the concrete type arguments. Skip them rather than
-        // producing wrong field sizes for the type parameters.
-        if !node.generics.params.is_empty() {
+        // Generic structs with type or const parameters (e.g. `struct Foo<T>`)
+        // cannot be accurately laid out without knowing the concrete arguments.
+        // Lifetime parameters (e.g. `struct Cache<'a>`) do not affect layout
+        // and are safe to ignore — the struct is still analyzable.
+        let has_non_lifetime_generics = node
+            .generics
+            .params
+            .iter()
+            .any(|p| matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_)));
+        if has_non_lifetime_generics {
             let name = node.ident.to_string();
             crate::record_skipped(
                 &name,
@@ -539,8 +545,14 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
     fn visit_item_enum(&mut self, node: &'ast ItemEnum) {
         syn::visit::visit_item_enum(self, node);
 
-        // Skip generic enums (layout depends on unknown type arguments)
-        if !node.generics.params.is_empty() {
+        // Skip enums with type or const parameters. Lifetime parameters don't
+        // affect layout, so enums with only lifetime params are still analyzed.
+        let has_non_lifetime_generics = node
+            .generics
+            .params
+            .iter()
+            .any(|p| matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_)));
+        if has_non_lifetime_generics {
             let name = node.ident.to_string();
             crate::record_skipped(
                 &name,
@@ -1382,5 +1394,46 @@ struct Conn { port: u16, status: u32 }
         assert_eq!(l.fields[1].size, 16); // Box<dyn Error>
         assert_eq!(l.fields[1].offset, 8); // aligned to pointer_size
         assert_eq!(l.total_size, 24);
+    }
+
+    // ── lifetime-only generic structs ─────────────────────────────────────────
+
+    #[test]
+    fn struct_with_only_lifetime_param_is_analyzed() {
+        // 'a is a lifetime param — does not affect layout; struct must not be skipped.
+        let src = "struct Cache<'a> { ptr: &'a u64, count: u32 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts.len(),
+            1,
+            "struct with only lifetime params must be analyzed, not skipped"
+        );
+        let l = &layouts[0];
+        assert_eq!(l.name, "Cache");
+        assert_eq!(l.fields[0].size, 8); // &'a u64 = pointer
+        assert_eq!(l.fields[1].size, 4); // u32
+    }
+
+    #[test]
+    fn struct_with_type_param_is_still_skipped() {
+        // T is a type param — layout depends on T, must be skipped.
+        let src = "struct Wrapper<'a, T> { inner: &'a T }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.is_empty(),
+            "struct with type param must be skipped even with a lifetime param"
+        );
+    }
+
+    #[test]
+    fn enum_with_only_lifetime_param_is_analyzed() {
+        let src = "enum Ref<'a> { Some(&'a u64), None }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts.len(),
+            1,
+            "enum with only lifetime params must be analyzed, not skipped"
+        );
+        assert_eq!(layouts[0].name, "Ref");
     }
 }

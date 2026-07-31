@@ -586,4 +586,85 @@ mod tests {
         };
         assert_eq!(primitive_size(&p, &X86_64_SYSV), Some((8, 8)));
     }
+
+    // ── PDB inheritance fixture tests ─────────────────────────────────────────
+    //
+    // These tests require a pre-built PDB fixture that can only be generated
+    // with MSVC on Windows.  Generate it once and commit the binary:
+    //
+    //   // tests/fixtures/cpp_inheritance/fixture.cpp
+    //   struct Base { int x; double y; };      // 16B: x@0(4B) + 4pad + y@8(8B)
+    //   struct Derived : Base { int z; };       // 24B: [Base]@0(16B) + z@16(4B) + 4pad
+    //   struct Base2 { double c; };             // 8B
+    //   struct Multi : Base, Base2 { int d; }; // 32B: [Base]@0 + [Base2]@16 + d@24 + 4pad
+    //   Base b; Derived d; Base2 b2; Multi m;
+    //
+    //   cl /Zi /c fixture.cpp
+    //   link /DEBUG /NOENTRY /DLL fixture.obj /OUT:fixture.dll
+    //   // fixture.pdb is produced alongside fixture.dll
+    //
+    // Copy fixture.pdb to tests/fixtures/cpp_inheritance.pdb and commit it.
+    // The tests skip automatically when the fixture is absent (e.g. Linux CI).
+
+    fn fixture_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cpp_inheritance.pdb")
+    }
+
+    #[test]
+    fn pdb_single_inheritance_base_subobject_not_missing() {
+        let path = fixture_path();
+        if !path.exists() {
+            println!("skipping: fixture not present ({})", path.display());
+            return;
+        }
+        let data = std::fs::read(&path).expect("read fixture");
+        let layouts = extract_from_pdb(&data, &X86_64_SYSV).expect("extract");
+
+        let derived = layouts
+            .iter()
+            .find(|l| l.name == "Derived")
+            .expect("Derived not found in PDB");
+
+        assert_eq!(derived.total_size, 24, "Derived must be 24B");
+
+        let base_field = derived
+            .fields
+            .iter()
+            .find(|f| f.name == "[Base]")
+            .expect("[Base] synthetic field missing — PDB BaseClass not handled");
+        assert_eq!(base_field.offset, 0, "[Base] must be at offset 0");
+        assert_eq!(base_field.size, 16, "[Base] must be 16B");
+
+        let z = derived
+            .fields
+            .iter()
+            .find(|f| f.name == "z")
+            .expect("field z missing");
+        assert_eq!(z.offset, 16, "z must be at offset 16");
+    }
+
+    #[test]
+    fn pdb_multiple_inheritance_both_bases_present() {
+        let path = fixture_path();
+        if !path.exists() {
+            println!("skipping: fixture not present ({})", path.display());
+            return;
+        }
+        let data = std::fs::read(&path).expect("read fixture");
+        let layouts = extract_from_pdb(&data, &X86_64_SYSV).expect("extract");
+
+        let multi = layouts
+            .iter()
+            .find(|l| l.name == "Multi")
+            .expect("Multi not found in PDB");
+
+        let base = multi.fields.iter().find(|f| f.name == "[Base]");
+        let base2 = multi.fields.iter().find(|f| f.name == "[Base2]");
+        assert!(base.is_some(), "[Base] missing from Multi");
+        assert!(base2.is_some(), "[Base2] missing from Multi");
+        assert_eq!(base.unwrap().offset, 0);
+        assert_eq!(base.unwrap().size, 16);
+        assert_eq!(base2.unwrap().offset, 16);
+        assert_eq!(base2.unwrap().size, 8);
+    }
 }

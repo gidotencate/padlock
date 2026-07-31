@@ -2,6 +2,13 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.8] — 2026-07-31
+
+### Fixed
+- **DWARF5 bitfields (`DW_AT_data_bit_offset`)**: modern GCC (12+) emits bitfield members using `DW_AT_data_bit_offset` (an absolute bit offset from the struct start, DWARF5) instead of the older `DW_AT_data_member_location` (byte offset, DWARF4). The extractor only handled the DWARF4 form, so DWARF5 bitfield members were silently skipped — their occupied bytes appeared as spurious padding gaps. Fixed by falling through to `DW_AT_data_bit_offset` when `DW_AT_data_member_location` is absent, handling `DW_FORM_data1`/`data2`/`data4`/`data8`/`udata`/`sdata` encodings, and deriving the storage-unit size from the bit span (tracking `max_bit_exclusive` per group) when `DW_AT_byte_size` is absent — also typical for DWARF5 groups. Also handles `DW_AT_bit_size` encoded as `DW_FORM_implicit_const` (decoded by gimli as `Sdata` rather than `Udata`). Eliminates false gap reports on structs like SQLite's `VdbeCursor`.
+- **`DW_TAG_class_type` for C++ classes**: C++ `class` declarations use `DW_TAG_class_type` instead of `DW_TAG_structure_type`. Previously the DWARF extractor (both `extract_from_unit` and `type_resolver`) only processed `DW_TAG_structure_type`, so binary analysis of C++ binaries silently omitted all classes declared with the `class` keyword. Added `DW_TAG_class_type` alongside `DW_TAG_structure_type` in both places.
+- **`DW_AT_alignment` on struct and field DIEs**: explicit `alignas(N)` / `__attribute__((aligned(N)))` on a struct type declaration produces `DW_AT_alignment` on the struct DIE; on a field declaration it produces `DW_AT_alignment` on the member DIE. Neither was read — alignment was always inferred from the maximum field type alignment, which can understate the actual alignment and affect false-sharing analysis. `extract_struct` now reads the struct-level `DW_AT_alignment`; `extract_field` now reads the member-level `DW_AT_alignment` and takes the maximum with the type alignment.
+
 ## [0.10.7] — 2026-07-30
 
 ### Fixed

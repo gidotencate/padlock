@@ -35,9 +35,11 @@ impl<'a, R: Reader> Extractor<'a, R> {
 
         let mut entries = unit.entries();
         while let Some((_, entry)) = entries.next_dfs()? {
-            if entry.tag() == gimli::DW_TAG_structure_type
-                && let Some(mut layout) = self.extract_struct(unit, entry)?
-            {
+            // DW_TAG_class_type is the DWARF tag for C++ `class` declarations;
+            // it has the same layout rules as DW_TAG_structure_type.
+            let is_struct_like = entry.tag() == gimli::DW_TAG_structure_type
+                || entry.tag() == gimli::DW_TAG_class_type;
+            if is_struct_like && let Some(mut layout) = self.extract_struct(unit, entry)? {
                 if layout.name == "<anonymous>"
                     && let Some(name) = typedef_names.get(&entry.offset())
                 {
@@ -87,8 +89,12 @@ impl<'a, R: Reader> Extractor<'a, R> {
             .attr_string(unit, entry, gimli::DW_AT_name)?
             .unwrap_or_else(|| "<anonymous>".to_string());
 
+        // DW_AT_byte_size is normally normalized to Udata by gimli, but
+        // DW_FORM_implicit_const (used when the size is the same for every
+        // abbreviation entry, e.g. a pointer-sized struct) arrives as Sdata.
         let total_size = match entry.attr_value(gimli::DW_AT_byte_size)? {
             Some(gimli::AttributeValue::Udata(s)) => s as usize,
+            Some(gimli::AttributeValue::Sdata(s)) if s >= 0 => s as usize,
             _ => return Ok(None),
         };
 
@@ -110,16 +116,26 @@ impl<'a, R: Reader> Extractor<'a, R> {
             parts: Vec<String>, // "name:bits" labels
             byte_offset: usize,
             storage_bytes: usize, // from DW_AT_byte_size on member; 0 = unknown
+            // Tracks the exclusive upper bit bound for DWARF5 groups that lack
+            // DW_AT_byte_size. Relative to the start of the struct in bits.
+            max_bit_exclusive: usize,
         }
         let mut pending_bf: Option<BitfieldGroup> = None;
 
         let flush_bf =
             |group: BitfieldGroup, fields: &mut Vec<Field>, uncertain: &mut Vec<String>| {
-                if group.storage_bytes == 0 {
+                let storage_bytes = if group.storage_bytes > 0 {
+                    group.storage_bytes
+                } else if group.max_bit_exclusive > group.byte_offset * 8 {
+                    // Derive from bit span: smallest number of bytes that covers
+                    // all bits from byte_offset*8 through max_bit_exclusive-1.
+                    let bits_in_group = group.max_bit_exclusive - group.byte_offset * 8;
+                    bits_in_group.div_ceil(8)
+                } else {
                     // Storage unit size unknown; flag as uncertain so the user knows.
                     uncertain.push(format!("[bf@{}]", group.byte_offset));
                     return;
-                }
+                };
                 let field_name = if group.parts.is_empty() {
                     "[__pad]".to_string()
                 } else {
@@ -129,13 +145,13 @@ impl<'a, R: Reader> Extractor<'a, R> {
                 fields.push(Field {
                     name: field_name,
                     ty: TypeInfo::Primitive {
-                        name: format!("uint{}_t", group.storage_bytes * 8),
-                        size: group.storage_bytes,
-                        align: group.storage_bytes,
+                        name: format!("uint{}_t", storage_bytes * 8),
+                        size: storage_bytes,
+                        align: storage_bytes,
                     },
                     offset: group.byte_offset,
-                    size: group.storage_bytes,
-                    align: group.storage_bytes,
+                    size: storage_bytes,
+                    align: storage_bytes,
                     source_file: None,
                     source_line: None,
                     access: AccessPattern::Unknown,
@@ -155,24 +171,48 @@ impl<'a, R: Reader> Extractor<'a, R> {
             let is_bitfield = child_entry.attr(gimli::DW_AT_bit_size)?.is_some();
 
             if is_bitfield {
-                let byte_offset = match child_entry.attr_value(gimli::DW_AT_data_member_location)? {
-                    Some(gimli::AttributeValue::Udata(n)) => n as usize,
-                    Some(gimli::AttributeValue::Sdata(n)) => n as usize,
-                    _ => {
-                        // No byte offset — flush pending group and skip this member.
-                        if let Some(g) = pending_bf.take() {
-                            flush_bf(g, &mut fields, &mut uncertain_fields);
+                // DWARF4 uses DW_AT_data_member_location (byte offset).
+                // DWARF5 uses DW_AT_data_bit_offset (absolute bit offset from struct start).
+                // Returns (byte_offset, abs_bit_offset_if_known).
+                let (byte_offset, abs_bit_offset) =
+                    match child_entry.attr_value(gimli::DW_AT_data_member_location)? {
+                        Some(gimli::AttributeValue::Udata(n)) => (n as usize, None),
+                        Some(gimli::AttributeValue::Sdata(n)) => (n as usize, None),
+                        _ => {
+                            let raw: Option<u64> =
+                                match child_entry.attr_value(gimli::DW_AT_data_bit_offset)? {
+                                    Some(gimli::AttributeValue::Udata(v)) => Some(v),
+                                    Some(gimli::AttributeValue::Sdata(v)) => Some(v as u64),
+                                    Some(gimli::AttributeValue::Data1(v)) => Some(v as u64),
+                                    Some(gimli::AttributeValue::Data2(v)) => Some(v as u64),
+                                    Some(gimli::AttributeValue::Data4(v)) => Some(v as u64),
+                                    Some(gimli::AttributeValue::Data8(v)) => Some(v),
+                                    _ => None,
+                                };
+                            match raw {
+                                Some(bit_off) => ((bit_off / 8) as usize, Some(bit_off as usize)),
+                                None => {
+                                    // No byte offset — flush pending group and skip.
+                                    if let Some(g) = pending_bf.take() {
+                                        flush_bf(g, &mut fields, &mut uncertain_fields);
+                                    }
+                                    continue;
+                                }
+                            }
                         }
-                        continue;
-                    }
-                };
+                    };
 
                 let bit_size = match child_entry.attr_value(gimli::DW_AT_bit_size)? {
                     Some(gimli::AttributeValue::Udata(n)) => n as usize,
+                    Some(gimli::AttributeValue::Sdata(n)) => n.unsigned_abs() as usize,
+                    Some(gimli::AttributeValue::Data1(n)) => n as usize,
+                    Some(gimli::AttributeValue::Data2(n)) => n as usize,
+                    Some(gimli::AttributeValue::Data4(n)) => n as usize,
                     _ => 0,
                 };
 
                 // DW_AT_byte_size on a bitfield member gives the storage unit size.
+                // Absent for DWARF5 groups; derived from bit span in flush_bf instead.
                 let storage_bytes = match child_entry.attr_value(gimli::DW_AT_byte_size)? {
                     Some(gimli::AttributeValue::Udata(n)) => n as usize,
                     Some(gimli::AttributeValue::Data1(n)) => n as usize,
@@ -197,12 +237,19 @@ impl<'a, R: Reader> Extractor<'a, R> {
                     parts: Vec::new(),
                     byte_offset,
                     storage_bytes: 0,
+                    max_bit_exclusive: byte_offset * 8,
                 });
                 if !member_name.is_empty() && bit_size > 0 {
                     group.parts.push(format!("{member_name}:{bit_size}"));
                 }
                 if storage_bytes > group.storage_bytes {
                     group.storage_bytes = storage_bytes;
+                }
+                // Track the furthest bit for DWARF5 storage-size derivation.
+                let abs_start = abs_bit_offset.unwrap_or(byte_offset * 8);
+                let bit_end = abs_start + bit_size;
+                if bit_end > group.max_bit_exclusive {
+                    group.max_bit_exclusive = bit_end;
                 }
             } else {
                 // Non-bitfield member — flush any pending bitfield group first.
@@ -222,10 +269,17 @@ impl<'a, R: Reader> Extractor<'a, R> {
 
         fields.sort_by_key(|f| f.offset);
 
+        // DW_AT_alignment on the struct itself captures an explicit alignas(N)
+        // or __attribute__((aligned(N))) on the type declaration.  If present,
+        // it overrides the alignment derived from the maximum field alignment.
+        let field_align = fields.iter().map(|f| f.align).max().unwrap_or(1);
+        let explicit_align = self.attr_usize(entry, gimli::DW_AT_alignment)?.unwrap_or(0);
+        let align = explicit_align.max(field_align);
+
         Ok(Some(StructLayout {
             name,
             total_size,
-            align: fields.iter().map(|f| f.align).max().unwrap_or(1),
+            align,
             fields,
             source_file,
             source_line,
@@ -258,7 +312,13 @@ impl<'a, R: Reader> Extractor<'a, R> {
             _ => return Ok(None),
         };
 
-        let (size, align, ty) = self.resolve_type(unit, type_offset)?;
+        let (size, type_align, ty) = self.resolve_type(unit, type_offset)?;
+
+        // DW_AT_alignment on a member DIE captures an explicit alignment
+        // override on the field declaration (e.g. __attribute__((aligned(N)))).
+        // It overrides the alignment inferred from the field's type.
+        let member_align = self.attr_usize(entry, gimli::DW_AT_alignment)?.unwrap_or(0);
+        let align = member_align.max(type_align);
 
         Ok(Some(Field {
             name,

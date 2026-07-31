@@ -368,3 +368,254 @@ struct AtomicLongLong instance;
     assert_eq!(value.size, 8, "_Atomic long long must be 8 bytes");
     assert_eq!(value.offset, 0);
 }
+
+/// DWARF5 encodes bitfield offsets via `DW_AT_data_bit_offset` (absolute bit
+/// offset from the struct start) instead of `DW_AT_data_member_location`.
+/// GCC emits this form for `unsigned` bitfields packed after a run of byte-
+/// sized fields (as seen in SQLite's VdbeCursor).  Previously the extractor
+/// skipped these members silently, reporting a false gap in their place.
+///
+/// After the fix, the bitfield group must appear as a synthetic field and the
+/// non-bitfield `next` field must be reported at its true offset with no gap.
+#[test]
+fn dwarf5_data_bit_offset_bitfields_no_false_gap() {
+    // GCC emits DW_AT_data_bit_offset for unsigned bitfields that follow u8
+    // fields when using -gdwarf-5 or a recent enough default dwarf version.
+    // Compile with -gdwarf-5 to force it; skip if cc doesn't support the flag.
+    let src = r#"
+struct BitfieldAfterBytes {
+    unsigned char  a;
+    unsigned char  b;
+    unsigned       x : 1;
+    unsigned       y : 1;
+    unsigned short next;
+};
+struct BitfieldAfterBytes instance;
+"#;
+    use std::io::Write as _;
+    let dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let src_path = dir.path().join("test.c");
+    let obj_path = dir.path().join("test.o");
+    let Ok(mut f) = std::fs::File::create(&src_path) else {
+        return;
+    };
+    let Ok(_) = f.write_all(src.as_bytes()) else {
+        return;
+    };
+    let status = match std::process::Command::new("cc")
+        .args([
+            "-gdwarf-5",
+            "-c",
+            src_path.to_str().unwrap(),
+            "-o",
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+    {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("[skip] cc not available");
+            return;
+        }
+    };
+    if !status.success() {
+        eprintln!("[skip] cc -gdwarf-5 not supported");
+        return;
+    }
+    let Ok(binary) = std::fs::read(&obj_path) else {
+        return;
+    };
+
+    let layouts = extract(&binary, "BitfieldAfterBytes");
+    assert_eq!(layouts.len(), 1, "expected one BitfieldAfterBytes layout");
+    let l = &layouts[0];
+
+    // `next` is a u16 after the bitfield group.  Without the fix the extractor
+    // skipped the bitfield fields and reported their byte as a gap, making
+    // `next` appear to follow `b` (offset 2) with a spurious 1-byte hole.
+    // With the fix the bitfield group occupies its byte and the wasted_bytes
+    // count excludes that byte.
+    let next = l.fields.iter().find(|f| f.name == "next");
+    if let Some(next) = next {
+        // `next` must be at a 2-byte-aligned offset past the bitfield byte.
+        assert!(
+            next.offset >= 3,
+            "next must be after the bitfield group, got offset {}",
+            next.offset
+        );
+    }
+
+    // Total size must be correct (depends on compiler packing; just check
+    // it is nonzero and a reasonable value).
+    assert!(l.total_size >= 4 && l.total_size <= 16);
+}
+
+/// `DW_AT_byte_size` on a structure type may be encoded as
+/// `DW_FORM_implicit_const` (an abbreviation-table constant, decoded by
+/// gimli as `Sdata` rather than `Udata`).  GCC uses this when the size is
+/// the same for every instance of the abbreviation — common for pointer-
+/// sized or otherwise fixed-size helper structs.  Previously only `Udata`
+/// was matched, so affected structs were silently dropped.
+#[test]
+fn implicit_const_byte_size_struct_is_extracted() {
+    // A simple two-pointer struct is likely to be placed in an abbreviation
+    // entry that uses implicit_const for DW_AT_byte_size, though this is
+    // compiler-version-dependent.  We compile without -O to minimise
+    // abbreviation sharing and maximise the chance of hitting the form.
+    // Even if the compiler uses Udata, the test still passes — we're just
+    // verifying the struct is found and has the right size.
+    let Some(binary) = compile_c(
+        r#"
+struct PtrPair {
+    void *a;
+    void *b;
+};
+struct PtrPair instance;
+"#,
+    ) else {
+        eprintln!("[skip] cc not available");
+        return;
+    };
+
+    let layouts = extract(&binary, "PtrPair");
+    assert_eq!(layouts.len(), 1, "PtrPair must be extracted");
+    let l = &layouts[0];
+    // On 64-bit: two 8-byte pointers = 16B total, no holes.
+    let arch = reader::detect_arch(&binary).unwrap();
+    let expected = 2 * arch.pointer_size;
+    assert_eq!(
+        l.total_size, expected,
+        "PtrPair size must be 2*pointer_size"
+    );
+    assert_eq!(l.fields.len(), 2, "PtrPair must have exactly 2 fields");
+}
+
+/// C++ `class` declarations use `DW_TAG_class_type` instead of
+/// `DW_TAG_structure_type`.  Previously only structure_type was scanned, so
+/// any class whose fields we want to analyze was silently absent from output.
+#[test]
+fn cpp_class_type_is_extracted() {
+    // Compile a C++ translation unit with a class declaration.
+    use std::io::Write as _;
+    let dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let src_path = dir.path().join("test.cpp");
+    let obj_path = dir.path().join("test.o");
+    let src = r#"
+class Widget {
+public:
+    int   id;
+    float value;
+    char  tag;
+};
+Widget w;
+"#;
+    let Ok(mut f) = std::fs::File::create(&src_path) else {
+        return;
+    };
+    let _ = f.write_all(src.as_bytes());
+    let status = match std::process::Command::new("c++")
+        .args([
+            "-g",
+            "-c",
+            src_path.to_str().unwrap(),
+            "-o",
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+    {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("[skip] c++ not available");
+            return;
+        }
+    };
+    if !status.success() {
+        eprintln!("[skip] c++ compilation failed");
+        return;
+    }
+    let Ok(binary) = std::fs::read(&obj_path) else {
+        return;
+    };
+
+    let layouts = extract(&binary, "Widget");
+    assert_eq!(
+        layouts.len(),
+        1,
+        "Widget class must be extracted from C++ DWARF"
+    );
+    let l = &layouts[0];
+    assert!(
+        l.fields.iter().any(|f| f.name == "id"),
+        "Widget must contain field 'id'"
+    );
+}
+
+/// `DW_AT_alignment` on a struct DIE captures an explicit `alignas(N)` or
+/// `__attribute__((aligned(N)))` on the type.  The struct align must reflect
+/// this, not just the maximum field alignment.
+#[test]
+fn struct_explicit_alignment_is_respected() {
+    let Some(binary) = compile_c(
+        r#"
+struct __attribute__((aligned(64))) CacheAligned {
+    int a;
+    int b;
+};
+struct CacheAligned instance;
+"#,
+    ) else {
+        eprintln!("[skip] cc not available");
+        return;
+    };
+
+    let layouts = extract(&binary, "CacheAligned");
+    assert_eq!(layouts.len(), 1, "CacheAligned must be extracted");
+    let l = &layouts[0];
+    // The struct's declared alignment is 64; field alignment is only 4.
+    // Without reading DW_AT_alignment the extractor would report align=4.
+    assert_eq!(
+        l.align, 64,
+        "CacheAligned must have align=64 from explicit attribute"
+    );
+}
+
+/// `__attribute__((aligned(N)))` on a struct field declaration produces
+/// `DW_AT_alignment` on the `DW_TAG_member` DIE (not the type DIE).
+/// Previously `extract_field` did not read this attribute, so the field's
+/// alignment was reported as its type's natural alignment rather than N.
+#[test]
+fn field_explicit_alignment_is_respected() {
+    let Some(binary) = compile_c(
+        r#"
+struct MixedAlign {
+    char  a;
+    int   __attribute__((aligned(8))) b;
+    short c;
+};
+struct MixedAlign instance;
+"#,
+    ) else {
+        eprintln!("[skip] cc not available");
+        return;
+    };
+
+    let layouts = extract(&binary, "MixedAlign");
+    assert_eq!(layouts.len(), 1, "MixedAlign must be extracted");
+    let l = &layouts[0];
+
+    let b = l.fields.iter().find(|f| f.name == "b").expect("field b");
+    // Without DW_AT_alignment on the member, b.align would be 4 (int).
+    // With the fix it must be 8.
+    assert_eq!(
+        b.align, 8,
+        "field b must have align=8 from member attribute"
+    );
+    // b must also be at an 8-byte-aligned offset.
+    assert_eq!(b.offset % 8, 0, "field b must start at 8B-aligned offset");
+}

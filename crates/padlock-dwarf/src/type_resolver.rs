@@ -83,7 +83,9 @@ impl<'a, R: Reader> Extractor<'a, R> {
                 ))
             }
 
-            gimli::DW_TAG_structure_type => {
+            // DW_TAG_class_type is the DWARF tag for C++ `class` declarations;
+            // it has identical layout semantics to DW_TAG_structure_type.
+            gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => {
                 if let Some(layout) = self.extract_struct(unit, entry)? {
                     let size = layout.total_size;
                     let align = layout.align;

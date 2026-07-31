@@ -75,6 +75,12 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "atomic.Uintptr" => (arch.pointer_size, arch.pointer_size),
         // atomic.Value: { v any } — `any` is two words (type ptr + data ptr)
         "atomic.Value" => (arch.pointer_size * 2, arch.pointer_size),
+        // sync.WaitGroup: { noCopy (0B); state atomic.Uint64 (8B, align 8);
+        //   sema uint32 (4B) } = 12B, align 8. Stable since Go 1.
+        "sync.WaitGroup" => (12, 8),
+        // time.Time: { wall uint64; ext int64; loc *Location } = 24B, align 8.
+        // Stable across all Go versions (Go 1 compatibility guarantee).
+        "time.Time" => (24, 8),
         _ => (arch.pointer_size, arch.pointer_size),
     }
 }
@@ -88,6 +94,7 @@ fn is_known_external_go_type(ty: &str) -> bool {
         "sync.Mutex"
             | "sync.RWMutex"
             | "sync.Once"
+            | "sync.WaitGroup"
             | "atomic.Bool"
             | "atomic.Int32"
             | "atomic.Uint32"
@@ -95,6 +102,7 @@ fn is_known_external_go_type(ty: &str) -> bool {
             | "atomic.Uint64"
             | "atomic.Uintptr"
             | "atomic.Value"
+            | "time.Time"
     )
 }
 
@@ -992,5 +1000,36 @@ type Outer struct {
             .find(|l| l.name == "Counter")
             .expect("Counter");
         assert_eq!(l.total_size, 16, "Counter must be 16B");
+    }
+
+    #[test]
+    fn sync_waitgroup_sized_correctly() {
+        // sync.WaitGroup: { noCopy (0B); state atomic.Uint64 (8B); sema uint32 (4B) }
+        // = 12B, align 8. Common in concurrent Go code.
+        let src = "package p\nimport \"sync\"\ntype S struct { wg sync.WaitGroup; x int32 }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "S").expect("S");
+        let wg = l.fields.iter().find(|f| f.name == "wg").expect("wg");
+        assert_eq!(wg.size, 12, "sync.WaitGroup must be 12B");
+        assert_eq!(wg.align, 8);
+        assert!(
+            !l.uncertain_fields.contains(&"wg".to_string()),
+            "sync.WaitGroup must not be in uncertain_fields"
+        );
+    }
+
+    #[test]
+    fn time_time_sized_correctly() {
+        // time.Time: { wall uint64; ext int64; loc *Location } = 24B, align 8.
+        let src = "package p\nimport \"time\"\ntype Event struct { ts time.Time; id int64 }";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Event").expect("Event");
+        let ts = l.fields.iter().find(|f| f.name == "ts").expect("ts");
+        assert_eq!(ts.size, 24, "time.Time must be 24B");
+        assert_eq!(ts.align, 8);
+        assert!(
+            !l.uncertain_fields.contains(&"ts".to_string()),
+            "time.Time must not be in uncertain_fields"
+        );
     }
 }

@@ -78,6 +78,32 @@ fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, 
                 return (size, align, TypeInfo::Primitive { name, size, align });
             }
 
+            // RefCell<T>: borrow counter (isize, pointer_size bytes at offset 0)
+            // followed by UnsafeCell<T> at next_multiple_of(pointer_size, T_align).
+            // Verified: RefCell<u8>=16B, RefCell<u32>=16B, RefCell<u64>=16B,
+            //           RefCell<()>=8B — all on x86-64.
+            if name == "RefCell"
+                && let Some(inner_ty) = seg.and_then(|s| {
+                    if let syn::PathArguments::AngleBracketed(ref ab) = s.arguments {
+                        ab.args.iter().find_map(|a| {
+                            if let syn::GenericArgument::Type(t) = a {
+                                Some(t)
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                })
+            {
+                let (inner_size, inner_align, _) = rust_type_size_align(inner_ty, arch);
+                let align = inner_align.max(arch.pointer_size);
+                let data_offset = arch.pointer_size.next_multiple_of(inner_align.max(1));
+                let size = (data_offset + inner_size).next_multiple_of(align);
+                return (size, align, TypeInfo::Primitive { name, size, align });
+            }
+
             // Option<T> niche optimisation: when T has a niche (a bit pattern
             // that cannot occur in a valid T), the compiler encodes the None
             // discriminant into that niche without adding a separate tag byte.
@@ -168,6 +194,18 @@ fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, 
             let is_fat = matches!(*r.elem, Type::TraitObject(_));
             let sz = if is_fat { s * 2 } else { s };
             (sz, s, TypeInfo::Pointer { size: sz, align: s })
+        }
+        Type::Tuple(t) if t.elems.is_empty() => {
+            // `()` — the unit type. Zero-sized, align 1.
+            (
+                0,
+                1,
+                TypeInfo::Primitive {
+                    name: "()".to_string(),
+                    size: 0,
+                    align: 1,
+                },
+            )
         }
         Type::Array(arr) => {
             let (elem_size, elem_align, elem_ty) = rust_type_size_align(&arr.elem, arch);
@@ -282,11 +320,20 @@ fn primitive_size_align(name: &str, arch: &'static ArchConfig) -> (usize, usize)
         "AtomicU64" | "AtomicI64" => (8, 8),
         "AtomicUsize" | "AtomicIsize" | "AtomicPtr" => (ps, ps),
 
-        // ── heap-allocated collections: ptr + len + cap (3 words) ────────────
-        // Size is independent of the element type T (generic arg already stripped).
+        // ── heap-allocated collections ────────────────────────────────────────
+        // Vec / String / PathBuf: ptr + len + cap (3 words).
         "Vec" | "String" | "OsString" | "CString" | "PathBuf" => (3 * ps, ps),
-        "VecDeque" | "LinkedList" | "BinaryHeap" => (3 * ps, ps),
-        "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" => (3 * ps, ps),
+        // VecDeque: head + len + RawVec(ptr + cap) = 4 words.
+        // Verified stable: VecDeque<T>::sizeof == 4×pointer_size regardless of T.
+        "VecDeque" => (4 * ps, ps),
+        // LinkedList / BinaryHeap: 3-word approximation.
+        "LinkedList" | "BinaryHeap" => (3 * ps, ps),
+        // HashMap / HashSet: backed by hashbrown::RawTable.
+        // RawTableInner (4 words) + RandomState (2×u64) = 6 words on x86-64.
+        // Implementation detail of hashbrown — use binary analysis for certainty.
+        "HashMap" | "HashSet" => (6 * ps, ps),
+        // BTreeMap / BTreeSet: Root option (niche ptr, 16B) + length = 3 words.
+        "BTreeMap" | "BTreeSet" => (3 * ps, ps),
 
         // ── single-pointer smart pointers ─────────────────────────────────────
         // Cell<T> is handled as a transparent newtype in rust_type_size_align;
@@ -462,10 +509,16 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
         syn::visit::visit_item_struct(self, node); // recurse into nested items
 
-        // Generic structs (e.g. `struct Foo<T>`) cannot be accurately laid out
-        // without knowing the concrete type arguments. Skip them rather than
-        // producing wrong field sizes for the type parameters.
-        if !node.generics.params.is_empty() {
+        // Generic structs with type or const parameters (e.g. `struct Foo<T>`)
+        // cannot be accurately laid out without knowing the concrete arguments.
+        // Lifetime parameters (e.g. `struct Cache<'a>`) do not affect layout
+        // and are safe to ignore — the struct is still analyzable.
+        let has_non_lifetime_generics = node
+            .generics
+            .params
+            .iter()
+            .any(|p| matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_)));
+        if has_non_lifetime_generics {
             let name = node.ident.to_string();
             crate::record_skipped(
                 &name,
@@ -539,8 +592,14 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
     fn visit_item_enum(&mut self, node: &'ast ItemEnum) {
         syn::visit::visit_item_enum(self, node);
 
-        // Skip generic enums (layout depends on unknown type arguments)
-        if !node.generics.params.is_empty() {
+        // Skip enums with type or const parameters. Lifetime parameters don't
+        // affect layout, so enums with only lifetime params are still analyzed.
+        let has_non_lifetime_generics = node
+            .generics
+            .params
+            .iter()
+            .any(|p| matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_)));
+        if has_non_lifetime_generics {
             let name = node.ident.to_string();
             crate::record_skipped(
                 &name,
@@ -1382,5 +1441,94 @@ struct Conn { port: u16, status: u32 }
         assert_eq!(l.fields[1].size, 16); // Box<dyn Error>
         assert_eq!(l.fields[1].offset, 8); // aligned to pointer_size
         assert_eq!(l.total_size, 24);
+    }
+
+    // ── collection and wrapper type sizing ───────────────────────────────────
+
+    #[test]
+    fn vec_deque_is_four_pointer_sizes() {
+        // VecDeque: head + len + RawVec(ptr + cap) = 4 words
+        let src = "struct S { q: VecDeque<u8> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 32); // 4 × 8 on x86-64
+    }
+
+    #[test]
+    fn hash_map_is_six_pointer_sizes() {
+        // HashMap: hashbrown RawTableInner (4 words) + RandomState (2×u64) = 6 words
+        let src = "struct S { map: HashMap<u64, u64> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 48); // 6 × 8 on x86-64
+    }
+
+    #[test]
+    fn hash_set_is_six_pointer_sizes() {
+        let src = "struct S { set: HashSet<u64> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 48);
+    }
+
+    #[test]
+    fn refcell_u8_is_16_bytes() {
+        // RefCell<u8>: isize borrow counter (8B) + u8 at 8 → padded to 16 (align 8).
+        let src = "struct S { x: RefCell<u8> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 16);
+    }
+
+    #[test]
+    fn refcell_unit_is_8_bytes() {
+        // RefCell<()>: isize borrow counter (8B) + 0 = 8B.
+        let src = "struct S { x: RefCell<()> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 8);
+    }
+
+    #[test]
+    fn refcell_u64_is_16_bytes() {
+        let src = "struct S { x: RefCell<u64> }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 16);
+    }
+
+    // ── lifetime-only generic structs ─────────────────────────────────────────
+
+    #[test]
+    fn struct_with_only_lifetime_param_is_analyzed() {
+        // 'a is a lifetime param — does not affect layout; struct must not be skipped.
+        let src = "struct Cache<'a> { ptr: &'a u64, count: u32 }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts.len(),
+            1,
+            "struct with only lifetime params must be analyzed, not skipped"
+        );
+        let l = &layouts[0];
+        assert_eq!(l.name, "Cache");
+        assert_eq!(l.fields[0].size, 8); // &'a u64 = pointer
+        assert_eq!(l.fields[1].size, 4); // u32
+    }
+
+    #[test]
+    fn struct_with_type_param_is_still_skipped() {
+        // T is a type param — layout depends on T, must be skipped.
+        let src = "struct Wrapper<'a, T> { inner: &'a T }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.is_empty(),
+            "struct with type param must be skipped even with a lifetime param"
+        );
+    }
+
+    #[test]
+    fn enum_with_only_lifetime_param_is_analyzed() {
+        let src = "enum Ref<'a> { Some(&'a u64), None }";
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts.len(),
+            1,
+            "enum with only lifetime params must be analyzed, not skipped"
+        );
+        assert_eq!(layouts[0].name, "Ref");
     }
 }

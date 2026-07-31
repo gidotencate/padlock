@@ -547,8 +547,6 @@ fn parse_struct_declaration(
         }
     }
 
-    let _ = is_extern; // affects ABI guarantees, not layout simulation
-
     Some(StructLayout {
         name,
         total_size: offset,
@@ -559,7 +557,13 @@ fn parse_struct_declaration(
         arch,
         is_packed,
         is_union: false,
-        is_repr_rust: false,
+        // Regular Zig structs have implementation-defined field order (the
+        // compiler may reorder for optimal packing). Only `extern struct` and
+        // `packed struct` guarantee a stable, C-compatible layout. Flagging
+        // regular structs mirrors what `is_repr_rust` does for plain Rust
+        // structs: findings are downgraded one severity level so they remain
+        // visible without over-alarming on padding the compiler already removes.
+        is_repr_rust: !is_extern && !is_packed,
         suppressed_findings: Vec::new(), // set by parse_variable_declaration
         uncertain_fields,
     })
@@ -903,6 +907,43 @@ mod tests {
         assert!(
             skipped.iter().any(|s| s.name == "ArrayList"),
             "comptime-generic function must be recorded as skipped; got: {skipped:?}"
+        );
+    }
+
+    // ── is_repr_rust flag for layout stability ────────────────────────────────
+
+    #[test]
+    fn regular_zig_struct_is_repr_rust() {
+        // Regular Zig structs have implementation-defined field order — the
+        // compiler may reorder fields. Flagged with is_repr_rust so findings
+        // are downgraded one severity level.
+        let src = "const S = struct { a: u8, b: u64 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts[0].is_repr_rust,
+            "regular Zig struct must set is_repr_rust (compiler may reorder)"
+        );
+    }
+
+    #[test]
+    fn extern_zig_struct_is_not_repr_rust() {
+        // extern struct guarantees C-compatible layout — no reordering allowed.
+        let src = "const E = extern struct { x: i32, y: f64 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert!(
+            !layouts[0].is_repr_rust,
+            "extern struct has stable layout, must not set is_repr_rust"
+        );
+    }
+
+    #[test]
+    fn packed_zig_struct_is_not_repr_rust() {
+        // packed struct guarantees bit-exact layout — no reordering allowed.
+        let src = "const P = packed struct { a: u8, b: u8 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert!(
+            !layouts[0].is_repr_rust,
+            "packed struct has stable layout, must not set is_repr_rust"
         );
     }
 }

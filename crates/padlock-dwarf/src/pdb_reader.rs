@@ -10,8 +10,10 @@
 //
 // Limitations:
 //   - Bitfield members: grouped by field_type into synthetic [f1:3|f2:5] fields.
-//   - Virtual-base and base-class members are omitted (size comes from the
-//     struct's own `size` field, which is already correct).
+//   - Non-virtual base classes: emitted as synthetic [BaseName] opaque fields
+//     at their recorded byte offsets (LF_BCLASS / LF_BINTERFACE).
+//   - Virtual base classes: omitted — offsets are resolved via vbtable thunks
+//     at runtime and cannot be statically modelled.
 //   - Static members are skipped (no byte offset in a struct instance).
 //   - Source file/line: PDB stores source locations in symbol records (per
 //     function/variable), not in type records — they are not available here.
@@ -270,73 +272,36 @@ fn collect_fields(
     };
 
     for field_data in &field_list.fields {
-        if let TypeData::Member(m) = field_data {
-            let offset = m.offset as usize;
-            let name = m.name.to_string().into_owned();
-
-            // Detect bitfield: the field_type will be a Bitfield type record.
-            let bitfield_info = type_finder
-                .find(m.field_type)
-                .ok()
-                .and_then(|t| t.parse().ok())
-                .and_then(|td| {
-                    if let TypeData::Bitfield(bf) = td {
-                        Some(bf)
-                    } else {
-                        None
-                    }
-                });
-
-            if let Some(bf) = bitfield_info {
-                // Flush pending group if byte offset changed.
-                if let Some(ref g) = pending_bf
-                    && g.offset != offset
-                {
-                    let g = pending_bf.take().unwrap();
+        match field_data {
+            TypeData::BaseClass(bc) => {
+                // Non-virtual base class: occupies bytes at a fixed offset.
+                if let Some(g) = pending_bf.take() {
                     flush_bf(g, &mut fields, &mut uncertain);
                 }
-
-                // Resolve the underlying storage type size.
-                let storage_bytes = type_finder
-                    .find(bf.underlying_type)
+                let offset = bc.offset as usize;
+                let (size, align) = resolve_type_size(bc.base_class, type_finder, size_cache, arch);
+                if size == 0 {
+                    continue; // empty base (EBO) — contributes no bytes
+                }
+                let base_name = type_finder
+                    .find(bc.base_class)
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .and_then(|td| {
-                        if let TypeData::Primitive(p) = td {
-                            primitive_size(&p, arch).map(|(sz, _)| sz)
+                        if let TypeData::Class(c) = td {
+                            Some(c.name.to_string().into_owned())
                         } else {
                             None
                         }
                     })
-                    .unwrap_or(0);
-
-                let group = pending_bf.get_or_insert(BfGroup {
-                    parts: Vec::new(),
-                    offset,
-                    storage_bytes: 0,
-                });
-                if !name.is_empty() && bf.length > 0 {
-                    group.parts.push(format!("{name}:{}", bf.length));
-                }
-                if storage_bytes > group.storage_bytes {
-                    group.storage_bytes = storage_bytes;
-                }
-            } else {
-                // Flush any pending bitfield group.
-                if let Some(g) = pending_bf.take() {
-                    flush_bf(g, &mut fields, &mut uncertain);
-                }
-
-                let (size, align) = resolve_type_size(m.field_type, type_finder, size_cache, arch);
-                let ty = TypeInfo::Opaque {
-                    name: format!("{}", m.field_type.0),
-                    size,
-                    align,
-                };
-
+                    .unwrap_or_else(|| format!("base@{offset}"));
                 fields.push(Field {
-                    name,
-                    ty,
+                    name: format!("[{base_name}]"),
+                    ty: TypeInfo::Opaque {
+                        name: base_name,
+                        size,
+                        align,
+                    },
                     offset,
                     size,
                     align,
@@ -345,8 +310,88 @@ fn collect_fields(
                     access: AccessPattern::Unknown,
                 });
             }
-            // Skip static members, virtual-base records, base classes — they don't
-            // occupy a predictable slot in the struct's memory layout.
+            TypeData::VirtualBaseClass(_) => {
+                // Virtual base offset is resolved via vbtable thunks at runtime —
+                // cannot be statically modelled.
+            }
+            TypeData::Member(m) => {
+                let offset = m.offset as usize;
+                let name = m.name.to_string().into_owned();
+
+                // Detect bitfield: the field_type will be a Bitfield type record.
+                let bitfield_info = type_finder
+                    .find(m.field_type)
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .and_then(|td| {
+                        if let TypeData::Bitfield(bf) = td {
+                            Some(bf)
+                        } else {
+                            None
+                        }
+                    });
+
+                if let Some(bf) = bitfield_info {
+                    // Flush pending group if byte offset changed.
+                    if let Some(ref g) = pending_bf
+                        && g.offset != offset
+                    {
+                        let g = pending_bf.take().unwrap();
+                        flush_bf(g, &mut fields, &mut uncertain);
+                    }
+
+                    // Resolve the underlying storage type size.
+                    let storage_bytes = type_finder
+                        .find(bf.underlying_type)
+                        .ok()
+                        .and_then(|t| t.parse().ok())
+                        .and_then(|td| {
+                            if let TypeData::Primitive(p) = td {
+                                primitive_size(&p, arch).map(|(sz, _)| sz)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+
+                    let group = pending_bf.get_or_insert(BfGroup {
+                        parts: Vec::new(),
+                        offset,
+                        storage_bytes: 0,
+                    });
+                    if !name.is_empty() && bf.length > 0 {
+                        group.parts.push(format!("{name}:{}", bf.length));
+                    }
+                    if storage_bytes > group.storage_bytes {
+                        group.storage_bytes = storage_bytes;
+                    }
+                } else {
+                    // Flush any pending bitfield group.
+                    if let Some(g) = pending_bf.take() {
+                        flush_bf(g, &mut fields, &mut uncertain);
+                    }
+
+                    let (size, align) =
+                        resolve_type_size(m.field_type, type_finder, size_cache, arch);
+                    let ty = TypeInfo::Opaque {
+                        name: format!("{}", m.field_type.0),
+                        size,
+                        align,
+                    };
+
+                    fields.push(Field {
+                        name,
+                        ty,
+                        offset,
+                        size,
+                        align,
+                        source_file: None,
+                        source_line: None,
+                        access: AccessPattern::Unknown,
+                    });
+                }
+            }
+            _ => {} // StaticMember, methods, nested types — no instance slot
         }
     }
 
@@ -540,5 +585,86 @@ mod tests {
             indirection: None,
         };
         assert_eq!(primitive_size(&p, &X86_64_SYSV), Some((8, 8)));
+    }
+
+    // ── PDB inheritance fixture tests ─────────────────────────────────────────
+    //
+    // These tests require a pre-built PDB fixture that can only be generated
+    // with MSVC on Windows.  Generate it once and commit the binary:
+    //
+    //   // tests/fixtures/cpp_inheritance/fixture.cpp
+    //   struct Base { int x; double y; };      // 16B: x@0(4B) + 4pad + y@8(8B)
+    //   struct Derived : Base { int z; };       // 24B: [Base]@0(16B) + z@16(4B) + 4pad
+    //   struct Base2 { double c; };             // 8B
+    //   struct Multi : Base, Base2 { int d; }; // 32B: [Base]@0 + [Base2]@16 + d@24 + 4pad
+    //   Base b; Derived d; Base2 b2; Multi m;
+    //
+    //   cl /Zi /c fixture.cpp
+    //   link /DEBUG /NOENTRY /DLL fixture.obj /OUT:fixture.dll
+    //   // fixture.pdb is produced alongside fixture.dll
+    //
+    // Copy fixture.pdb to tests/fixtures/cpp_inheritance.pdb and commit it.
+    // The tests skip automatically when the fixture is absent (e.g. Linux CI).
+
+    fn fixture_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cpp_inheritance.pdb")
+    }
+
+    #[test]
+    fn pdb_single_inheritance_base_subobject_not_missing() {
+        let path = fixture_path();
+        if !path.exists() {
+            println!("skipping: fixture not present ({})", path.display());
+            return;
+        }
+        let data = std::fs::read(&path).expect("read fixture");
+        let layouts = extract_from_pdb(&data, &X86_64_SYSV).expect("extract");
+
+        let derived = layouts
+            .iter()
+            .find(|l| l.name == "Derived")
+            .expect("Derived not found in PDB");
+
+        assert_eq!(derived.total_size, 24, "Derived must be 24B");
+
+        let base_field = derived
+            .fields
+            .iter()
+            .find(|f| f.name == "[Base]")
+            .expect("[Base] synthetic field missing — PDB BaseClass not handled");
+        assert_eq!(base_field.offset, 0, "[Base] must be at offset 0");
+        assert_eq!(base_field.size, 16, "[Base] must be 16B");
+
+        let z = derived
+            .fields
+            .iter()
+            .find(|f| f.name == "z")
+            .expect("field z missing");
+        assert_eq!(z.offset, 16, "z must be at offset 16");
+    }
+
+    #[test]
+    fn pdb_multiple_inheritance_both_bases_present() {
+        let path = fixture_path();
+        if !path.exists() {
+            println!("skipping: fixture not present ({})", path.display());
+            return;
+        }
+        let data = std::fs::read(&path).expect("read fixture");
+        let layouts = extract_from_pdb(&data, &X86_64_SYSV).expect("extract");
+
+        let multi = layouts
+            .iter()
+            .find(|l| l.name == "Multi")
+            .expect("Multi not found in PDB");
+
+        let base = multi.fields.iter().find(|f| f.name == "[Base]");
+        let base2 = multi.fields.iter().find(|f| f.name == "[Base2]");
+        assert!(base.is_some(), "[Base] missing from Multi");
+        assert!(base2.is_some(), "[Base2] missing from Multi");
+        assert_eq!(base.unwrap().offset, 0);
+        assert_eq!(base.unwrap().size, 16);
+        assert_eq!(base2.unwrap().offset, 16);
+        assert_eq!(base2.unwrap().size, 8);
     }
 }

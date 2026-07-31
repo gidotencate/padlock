@@ -919,15 +919,19 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | C / C++ | Windows SDK: `BYTE`, `WORD`, `DWORD`, `QWORD`, `BOOL`, `HANDLE`, `LPVOID`, `UINT8`–`UINT64`, `INT8`–`INT64` and pointer aliases | |
 | C / C++ | GCC/Clang extensions: `__int128`, `_Float16`, `__fp16`, `__bf16`, `_Float128` | |
 | C / C++ | Character types: `wchar_t` (4B on POSIX), `char8_t`, `char16_t`, `char32_t` | |
-| C++ | vtable pointer injection for `virtual` classes, single/multiple inheritance base slots, `alignas(N)` on fields and structs | base-class sizes are approximate until nested-struct resolution |
+| C++ | vtable pointer injection for `virtual` classes, single/multiple inheritance base slots, `alignas(N)` on fields and structs | virtual base class offsets cannot be statically modelled (vbtable thunks) — use binary analysis |
+| C++ (binary/DWARF) | Base-class subobjects extracted from `DW_TAG_inheritance` as synthetic `[BaseName]` fields at correct byte offsets; virtual bases skipped | — |
 | C++ stdlib | `std::string`/`std::string_view`, `std::vector<T>`/`std::deque<T>`/`std::list<T>`, `std::map`/`std::set`/unordered variants, `std::unique_ptr`/`std::shared_ptr`/`std::weak_ptr`, `std::optional<T>` (recursive), `std::function`, `std::any`, `std::span<T>`, `std::error_code`, `std::atomic_flag` | sizes vary by stdlib; use `--stdlib libstdc++\|libc++\|msvc` to select the correct variant (default: libstdc++) |
 | C / C++ | `__attribute__((packed))` structs and classes; `#pragma pack(N)` / `#pragma pack(push, N)` / `#pragma pack(pop)` | no inter-field padding inserted (packed); `#pragma pack(N)` caps field alignment at N |
 | Rust | All primitive types (`u8`–`u128`, `i8`–`i128`, `f16`, `f32`, `f64`, `f128`, `usize`, `isize`, `char`, `bool`), `repr(C)`, `repr(packed)`, `repr(transparent)`, `repr(align(N))` | |
 | Rust stdlib | `Vec`, `String`, `Box`, `Arc`, `Rc`, all `AtomicXxx`, `PhantomData`, `Duration`, channels, smart pointers, all `NonZeroXxx` | size is independent of type parameter `T` |
+| Rust stdlib | `VecDeque<T>` (4 words / 32B), `HashMap<K,V>` / `HashSet<V>` (6 words / 48B on 64-bit), `BTreeMap` / `BTreeSet` (3 words / 24B), `LinkedList` / `BinaryHeap` (3 words / 24B) | `HashMap`/`HashSet` sizes reflect hashbrown internals — use binary analysis to verify |
+| Rust stdlib | `RefCell<T>` — modelled as `isize` borrow counter + `UnsafeCell<T>` at aligned offset | |
 | Rust stdlib | Transparent newtypes: `Cell<T>`, `MaybeUninit<T>`, `UnsafeCell<T>`, `Wrapping<T>`, `Saturating<T>`, `ManuallyDrop<T>` | sized as inner `T` |
 | Rust stdlib | Niche-optimized options: `Option<NonZeroU8/I8>` – `Option<NonZeroUsize/Isize>`, `Option<&T>`, `Option<&mut T>`, `Option<Box<T>>`, `Option<NonNull<T>>`, `Option<Arc<T>>`, `Option<Rc<T>>` | sized as inner type — no extra discriminant byte |
 | Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words), `complex128`, locally-declared named interfaces | qualified cross-package types (e.g. `io.Reader`) flagged as uncertain |
-| Zig | All standard integer/float types, C interop types (`c_int`, `c_uint`, `c_long`, etc.), arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) | in `packed struct`, arbitrary-width fields occupy exact bits; total = `ceil(bits/8)`; in normal structs, `ceil(N/8)` bytes aligned to next power-of-two; comptime-only field types (`type`, `anytype`, `comptime_int`, `comptime_float`) are flagged as uncertain |
+| Go stdlib | `sync.Mutex` (8B), `sync.RWMutex` (24B), `sync.Once` (12B), `sync.WaitGroup` (12B), `time.Time` (24B), `atomic.Bool`/`Int32`/`Uint32` (4B), `atomic.Int64`/`Uint64` (8B), `atomic.Value` (16B) | stable under Go 1 compatibility guarantee |
+| Zig | All standard integer/float types, C interop types (`c_int`, `c_uint`, `c_long`, etc.), arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) | in `packed struct`, arbitrary-width fields occupy exact bits; total = `ceil(bits/8)`; in normal structs, `ceil(N/8)` bytes aligned to next power-of-two; comptime-only field types (`type`, `anytype`, `comptime_int`, `comptime_float`) are flagged as uncertain; regular Zig structs (not `extern`/`packed`) have implementation-defined field order — findings are downgraded one severity level (like Rust `repr(Rust)`) |
 
 ### What source analysis skips (instead of showing wrong data)
 
@@ -936,6 +940,7 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | C/C++ structs with bit-field members | Parsed — consecutive bitfields of the same storage-unit type are grouped into a synthetic field (`[a:3\|b:5]`); MSVC mixed-type packing not modelled | Binary (DWARF) analysis for compiler-accurate bit offsets |
 | C++ template structs/classes/unions (`template<typename T> struct Foo`) | Skipped — note printed to stderr | Binary analysis; or analyse concrete instantiations |
 | Rust generic struct definitions (`struct Foo<T>`) | Skipped — note printed to stderr | Binary analysis; or analyse concrete monomorphizations |
+| Rust structs with only lifetime parameters (`struct Cache<'a>`) | Analyzed normally — lifetime params do not affect layout | — |
 | Go generic structs (`type Pair[T any] struct`) | Skipped — note printed to stderr | Binary analysis |
 | Forward-declared / incomplete structs | Skipped | Binary analysis |
 

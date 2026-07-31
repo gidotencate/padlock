@@ -10,8 +10,10 @@
 //
 // Limitations:
 //   - Bitfield members: grouped by field_type into synthetic [f1:3|f2:5] fields.
-//   - Virtual-base and base-class members are omitted (size comes from the
-//     struct's own `size` field, which is already correct).
+//   - Non-virtual base classes: emitted as synthetic [BaseName] opaque fields
+//     at their recorded byte offsets (LF_BCLASS / LF_BINTERFACE).
+//   - Virtual base classes: omitted — offsets are resolved via vbtable thunks
+//     at runtime and cannot be statically modelled.
 //   - Static members are skipped (no byte offset in a struct instance).
 //   - Source file/line: PDB stores source locations in symbol records (per
 //     function/variable), not in type records — they are not available here.
@@ -270,73 +272,36 @@ fn collect_fields(
     };
 
     for field_data in &field_list.fields {
-        if let TypeData::Member(m) = field_data {
-            let offset = m.offset as usize;
-            let name = m.name.to_string().into_owned();
-
-            // Detect bitfield: the field_type will be a Bitfield type record.
-            let bitfield_info = type_finder
-                .find(m.field_type)
-                .ok()
-                .and_then(|t| t.parse().ok())
-                .and_then(|td| {
-                    if let TypeData::Bitfield(bf) = td {
-                        Some(bf)
-                    } else {
-                        None
-                    }
-                });
-
-            if let Some(bf) = bitfield_info {
-                // Flush pending group if byte offset changed.
-                if let Some(ref g) = pending_bf
-                    && g.offset != offset
-                {
-                    let g = pending_bf.take().unwrap();
+        match field_data {
+            TypeData::BaseClass(bc) => {
+                // Non-virtual base class: occupies bytes at a fixed offset.
+                if let Some(g) = pending_bf.take() {
                     flush_bf(g, &mut fields, &mut uncertain);
                 }
-
-                // Resolve the underlying storage type size.
-                let storage_bytes = type_finder
-                    .find(bf.underlying_type)
+                let offset = bc.offset as usize;
+                let (size, align) = resolve_type_size(bc.base_class, type_finder, size_cache, arch);
+                if size == 0 {
+                    continue; // empty base (EBO) — contributes no bytes
+                }
+                let base_name = type_finder
+                    .find(bc.base_class)
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .and_then(|td| {
-                        if let TypeData::Primitive(p) = td {
-                            primitive_size(&p, arch).map(|(sz, _)| sz)
+                        if let TypeData::Class(c) = td {
+                            Some(c.name.to_string().into_owned())
                         } else {
                             None
                         }
                     })
-                    .unwrap_or(0);
-
-                let group = pending_bf.get_or_insert(BfGroup {
-                    parts: Vec::new(),
-                    offset,
-                    storage_bytes: 0,
-                });
-                if !name.is_empty() && bf.length > 0 {
-                    group.parts.push(format!("{name}:{}", bf.length));
-                }
-                if storage_bytes > group.storage_bytes {
-                    group.storage_bytes = storage_bytes;
-                }
-            } else {
-                // Flush any pending bitfield group.
-                if let Some(g) = pending_bf.take() {
-                    flush_bf(g, &mut fields, &mut uncertain);
-                }
-
-                let (size, align) = resolve_type_size(m.field_type, type_finder, size_cache, arch);
-                let ty = TypeInfo::Opaque {
-                    name: format!("{}", m.field_type.0),
-                    size,
-                    align,
-                };
-
+                    .unwrap_or_else(|| format!("base@{offset}"));
                 fields.push(Field {
-                    name,
-                    ty,
+                    name: format!("[{base_name}]"),
+                    ty: TypeInfo::Opaque {
+                        name: base_name,
+                        size,
+                        align,
+                    },
                     offset,
                     size,
                     align,
@@ -345,8 +310,88 @@ fn collect_fields(
                     access: AccessPattern::Unknown,
                 });
             }
-            // Skip static members, virtual-base records, base classes — they don't
-            // occupy a predictable slot in the struct's memory layout.
+            TypeData::VirtualBaseClass(_) => {
+                // Virtual base offset is resolved via vbtable thunks at runtime —
+                // cannot be statically modelled.
+            }
+            TypeData::Member(m) => {
+                let offset = m.offset as usize;
+                let name = m.name.to_string().into_owned();
+
+                // Detect bitfield: the field_type will be a Bitfield type record.
+                let bitfield_info = type_finder
+                    .find(m.field_type)
+                    .ok()
+                    .and_then(|t| t.parse().ok())
+                    .and_then(|td| {
+                        if let TypeData::Bitfield(bf) = td {
+                            Some(bf)
+                        } else {
+                            None
+                        }
+                    });
+
+                if let Some(bf) = bitfield_info {
+                    // Flush pending group if byte offset changed.
+                    if let Some(ref g) = pending_bf
+                        && g.offset != offset
+                    {
+                        let g = pending_bf.take().unwrap();
+                        flush_bf(g, &mut fields, &mut uncertain);
+                    }
+
+                    // Resolve the underlying storage type size.
+                    let storage_bytes = type_finder
+                        .find(bf.underlying_type)
+                        .ok()
+                        .and_then(|t| t.parse().ok())
+                        .and_then(|td| {
+                            if let TypeData::Primitive(p) = td {
+                                primitive_size(&p, arch).map(|(sz, _)| sz)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+
+                    let group = pending_bf.get_or_insert(BfGroup {
+                        parts: Vec::new(),
+                        offset,
+                        storage_bytes: 0,
+                    });
+                    if !name.is_empty() && bf.length > 0 {
+                        group.parts.push(format!("{name}:{}", bf.length));
+                    }
+                    if storage_bytes > group.storage_bytes {
+                        group.storage_bytes = storage_bytes;
+                    }
+                } else {
+                    // Flush any pending bitfield group.
+                    if let Some(g) = pending_bf.take() {
+                        flush_bf(g, &mut fields, &mut uncertain);
+                    }
+
+                    let (size, align) =
+                        resolve_type_size(m.field_type, type_finder, size_cache, arch);
+                    let ty = TypeInfo::Opaque {
+                        name: format!("{}", m.field_type.0),
+                        size,
+                        align,
+                    };
+
+                    fields.push(Field {
+                        name,
+                        ty,
+                        offset,
+                        size,
+                        align,
+                        source_file: None,
+                        source_line: None,
+                        access: AccessPattern::Unknown,
+                    });
+                }
+            }
+            _ => {} // StaticMember, methods, nested types — no instance slot
         }
     }
 

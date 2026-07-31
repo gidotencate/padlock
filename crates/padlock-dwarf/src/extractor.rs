@@ -164,6 +164,61 @@ impl<'a, R: Reader> Extractor<'a, R> {
 
         while let Some(child) = child_iter.next()? {
             let child_entry = child.entry();
+
+            if child_entry.tag() == gimli::DW_TAG_inheritance {
+                // Non-virtual base class subobject. Virtual bases use pointer-based
+                // thunks (vbtable) to find their offset; we cannot model that accurately
+                // without reading vbtable at runtime, so they are skipped.
+                let virtuality = self
+                    .attr_usize(child_entry, gimli::DW_AT_virtuality)?
+                    .unwrap_or(0);
+                if virtuality != 0 {
+                    continue;
+                }
+
+                // Flush any pending bitfield group before the base subobject.
+                if let Some(g) = pending_bf.take() {
+                    flush_bf(g, &mut fields, &mut uncertain_fields);
+                }
+
+                let base_offset = match child_entry.attr_value(gimli::DW_AT_data_member_location)? {
+                    Some(gimli::AttributeValue::Udata(n)) => n as usize,
+                    Some(gimli::AttributeValue::Sdata(n)) => n as usize,
+                    _ => 0, // single-inheritance default: base always at offset 0
+                };
+
+                let type_offset = match child_entry.attr_value(gimli::DW_AT_type)? {
+                    Some(gimli::AttributeValue::UnitRef(off)) => off,
+                    _ => continue,
+                };
+
+                let (base_size, base_align, base_ty) = self.resolve_type(unit, type_offset)?;
+                // Extract the name from the resolved type for the synthetic field label.
+                let base_name = match &base_ty {
+                    padlock_core::ir::TypeInfo::Struct(l) => l.name.clone(),
+                    padlock_core::ir::TypeInfo::Opaque { name, .. } => name.clone(),
+                    _ => "<base>".to_string(),
+                };
+
+                if base_size > 0 {
+                    fields.push(Field {
+                        name: format!("[{}]", base_name),
+                        ty: padlock_core::ir::TypeInfo::Opaque {
+                            name: base_name,
+                            size: base_size,
+                            align: base_align,
+                        },
+                        offset: base_offset,
+                        size: base_size,
+                        align: base_align,
+                        source_file: None,
+                        source_line: None,
+                        access: AccessPattern::Unknown,
+                    });
+                }
+                continue;
+            }
+
             if child_entry.tag() != gimli::DW_TAG_member {
                 continue;
             }

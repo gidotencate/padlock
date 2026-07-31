@@ -619,3 +619,103 @@ struct MixedAlign instance;
     // b must also be at an 8-byte-aligned offset.
     assert_eq!(b.offset % 8, 0, "field b must start at 8B-aligned offset");
 }
+
+// ── C++ inheritance helper ────────────────────────────────────────────────────
+
+/// Compile a C++ snippet with g++ (or c++) and return the object-file bytes.
+fn compile_cpp(src: &str) -> Option<Vec<u8>> {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().ok()?;
+    let src_path = dir.path().join("test.cpp");
+    let obj_path = dir.path().join("test.o");
+    std::fs::File::create(&src_path)
+        .ok()?
+        .write_all(src.as_bytes())
+        .ok()?;
+    // Try g++ first, fall back to c++.
+    for compiler in &["g++", "c++"] {
+        let status = std::process::Command::new(compiler)
+            .args(["-g", "-c", src_path.to_str()?, "-o", obj_path.to_str()?])
+            .status();
+        if let Ok(s) = status
+            && s.success()
+        {
+            return std::fs::read(&obj_path).ok();
+        }
+    }
+    None
+}
+
+// ── DW_TAG_inheritance tests ──────────────────────────────────────────────────
+
+#[test]
+fn cpp_single_inheritance_base_subobject_is_not_missing() {
+    // Before the fix, DW_TAG_inheritance children were skipped, so Derived
+    // appeared to have only field `z` at offset 16 — the first 16B (Base)
+    // looked like padding. The reorder pass suggested "24B → 4B" which is wrong.
+    //
+    // After the fix, a synthetic [Base] field at offset 0 (16B) is emitted so
+    // padding analysis sees the correct layout.
+    let Some(binary) = compile_cpp(
+        r#"
+struct Base { int x; double y; };        // 16B: x@0(4B) + 4pad + y@8(8B)
+struct Derived : Base { int z; };         // 24B: [Base]@0(16B) + z@16(4B) + 4pad
+Base b; Derived d;
+"#,
+    ) else {
+        println!("skipping: no C++ compiler found");
+        return;
+    };
+
+    let layouts = extract(&binary, "Derived");
+    assert_eq!(layouts.len(), 1, "Derived must be extracted");
+    let l = &layouts[0];
+    assert_eq!(l.total_size, 24, "Derived total size must be 24B");
+
+    // A synthetic [Base] field at offset 0 must be present.
+    let base_field = l
+        .fields
+        .iter()
+        .find(|f| f.name == "[Base]")
+        .expect("[Base] synthetic field missing — DW_TAG_inheritance not handled");
+    assert_eq!(base_field.offset, 0, "[Base] must be at offset 0");
+    assert_eq!(base_field.size, 16, "[Base] must be 16B");
+
+    // Derived's own field z must still be present at the right offset.
+    let z = l.fields.iter().find(|f| f.name == "z").expect("field z");
+    assert_eq!(z.offset, 16, "z must be at offset 16");
+    assert_eq!(z.size, 4, "z must be 4B");
+}
+
+#[test]
+fn cpp_multiple_inheritance_both_bases_present() {
+    // Multiple inheritance: Derived2 inherits Base1 (at offset 0) and
+    // Base2 (at offset 8). Both base subobjects must appear as synthetic fields.
+    let Some(binary) = compile_cpp(
+        r#"
+struct Base1 { int a; int b; };          // 8B
+struct Base2 { double c; };              // 8B
+struct Derived2 : Base1, Base2 { int d; }; // 24B: [Base1]@0 + [Base2]@8 + d@16 + 4pad
+Base1 b1; Base2 b2; Derived2 d2;
+"#,
+    ) else {
+        println!("skipping: no C++ compiler found");
+        return;
+    };
+
+    let layouts = extract(&binary, "Derived2");
+    assert_eq!(layouts.len(), 1, "Derived2 must be extracted");
+    let l = &layouts[0];
+
+    let base1 = l.fields.iter().find(|f| f.name == "[Base1]");
+    let base2 = l.fields.iter().find(|f| f.name == "[Base2]");
+    assert!(base1.is_some(), "[Base1] synthetic field missing");
+    assert!(base2.is_some(), "[Base2] synthetic field missing");
+
+    let base1 = base1.unwrap();
+    let base2 = base2.unwrap();
+    assert_eq!(base1.offset, 0, "[Base1] must be at offset 0");
+    assert_eq!(base1.size, 8, "[Base1] must be 8B");
+    assert_eq!(base2.offset, 8, "[Base2] must be at offset 8");
+    assert_eq!(base2.size, 8, "[Base2] must be 8B");
+}

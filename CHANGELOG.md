@@ -2,6 +2,14 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.9] — 2026-08-01
+
+### Security
+- **`js-yaml`** — forced to `>=4.3.0` via npm override; YAML merge-key chains could cause quadratic CPU consumption (GHSA-mh99-v99m-4gvg equivalent, transitive via `@vscode/vsce` → `@secretlint`).
+- **`fast-uri`** — forced to `>=3.1.4` via npm override; host confusion via literal backslash authority delimiter and failed IDN canonicalization (transitive via `@vscode/vsce` → `ajv`).
+- **`brace-expansion`** — forced to `>=5.0.8` via npm override; DoS via unbounded expansion length (transitive via `@vscode/vsce` → `minimatch`).
+- **`linkify-it`** — bumped to `5.0.2` via dependabot PR #42; quadratic-complexity DoS via `mailto:` validator scan-loop (transitive via `@vscode/vsce` → `markdown-it`).
+
 ## [0.10.8] — 2026-07-31
 
 ### Fixed

@@ -2,7 +2,7 @@
   "name": "padlock",
   "displayName": "padlock",
   "description": "The lint pass for struct memory layout — finds padding waste, false sharing, and cache locality problems in C, C++, Rust, Go, and Zig.",
-  "version": "0.10.8",
+  "version": "0.10.9",
   "publisher": "gidotencate",
   "icon": "icon.png",
   "license": "MIT OR Apache-2.0",
@@ -147,6 +147,9 @@
     "typescript": "^7.0.2"
   },
   "overrides": {
-    "uuid": ">=14.0.0"
+    "uuid": ">=14.0.0",
+    "js-yaml": ">=4.3.0",
+    "fast-uri": ">=3.1.4",
+    "brace-expansion": ">=5.0.8"
   }
 }

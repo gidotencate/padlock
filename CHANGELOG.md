@@ -14,6 +14,11 @@ All notable changes to padlock are documented here.
 - **`std::array<T, N>` sizing**: `N × sizeof(T)` with `alignof(T)` — now computed from template args instead of falling through to pointer-size.
 - **Zig `@Vector(N, T)` sizing**: SIMD vector types are now sized as `N × sizeof(T)` with SIMD-aligned alignment (`size.next_power_of_two().min(64)`). Tree-sitter `builtin_function` nodes are now recognized in both `parse_container_field` and `type_node_size_align`.
 - **`LocalityIssue` split suggestion**: all output formatters (human summary, SARIF, Markdown report, `explain`) now include a concrete split suggestion when a locality issue is detected. Example: `Split: struct FooHot { a, b } / struct FooCold { c, d }`.
+- **More `std::` type sizes**: `std::thread` (8 words), `std::jthread` (9 words), `std::complex<T>` (2 × sizeof(T)), `std::bitset<N>` (ceil(N/64) × 8 bytes), `std::chrono::duration<Rep, Period>` and `std::chrono::time_point<Clock, Duration>` (sized by Rep/Duration's underlying type), `std::initializer_list<T>` (2 words: pointer + size), `std::filesystem::path` (32B on 64-bit).
+- **Go `sync.Map`, `strings.Builder`, `bytes.Buffer` sizing**: all three previously fell to `uncertain_fields` as unrecognised qualified names. Added to the known-type table with correct 64-bit sizes (`sync.Map` = 32B, `strings.Builder` = 32B, `bytes.Buffer` = 40B).
+
+### Fixed
+- **C++ fix generator method preservation**: method declarations inside `class` or `struct` bodies (e.g. `void foo();`, `virtual ~Foo();`) were silently dropped when the reorder fix was applied. The C chunk extractor now tags each chunk as either `Field` (reorderable) or `Passthrough` (method or other non-field text). Passthrough chunks are emitted in their original relative positions around the reordered fields, so class bodies are structurally preserved after a fix.
 
 ## [0.10.9] — 2026-08-01
 

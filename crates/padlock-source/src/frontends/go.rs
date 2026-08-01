@@ -78,9 +78,17 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         // sync.WaitGroup: { noCopy (0B); state atomic.Uint64 (8B, align 8);
         //   sema uint32 (4B) } = 12B, align 8. Stable since Go 1.
         "sync.WaitGroup" => (12, 8),
+        // sync.Map (Go 1.19+): { mu Mutex(8); read atomic.Pointer(8);
+        //   dirty map(8); misses int(8) } = 4 words. Stable layout since 1.19.
+        "sync.Map" => (arch.pointer_size * 4, arch.pointer_size),
         // time.Time: { wall uint64; ext int64; loc *Location } = 24B, align 8.
         // Stable across all Go versions (Go 1 compatibility guarantee).
         "time.Time" => (24, 8),
+        // strings.Builder: { addr *Builder(1 word); buf []byte(3 words) } = 4 words.
+        "strings.Builder" => (arch.pointer_size * 4, arch.pointer_size),
+        // bytes.Buffer: { buf []byte(3 words); off int(1 word); lastRead int8(1B+pad) }
+        //   = 5 words on 64-bit (40B), 5 words on 32-bit (20B).
+        "bytes.Buffer" => (arch.pointer_size * 5, arch.pointer_size),
         _ => (arch.pointer_size, arch.pointer_size),
     }
 }
@@ -103,6 +111,9 @@ fn is_known_external_go_type(ty: &str) -> bool {
             | "atomic.Uintptr"
             | "atomic.Value"
             | "time.Time"
+            | "sync.Map"
+            | "strings.Builder"
+            | "bytes.Buffer"
     )
 }
 

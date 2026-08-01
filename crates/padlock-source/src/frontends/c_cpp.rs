@@ -238,6 +238,58 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         // std::atomic_flag: guaranteed 1B minimum, but often 4B in practice.
         "std::atomic_flag" => return (4, 4),
 
+        // ── Threading ─────────────────────────────────────────────────────────
+        // std::thread: stores a single pthread_t / HANDLE — one pointer.
+        "std::thread" => return (arch.pointer_size, arch.pointer_size),
+        // std::jthread: thread + stop_source (2 pointers) ≈ 3 words.
+        "std::jthread" => return (arch.pointer_size * 3, arch.pointer_size),
+
+        // ── Numeric / math ────────────────────────────────────────────────────
+        // std::complex<T>: two consecutive T values (real + imaginary).
+        ty if ty.starts_with("std::complex<") && ty.ends_with('>') => {
+            let inner = &ty["std::complex<".len()..ty.len() - 1];
+            let (sz, al) = c_type_size_align(inner.trim(), arch);
+            return (sz * 2, al);
+        }
+        // std::bitset<N>: ceil(N/8) bytes, aligned to sizeof(unsigned long).
+        ty if ty.starts_with("std::bitset<") && ty.ends_with('>') => {
+            let inner = &ty["std::bitset<".len()..ty.len() - 1];
+            if let Ok(n) = inner.trim().parse::<usize>() {
+                let bytes = n.div_ceil(8).max(1);
+                let align = arch.pointer_size; // unsigned long = word size
+                let total = bytes.next_multiple_of(align);
+                return (total, align);
+            }
+        }
+
+        // ── Chrono ───────────────────────────────────────────────────────────
+        // std::chrono::duration<Rep, Period>: Rep is the underlying arithmetic type.
+        ty if ty.starts_with("std::chrono::duration<") && ty.ends_with('>') => {
+            let inner = &ty["std::chrono::duration<".len()..ty.len() - 1];
+            let args = split_template_args(inner);
+            if !args.is_empty() {
+                return c_type_size_align(args[0].trim(), arch);
+            }
+            return (8, 8); // default: nanoseconds = int64_t
+        }
+        // std::chrono::time_point<Clock, Duration>: size = sizeof(Duration).
+        ty if ty.starts_with("std::chrono::time_point<") && ty.ends_with('>') => {
+            let inner = &ty["std::chrono::time_point<".len()..ty.len() - 1];
+            let args = split_template_args(inner);
+            if args.len() >= 2 {
+                return c_type_size_align(args[1].trim(), arch);
+            }
+            return (8, 8); // default: nanoseconds
+        }
+
+        // ── Misc standard library ─────────────────────────────────────────────
+        // std::initializer_list<T>: pointer + size_t = 2 words (element type irrelevant).
+        ty if ty.starts_with("std::initializer_list<") || ty == "std::initializer_list" => {
+            return (arch.pointer_size * 2, arch.pointer_size);
+        }
+        // std::filesystem::path: platform-dependent; 32B on libstdc++, 24B on libc++.
+        "std::filesystem::path" => return (32, 8),
+
         // ── Multi-arg templates ───────────────────────────────────────────────
         // std::variant<T1, T2, ...>:
         //   storage = max(sizeof(T...)) padded to max(alignof(T...));
@@ -2818,6 +2870,71 @@ struct NetHeader {
         assert_eq!(
             c_type_size_align("std::array<double, 3>", &X86_64_SYSV),
             (24, 8)
+        );
+    }
+
+    // ── std::bitset, std::complex, std::thread, etc. ─────────────────────────
+
+    #[test]
+    fn cpp_bitset_sizing() {
+        // std::bitset<8>: 1B → padded to 8 (word), align 8
+        assert_eq!(c_type_size_align("std::bitset<8>", &X86_64_SYSV), (8, 8));
+        // std::bitset<64>: 8B → already 8, align 8
+        assert_eq!(c_type_size_align("std::bitset<64>", &X86_64_SYSV), (8, 8));
+        // std::bitset<128>: 16B, align 8
+        assert_eq!(c_type_size_align("std::bitset<128>", &X86_64_SYSV), (16, 8));
+    }
+
+    #[test]
+    fn cpp_complex_sizing() {
+        assert_eq!(
+            c_type_size_align("std::complex<float>", &X86_64_SYSV),
+            (8, 4)
+        );
+        assert_eq!(
+            c_type_size_align("std::complex<double>", &X86_64_SYSV),
+            (16, 8)
+        );
+    }
+
+    #[test]
+    fn cpp_thread_sizing() {
+        assert_eq!(c_type_size_align("std::thread", &X86_64_SYSV), (8, 8));
+    }
+
+    #[test]
+    fn cpp_initializer_list_sizing() {
+        assert_eq!(
+            c_type_size_align("std::initializer_list<int>", &X86_64_SYSV),
+            (16, 8)
+        );
+    }
+
+    #[test]
+    fn cpp_chrono_duration_sizing() {
+        // duration<int64_t, nano> → size of int64_t = 8B
+        assert_eq!(
+            c_type_size_align(
+                "std::chrono::duration<int64_t, std::ratio<1,1000000000>>",
+                &X86_64_SYSV
+            ),
+            (8, 8)
+        );
+        // duration<int32_t, milli> → size of int32_t = 4B
+        assert_eq!(
+            c_type_size_align(
+                "std::chrono::duration<int32_t, std::ratio<1,1000>>",
+                &X86_64_SYSV
+            ),
+            (4, 4)
+        );
+    }
+
+    #[test]
+    fn cpp_filesystem_path_sizing() {
+        assert_eq!(
+            c_type_size_align("std::filesystem::path", &X86_64_SYSV),
+            (32, 8)
         );
     }
 

@@ -194,11 +194,9 @@ fn parse_vector_builtin(
                     count = source[child.byte_range()].trim().parse().ok();
                 }
             }
-            "builtin_type" | "identifier" => {
-                if elem.is_none() {
-                    let text = source[child.byte_range()].trim();
-                    elem = Some(zig_type_size_align(text, arch));
-                }
+            "builtin_type" | "identifier" if elem.is_none() => {
+                let text = source[child.byte_range()].trim();
+                elem = Some(zig_type_size_align(text, arch));
             }
             _ => {}
         }

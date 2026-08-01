@@ -149,8 +149,62 @@ fn type_node_size_align(source: &str, node: Node<'_>, arch: &'static ArchConfig)
         }
         // error union E!T — approximate as two words
         "error_union" => (arch.pointer_size * 2, arch.pointer_size),
+        // @Vector(N, T): SIMD vector type.
+        // Size = N × sizeof(T); alignment = size (SIMD vectors are naturally
+        // aligned to their own size, capped at 64 bytes for current hardware).
+        "builtin_function" => {
+            if let Some((count, elem_sz, elem_al)) = parse_vector_builtin(source, node, arch) {
+                let size = count * elem_sz;
+                let align = size.next_power_of_two().min(64).max(elem_al);
+                return (size, align);
+            }
+            (arch.pointer_size, arch.pointer_size)
+        }
         _ => (arch.pointer_size, arch.pointer_size),
     }
+}
+
+/// For `@Vector(N, T)` nodes, return `Some((count, elem_size, elem_align))`.
+fn parse_vector_builtin(
+    source: &str,
+    node: Node<'_>,
+    arch: &'static ArchConfig,
+) -> Option<(usize, usize, usize)> {
+    // Verify the builtin name is @Vector
+    let name_node = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .find(|c| c.kind() == "builtin_identifier")?;
+    if source[name_node.byte_range()].trim() != "@Vector" {
+        return None;
+    }
+    let args_node = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .find(|c| c.kind() == "arguments")?;
+
+    let mut count: Option<usize> = None;
+    let mut elem: Option<(usize, usize)> = None;
+
+    for i in 0..args_node.child_count() {
+        let Some(child) = args_node.child(i) else {
+            continue;
+        };
+        match child.kind() {
+            "integer" | "integer_literal" => {
+                if count.is_none() {
+                    count = source[child.byte_range()].trim().parse().ok();
+                }
+            }
+            "builtin_type" | "identifier" => {
+                if elem.is_none() {
+                    let text = source[child.byte_range()].trim();
+                    elem = Some(zig_type_size_align(text, arch));
+                }
+            }
+            _ => {}
+        }
+    }
+    let (elem_sz, elem_al) = elem?;
+    Some((count?, elem_sz, elem_al))
 }
 
 /// For `[N]T` nodes, return `Some((count, elem_size, elem_align))`.
@@ -587,7 +641,7 @@ fn parse_container_field(
                 field_name = Some(source[child.byte_range()].to_string());
             }
             "builtin_type" | "pointer_type" | "nullable_type" | "slice_type" | "array_type"
-            | "error_union" => {
+            | "error_union" | "builtin_function" => {
                 let text = source[child.byte_range()].to_string();
                 size_align = Some(type_node_size_align(source, child, arch));
                 type_text = Some(text);
@@ -945,5 +999,40 @@ mod tests {
             !layouts[0].is_repr_rust,
             "packed struct has stable layout, must not set is_repr_rust"
         );
+    }
+
+    // ── @Vector sizing ────────────────────────────────────────────────────────
+
+    #[test]
+    fn zig_vector_f32x4_size() {
+        // @Vector(4, f32) → 4 × 4B = 16B, aligned to 16
+        let src = "const S = extern struct { v: @Vector(4, f32) };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let f = &layouts[0].fields[0];
+        assert_eq!(f.size, 16);
+        assert_eq!(f.align, 16);
+    }
+
+    #[test]
+    fn zig_vector_i32x8_size() {
+        // @Vector(8, i32) → 8 × 4B = 32B, aligned to 32
+        let src = "const S = extern struct { v: @Vector(8, i32) };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let f = &layouts[0].fields[0];
+        assert_eq!(f.size, 32);
+        assert_eq!(f.align, 32);
+    }
+
+    #[test]
+    fn zig_struct_with_vector_and_scalar() {
+        // Layout: @Vector(4, f32)(16B, align 16) + padding + u8 field
+        let src = "const S = extern struct { v: @Vector(4, f32), x: u8 };";
+        let layouts = parse_zig(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].fields[0].size, 16);
+        // u8 follows the vector at offset 16 (no padding needed after aligned vector)
+        assert_eq!(layouts[0].fields[1].offset, 16);
     }
 }

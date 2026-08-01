@@ -138,6 +138,7 @@ fn render_finding_md(f: &Finding) -> String {
             format!("False sharing: {}{}", field_lists.join("; "), inferred)
         }
         Finding::LocalityIssue {
+            struct_name,
             hot_fields,
             cold_fields,
             is_inferred,
@@ -149,7 +150,8 @@ fn render_finding_md(f: &Finding) -> String {
                 ""
             };
             format!(
-                "Locality: hot `[{}]` interleaved with cold `[{}]`{}",
+                "Locality: hot `[{}]` interleaved with cold `[{}]`{} \
+                 → consider splitting into `{struct_name}Hot` / `{struct_name}Cold`",
                 hot_fields.join(", "),
                 cold_fields.join(", "),
                 inferred

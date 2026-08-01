@@ -206,7 +206,8 @@ fn message_for(finding: &Finding) -> String {
                 ""
             };
             format!(
-                "{struct_name}: hot fields [{}] interleaved with cold [{}]{}",
+                "{struct_name}: hot fields [{}] interleaved with cold [{}]{}. \
+                 Consider splitting into {struct_name}Hot / {struct_name}Cold.",
                 hot_fields.join(", "),
                 cold_fields.join(", "),
                 inferred

@@ -2,6 +2,19 @@
 
 All notable changes to padlock are documented here.
 
+## [0.10.10] — 2026-08-01
+
+### Added
+- **i686/x86_32 architecture**: `x86`, `i386`, `i586`, `i686` short names and `i686-*` / `i386-*` / `i586-*` target triples now resolve to an `X86_32` arch config with 4-byte pointer, 64-byte cache line, and `max_align = 4` (Linux SysV ABI — `double` and `long long` are 4-byte aligned in structs).
+- **C++ `struct` keyword virtual dispatch pointer**: C++ structs with `virtual` methods now get the same hidden `__vptr` field injected at offset 0 as classes. Previously, vptr injection only applied to `class`-keyword types; structs with `virtual ~Foo()` or `virtual void bar()` were silently undersized by 8 bytes.
+- **MSVC `__declspec(align(N))` support**: `__declspec(align(N))` on a struct type or on individual fields is now parsed and applied as an alignment override, matching the existing support for GCC/Clang `__attribute__((aligned(N)))` and C++11 `alignas(N)`. Handles the case where `ms_declspec_modifier` appears as a sibling of the struct node in the AST (not a child).
+- **`std::variant<T1, T2, ...>` sizing**: parametric sizing via a new bracket-aware template argument splitter (`split_template_args`). Storage = `max(sizeof(T...))` padded to `max(alignof(T...))`, plus a 4B discriminant, total padded to effective alignment. Also handles deeply-nested args like `std::variant<std::map<int,int>, double>`.
+- **`std::pair<T1, T2>` sizing**: sequential struct layout of two fields with proper alignment.
+- **`std::tuple<T1, T2, ...>` sizing**: approximate sequential layout (same total size as struct-of-fields).
+- **`std::array<T, N>` sizing**: `N × sizeof(T)` with `alignof(T)` — now computed from template args instead of falling through to pointer-size.
+- **Zig `@Vector(N, T)` sizing**: SIMD vector types are now sized as `N × sizeof(T)` with SIMD-aligned alignment (`size.next_power_of_two().min(64)`). Tree-sitter `builtin_function` nodes are now recognized in both `parse_container_field` and `type_node_size_align`.
+- **`LocalityIssue` split suggestion**: all output formatters (human summary, SARIF, Markdown report, `explain`) now include a concrete split suggestion when a locality issue is detected. Example: `Split: struct FooHot { a, b } / struct FooCold { c, d }`.
+
 ## [0.10.9] — 2026-08-01
 
 ### Security

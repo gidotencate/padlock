@@ -4,6 +4,7 @@
 // Shows each field's offset, size, alignment, and padding gaps inline.
 
 use padlock_core::analysis::impact::estimate_impact;
+use padlock_core::analysis::locality;
 use padlock_core::ir::{StructLayout, TypeInfo, find_padding};
 
 /// Render a visual layout table for one struct.
@@ -246,6 +247,23 @@ pub fn render_explain(layout: &StructLayout) -> String {
         out.push_str("packed — no padding\n");
     } else {
         out.push_str("no layout issues — struct is already optimally laid out\n");
+    }
+
+    // Locality split suggestion
+    if locality::has_locality_issue(layout) {
+        let (hot, cold) = locality::partition_hot_cold(layout);
+        out.push_str(&format!(
+            "Locality: hot fields [{}] share cache line(s) with cold [{}]\n",
+            hot.join(", "),
+            cold.join(", "),
+        ));
+        out.push_str(&format!(
+            "  Consider splitting:\n    struct {}Hot {{ {} }}\n    struct {}Cold {{ {} }}\n",
+            layout.name,
+            hot.join(", "),
+            layout.name,
+            cold.join(", "),
+        ));
     }
 
     out

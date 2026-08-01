@@ -241,7 +241,7 @@ Annotating the hot fields explicitly (see the `FalseSharing` annotation examples
 
 **How to fix**
 
-Group hot fields together at the front of the struct, or separate hot and cold field groups with explicit cache-line padding.
+Group hot fields together at the front of the struct, or separate hot and cold field groups with explicit cache-line padding. padlock's output includes a concrete split suggestion naming the two halves: `struct FooHot { … } / struct FooCold { … }`.
 
 > **Architecture note**: on targets without a hardware cache (`cache_line_size = 0`, e.g. Cortex-M0/M3, AVR) this finding is also suppressed along with `FalseSharing` — locality is only meaningful when cache pressure exists.
 

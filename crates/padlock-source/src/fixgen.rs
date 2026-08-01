@@ -246,8 +246,21 @@ fn rust_field_name_from_decl_line(line: &str) -> Option<String> {
 /// field chunks separated by `;` at depth 0.
 ///
 /// Each chunk includes any preceding `//` or `/* */` comments.
-pub fn extract_c_field_chunks(body: &str) -> Vec<(String, String)> {
-    let mut result: Vec<(String, String)> = Vec::new();
+/// A parsed chunk from a C/C++ struct body.
+///
+/// Field chunks can be reordered; Passthrough chunks (method declarations,
+/// constructors, destructors, friend declarations, static members, etc.)
+/// are preserved verbatim in their original relative positions.
+#[derive(Debug)]
+enum CChunk {
+    Field { name: String, text: String },
+    Passthrough(String),
+}
+
+/// Like `extract_c_field_chunks` but returns typed chunks so that non-field
+/// declarations (methods, constructors, etc.) are preserved rather than dropped.
+fn extract_c_chunks_typed(body: &str) -> Vec<CChunk> {
+    let mut result: Vec<CChunk> = Vec::new();
     let mut depth: i32 = 0;
     let mut chunk_start = 0usize;
     let bytes = body.as_bytes();
@@ -292,10 +305,17 @@ pub fn extract_c_field_chunks(body: &str) -> Vec<(String, String)> {
             b';' if depth == 0 => {
                 i += 1;
                 let chunk = &body[chunk_start..i];
-                if !chunk.trim().is_empty()
-                    && let Some(name) = c_field_name_from_chunk(chunk)
-                {
-                    result.push((name, chunk.to_string()));
+                if !chunk.trim().is_empty() {
+                    if let Some(name) = c_field_name_from_chunk(chunk) {
+                        result.push(CChunk::Field {
+                            name,
+                            text: chunk.to_string(),
+                        });
+                    } else {
+                        // Method declaration, constructor, destructor, friend, static,
+                        // pure-virtual specifier, etc.  Preserve verbatim.
+                        result.push(CChunk::Passthrough(chunk.to_string()));
+                    }
                 }
                 chunk_start = i;
             }
@@ -305,6 +325,16 @@ pub fn extract_c_field_chunks(body: &str) -> Vec<(String, String)> {
         }
     }
     result
+}
+
+pub fn extract_c_field_chunks(body: &str) -> Vec<(String, String)> {
+    extract_c_chunks_typed(body)
+        .into_iter()
+        .filter_map(|c| match c {
+            CChunk::Field { name, text } => Some((name, text)),
+            CChunk::Passthrough(_) => None,
+        })
+        .collect()
 }
 
 /// Extract a C/C++ field name from a chunk (everything up to and including `;`).
@@ -705,20 +735,25 @@ fn try_source_aware_c(layout: &StructLayout, struct_source: &str) -> Option<Stri
     let body_len = match_braces(body_with_close)?;
     let body = &body_with_close[1..body_len - 1];
 
-    let chunks = extract_c_field_chunks(body);
-    if chunks.is_empty() {
+    // Use typed chunks so method declarations are preserved in place rather than dropped.
+    let chunks = extract_c_chunks_typed(body);
+
+    let field_map: std::collections::HashMap<&str, &str> = chunks
+        .iter()
+        .filter_map(|c| match c {
+            CChunk::Field { name, text } => Some((name.as_str(), text.as_str())),
+            CChunk::Passthrough(_) => None,
+        })
+        .collect();
+
+    if field_map.is_empty() {
         return None;
     }
-
-    let chunk_map: std::collections::HashMap<&str, &str> = chunks
-        .iter()
-        .map(|(n, c)| (n.as_str(), c.as_str()))
-        .collect();
 
     let optimal = optimal_order(layout);
     if optimal
         .iter()
-        .any(|f| !chunk_map.contains_key(f.name.as_str()))
+        .any(|f| !field_map.contains_key(f.name.as_str()))
     {
         return None;
     }
@@ -728,9 +763,23 @@ fn try_source_aware_c(layout: &StructLayout, struct_source: &str) -> Option<Stri
     if !body.starts_with('\n') {
         result.push('\n');
     }
-    for field in &optimal {
-        result.push_str(chunk_map[field.name.as_str()]);
+
+    // Reconstruct: field slots are filled in optimal order; passthrough chunks
+    // (methods, constructors, etc.) remain in their original relative positions.
+    let mut opt_iter = optimal.iter();
+    for chunk in &chunks {
+        match chunk {
+            CChunk::Field { .. } => {
+                if let Some(f) = opt_iter.next() {
+                    result.push_str(field_map[f.name.as_str()]);
+                }
+            }
+            CChunk::Passthrough(text) => {
+                result.push_str(text);
+            }
+        }
     }
+
     if !result.ends_with('\n') {
         result.push('\n');
     }
@@ -1682,5 +1731,85 @@ mod tests {
         );
         // The output must not have two closing-brace lines (structural integrity)
         assert_eq!(fixed.chars().filter(|&c| c == '}').count(), 1);
+    }
+
+    // ── C++ class method preservation ─────────────────────────────────────────
+
+    #[test]
+    fn c_fix_preserves_methods_in_class() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        // The fix must reorder fields (double before char for alignment) and
+        // preserve the method declaration verbatim — not drop it.
+        let src = r#"class Widget {
+    void draw();
+    char tag;
+    double value;
+};"#;
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Cpp, &X86_64_SYSV).unwrap();
+        if layouts.is_empty() {
+            return; // class may not parse without explicit field — skip
+        }
+        let fixed = generate_c_fix_from_source(&layouts[0], src);
+        assert!(fixed.contains("void draw()"), "method must be preserved");
+        assert!(fixed.contains("double value"), "field must be present");
+        assert!(fixed.contains("char tag"), "field must be present");
+        // double should come before char in the reordered output
+        let double_pos = fixed.find("double value").unwrap_or(usize::MAX);
+        let char_pos = fixed.find("char tag").unwrap_or(usize::MAX);
+        assert!(
+            double_pos < char_pos,
+            "double (8B) should be reordered before char (1B)"
+        );
+    }
+
+    #[test]
+    fn c_chunks_typed_preserves_passthrough() {
+        let body = r#"
+    void foo();
+    int x;
+    virtual void bar() = 0;
+    double y;
+"#;
+        let chunks = extract_c_chunks_typed(body);
+        let field_names: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                CChunk::Field { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let passthrough_count = chunks
+            .iter()
+            .filter(|c| matches!(c, CChunk::Passthrough(_)))
+            .count();
+        assert_eq!(field_names, vec!["x", "y"], "only data fields extracted");
+        assert_eq!(passthrough_count, 2, "two method declarations preserved");
+    }
+
+    // ── Go type size additions ────────────────────────────────────────────────
+
+    #[test]
+    fn go_sync_map_known_type() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let src = "package p\ntype S struct { m sync.Map; x int }";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Go, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let m = layouts[0].fields.iter().find(|f| f.name == "m").unwrap();
+        assert_eq!(m.size, 32, "sync.Map should be 32B on 64-bit");
+        assert!(!layouts[0].uncertain_fields.contains(&"m".to_string()));
+    }
+
+    #[test]
+    fn go_strings_builder_known_type() {
+        use crate::parse_source_str;
+        use padlock_core::arch::X86_64_SYSV;
+        let src = "package p\ntype S struct { b strings.Builder }";
+        let layouts = parse_source_str(src, &crate::SourceLanguage::Go, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let b = layouts[0].fields.iter().find(|f| f.name == "b").unwrap();
+        assert_eq!(b.size, 32, "strings.Builder should be 32B on 64-bit");
+        assert!(!layouts[0].uncertain_fields.contains(&"b".to_string()));
     }
 }

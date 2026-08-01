@@ -24,8 +24,10 @@ cargo test -p padlock-core
 # Run a single test by name
 cargo test -p padlock-core test_name
 
-# Check (faster than build, no codegen)
-cargo check
+# Check — use cargo clippy instead; clippy is a strict superset of check
+# (running cargo check before cargo clippy in the same session poisons the
+# build cache and lets lint errors slip through locally)
+cargo clippy --workspace
 
 # Lint
 cargo clippy

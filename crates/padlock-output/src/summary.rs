@@ -337,6 +337,7 @@ fn render_finding(f: &Finding) -> String {
             )
         }
         Finding::LocalityIssue {
+            struct_name,
             hot_fields,
             cold_fields,
             is_inferred,
@@ -347,11 +348,19 @@ fn render_finding(f: &Finding) -> String {
             } else {
                 ""
             };
+            let split_hint = format!(
+                "\n  Split: struct {}Hot {{ {} }} / struct {}Cold {{ {} }}",
+                struct_name,
+                hot_fields.join(", "),
+                struct_name,
+                cold_fields.join(", "),
+            );
             format!(
-                "[{sev}] Locality: hot [{}] mixed with cold [{}] on same cache line(s){}",
+                "[{sev}] Locality: hot [{}] mixed with cold [{}] on same cache line(s){}{}",
                 hot_fields.join(", "),
                 cold_fields.join(", "),
-                inferred_note
+                inferred_note,
+                split_hint
             )
         }
     }

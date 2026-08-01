@@ -78,6 +78,19 @@ pub const CORTEX_M4: ArchConfig = ArchConfig {
     endianness: Endianness::Little,
 };
 
+/// 32-bit x86 (i386 / i586 / i686) — Linux SysV ABI.
+///
+/// Under the x86 SysV ABI, `double` and `long long` inside structs are aligned
+/// to 4 bytes (not 8). `max_align` is therefore 4 for struct-member purposes.
+/// Cache lines are the same 64 bytes as x86-64.
+pub const X86_32: ArchConfig = ArchConfig {
+    name: "x86",
+    pointer_size: 4,
+    cache_line_size: 64,
+    max_align: 4,
+    endianness: Endianness::Little,
+};
+
 /// AVR 8-bit (ATmega328P, ATmega2560, etc.) — no cache, 2-byte pointers.
 ///
 /// Every type is 1-byte aligned on AVR so padding waste findings will be rare.
@@ -133,6 +146,7 @@ pub fn arch_by_name(name: &str) -> Option<&'static ArchConfig> {
         "aarch64_apple" => Some(&AARCH64_APPLE),
         "wasm32" => Some(&WASM32),
         "riscv64" => Some(&RISCV64),
+        "x86" | "i386" | "i586" | "i686" => Some(&X86_32),
         "cortex_m" => Some(&CORTEX_M),
         "cortex_m4" => Some(&CORTEX_M4),
         "avr" => Some(&AVR),
@@ -145,6 +159,11 @@ pub fn arch_by_name(name: &str) -> Option<&'static ArchConfig> {
 pub fn arch_by_triple(triple: &str) -> Option<&'static ArchConfig> {
     if triple.starts_with("x86_64-") {
         Some(&X86_64_SYSV)
+    } else if triple.starts_with("i386-")
+        || triple.starts_with("i586-")
+        || triple.starts_with("i686-")
+    {
+        Some(&X86_32)
     } else if triple.starts_with("aarch64-apple-") {
         // Apple Silicon has a 128-byte cache line.
         Some(&AARCH64_APPLE)
@@ -197,6 +216,24 @@ mod tests {
         assert_eq!(arch_by_name("aarch64-apple-ios"), Some(&AARCH64_APPLE));
         assert_eq!(arch_by_name("wasm32-unknown-unknown"), Some(&WASM32));
         assert_eq!(arch_by_name("riscv64gc-unknown-linux-gnu"), Some(&RISCV64));
+    }
+
+    #[test]
+    fn x86_32_short_names() {
+        assert_eq!(arch_by_name("x86"), Some(&X86_32));
+        assert_eq!(arch_by_name("i686"), Some(&X86_32));
+        assert_eq!(arch_by_name("i386"), Some(&X86_32));
+        assert_eq!(arch_by_name("i586"), Some(&X86_32));
+        assert_eq!(X86_32.pointer_size, 4);
+        assert_eq!(X86_32.cache_line_size, 64);
+        assert_eq!(X86_32.max_align, 4);
+    }
+
+    #[test]
+    fn x86_32_triples() {
+        assert_eq!(arch_by_name("i686-unknown-linux-gnu"), Some(&X86_32));
+        assert_eq!(arch_by_name("i686-pc-windows-msvc"), Some(&X86_32));
+        assert_eq!(arch_by_name("i386-apple-ios"), Some(&X86_32));
     }
 
     #[test]

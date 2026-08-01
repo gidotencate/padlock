@@ -39,6 +39,33 @@ fn active_stdlib() -> CppStdlib {
 
 // ── type resolution ───────────────────────────────────────────────────────────
 
+/// Split a comma-separated template argument list at depth-0 commas,
+/// respecting nested `<>` and `()`.  Input is the text *inside* the outer
+/// angle brackets, e.g. `"int, std::map<int,int>, double"`.
+/// Returns trimmed, non-empty argument slices.
+pub(crate) fn split_template_args(s: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let arg = s[start..i].trim();
+                args.push(arg);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = s[start..].trim();
+    if !last.is_empty() {
+        args.push(last);
+    }
+    args
+}
+
 /// Map a C/C++ type name to (size, align) using the target arch.
 fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     let ty = ty.trim();
@@ -210,6 +237,137 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         }
         // std::atomic_flag: guaranteed 1B minimum, but often 4B in practice.
         "std::atomic_flag" => return (4, 4),
+
+        // ── Threading ─────────────────────────────────────────────────────────
+        // std::thread: stores a single pthread_t / HANDLE — one pointer.
+        "std::thread" => return (arch.pointer_size, arch.pointer_size),
+        // std::jthread: thread + stop_source (2 pointers) ≈ 3 words.
+        "std::jthread" => return (arch.pointer_size * 3, arch.pointer_size),
+
+        // ── Numeric / math ────────────────────────────────────────────────────
+        // std::complex<T>: two consecutive T values (real + imaginary).
+        ty if ty.starts_with("std::complex<") && ty.ends_with('>') => {
+            let inner = &ty["std::complex<".len()..ty.len() - 1];
+            let (sz, al) = c_type_size_align(inner.trim(), arch);
+            return (sz * 2, al);
+        }
+        // std::bitset<N>: ceil(N/8) bytes, aligned to sizeof(unsigned long).
+        ty if ty.starts_with("std::bitset<") && ty.ends_with('>') => {
+            let inner = &ty["std::bitset<".len()..ty.len() - 1];
+            if let Ok(n) = inner.trim().parse::<usize>() {
+                let bytes = n.div_ceil(8).max(1);
+                let align = arch.pointer_size; // unsigned long = word size
+                let total = bytes.next_multiple_of(align);
+                return (total, align);
+            }
+        }
+
+        // ── Chrono ───────────────────────────────────────────────────────────
+        // std::chrono::duration<Rep, Period>: Rep is the underlying arithmetic type.
+        ty if ty.starts_with("std::chrono::duration<") && ty.ends_with('>') => {
+            let inner = &ty["std::chrono::duration<".len()..ty.len() - 1];
+            let args = split_template_args(inner);
+            if !args.is_empty() {
+                return c_type_size_align(args[0].trim(), arch);
+            }
+            return (8, 8); // default: nanoseconds = int64_t
+        }
+        // std::chrono::time_point<Clock, Duration>: size = sizeof(Duration).
+        ty if ty.starts_with("std::chrono::time_point<") && ty.ends_with('>') => {
+            let inner = &ty["std::chrono::time_point<".len()..ty.len() - 1];
+            let args = split_template_args(inner);
+            if args.len() >= 2 {
+                return c_type_size_align(args[1].trim(), arch);
+            }
+            return (8, 8); // default: nanoseconds
+        }
+
+        // ── Misc standard library ─────────────────────────────────────────────
+        // std::initializer_list<T>: pointer + size_t = 2 words (element type irrelevant).
+        ty if ty.starts_with("std::initializer_list<") || ty == "std::initializer_list" => {
+            return (arch.pointer_size * 2, arch.pointer_size);
+        }
+        // std::filesystem::path: platform-dependent; 32B on libstdc++, 24B on libc++.
+        "std::filesystem::path" => return (32, 8),
+
+        // ── Multi-arg templates ───────────────────────────────────────────────
+        // std::variant<T1, T2, ...>:
+        //   storage = max(sizeof(T...)) padded to max(alignof(T...));
+        //   index = 4B (uint32_t-sized discriminant, libstdc++/MSVC practice);
+        //   total = (storage + 4) padded to effective alignment.
+        ty if ty.starts_with("std::variant<") && ty.ends_with('>') => {
+            let inner = &ty["std::variant<".len()..ty.len() - 1];
+            let args = split_template_args(inner);
+            if !args.is_empty() {
+                let max_size = args
+                    .iter()
+                    .map(|a| c_type_size_align(a, arch).0)
+                    .max()
+                    .unwrap_or(0);
+                let max_align = args
+                    .iter()
+                    .map(|a| c_type_size_align(a, arch).1)
+                    .max()
+                    .unwrap_or(1)
+                    .max(4);
+                let storage = if max_align > 0 {
+                    max_size.next_multiple_of(max_align)
+                } else {
+                    max_size
+                };
+                let total = (storage + 4).next_multiple_of(max_align);
+                return (total, max_align);
+            }
+        }
+
+        // std::pair<T1, T2>: standard struct layout of two fields.
+        ty if ty.starts_with("std::pair<") && ty.ends_with('>') => {
+            let inner = &ty["std::pair<".len()..ty.len() - 1];
+            let args = split_template_args(inner);
+            if args.len() >= 2 {
+                let (s1, a1) = c_type_size_align(args[0], arch);
+                let (s2, a2) = c_type_size_align(args[1], arch);
+                let offset2 = if a2 > 0 { s1.next_multiple_of(a2) } else { s1 };
+                let raw = offset2 + s2;
+                let align = a1.max(a2).max(1);
+                let total = raw.next_multiple_of(align);
+                return (total, align);
+            }
+        }
+
+        // std::tuple<T1, T2, ...>: approximate sequential struct layout.
+        // (libstdc++ reverses field order for EBO but total size is identical.)
+        ty if ty.starts_with("std::tuple<") && ty.ends_with('>') => {
+            let inner = &ty["std::tuple<".len()..ty.len() - 1];
+            let args = split_template_args(inner);
+            if !args.is_empty() {
+                let mut offset = 0usize;
+                let mut max_align = 1usize;
+                for arg in &args {
+                    let (sz, al) = c_type_size_align(arg, arch);
+                    if al > 0 {
+                        offset = offset.next_multiple_of(al);
+                    }
+                    offset += sz;
+                    max_align = max_align.max(al);
+                }
+                max_align = max_align.max(1);
+                let total = offset.next_multiple_of(max_align);
+                return (total, max_align);
+            }
+        }
+
+        // std::array<T, N>: N consecutive elements of T with no metadata.
+        ty if ty.starts_with("std::array<") && ty.ends_with('>') => {
+            let inner = &ty["std::array<".len()..ty.len() - 1];
+            let args = split_template_args(inner);
+            if args.len() >= 2 {
+                let (elem_size, elem_align) = c_type_size_align(args[0], arch);
+                if let Ok(n) = args[1].trim().parse::<usize>() {
+                    return (elem_size * n, elem_align);
+                }
+            }
+        }
 
         _ => {} // fall through to primitive types below
     }
@@ -554,8 +712,25 @@ fn parse_class_specifier(
             "alignas_qualifier" | "alignas_specifier" if struct_alignas.is_none() => {
                 struct_alignas = parse_alignas_value(source, child);
             }
+            // MSVC __declspec(align(N)) on the class tag.
+            "ms_declspec_modifier" if struct_alignas.is_none() => {
+                struct_alignas = extract_declspec_align(source[child.byte_range()].trim());
+            }
             _ => {}
         }
+    }
+
+    // Fallback: scan the header source text for __declspec(align(N)).
+    // tree-sitter places ms_declspec_modifier as a *sibling* of class_specifier
+    // (under the parent declaration node), so also look just before this node.
+    if struct_alignas.is_none() {
+        let body_start = body_node.map(|b| b.start_byte()).unwrap_or(node.end_byte());
+        let header_text = &source[node.start_byte()..body_start];
+        struct_alignas = extract_declspec_align(header_text);
+    }
+    if struct_alignas.is_none() && node.start_byte() > 0 {
+        let look_back = node.start_byte().saturating_sub(256);
+        struct_alignas = extract_declspec_align(&source[look_back..node.start_byte()]);
     }
 
     let body = body_node?;
@@ -990,11 +1165,34 @@ fn parse_struct_or_union_specifier(
             "alignas_qualifier" | "alignas_specifier" if struct_alignas.is_none() => {
                 struct_alignas = parse_alignas_value(source, child);
             }
+            // MSVC __declspec(align(N)) on the struct tag.
+            "ms_declspec_modifier" if struct_alignas.is_none() => {
+                struct_alignas = extract_declspec_align(source[child.byte_range()].trim());
+            }
             _ => {}
         }
     }
 
+    // Fallback: scan the header source text for __declspec(align(N)).
+    // tree-sitter places ms_declspec_modifier as a *sibling* of struct_specifier
+    // (under the parent declaration node), so we also look in the source just
+    // before this struct node's opening keyword.
+    if struct_alignas.is_none() {
+        let body_start = body_node.map(|b| b.start_byte()).unwrap_or(node.end_byte());
+        let header_text = &source[node.start_byte()..body_start];
+        struct_alignas = extract_declspec_align(header_text);
+    }
+    if struct_alignas.is_none() && node.start_byte() > 0 {
+        let look_back = node.start_byte().saturating_sub(256);
+        struct_alignas = extract_declspec_align(&source[look_back..node.start_byte()]);
+    }
+
     let body = body_node?;
+
+    // C++ structs can have virtual methods just like classes; in that case a
+    // hidden vtable pointer lives at offset 0.  Unions cannot be polymorphic.
+    let has_virtual = !is_union && contains_virtual_keyword(source, body);
+
     let mut raw_fields: Vec<RawField> = Vec::new();
 
     for i in 0..body.child_count() {
@@ -1012,7 +1210,9 @@ fn parse_struct_or_union_specifier(
         }
     }
 
-    if raw_fields.is_empty() {
+    // A struct with only virtual methods and no data members still needs a
+    // layout if it has virtual dispatch (the __vptr field will be inserted below).
+    if raw_fields.is_empty() && !has_virtual {
         return None;
     }
 
@@ -1061,6 +1261,27 @@ fn parse_struct_or_union_specifier(
             }
         })
         .collect();
+
+    // Virtual dispatch pointer (hidden, at offset 0 for the first virtual struct)
+    if has_virtual {
+        let ps = arch.pointer_size;
+        fields.insert(
+            0,
+            Field {
+                name: "__vptr".to_string(),
+                ty: TypeInfo::Pointer {
+                    size: ps,
+                    align: ps,
+                },
+                offset: 0,
+                size: ps,
+                align: ps,
+                source_file: None,
+                source_line: None,
+                access: AccessPattern::Unknown,
+            },
+        );
+    }
 
     let line = node.start_position().row as u32 + 1;
     // `__attribute__((packed))` forces pack_n=1; `#pragma pack(N)` caps at N.
@@ -1181,6 +1402,46 @@ fn extract_aligned_from_c_field_text(field_source: &str) -> Option<usize> {
                 }
             }
         }
+    }
+    // Also check MSVC __declspec(align(N)) form.
+    extract_declspec_align(field_source)
+}
+
+/// Parse an alignment value from MSVC `__declspec(align(N))`.
+/// Returns `None` when no such specifier is present or the value cannot be parsed.
+fn extract_declspec_align(source: &str) -> Option<usize> {
+    let mut search = source;
+    while let Some(pos) = search.find("__declspec(") {
+        let after = &search[pos + "__declspec(".len()..];
+        // Find the closing ')' of the outer __declspec(...)
+        let mut depth = 1usize;
+        let mut end_idx = after.len();
+        for (i, ch) in after.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_idx = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let inner = &after[..end_idx];
+        // Look for `align(N)` inside the __declspec(...) body.
+        // The MSVC keyword is `align`, never `aligned`, so this is unambiguous.
+        if let Some(apos) = inner.find("align(") {
+            let align_after = &inner[apos + "align(".len()..];
+            if let Some(close) = align_after.find(')')
+                && let Ok(n) = align_after[..close].trim().parse::<usize>()
+            {
+                return Some(n);
+            }
+        }
+        // Advance past this __declspec and keep searching.
+        search = &after[end_idx..];
     }
     None
 }
@@ -1815,12 +2076,13 @@ class Widget {
 
     #[test]
     fn cpp_struct_keyword_with_virtual_has_vptr() {
-        // `struct` in C++ can also have virtual methods
+        // C++ structs with virtual methods get the same hidden __vptr as classes.
         let src = "struct IFoo { virtual ~IFoo(); virtual void bar(); };";
         let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
-        // struct_specifier doesn't go through parse_class_specifier, so no __vptr
-        // (vtable injection is only for `class` nodes)
-        let _ = layouts; // just verify it parses without panic
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].fields[0].name, "__vptr");
+        assert_eq!(layouts[0].fields[0].offset, 0);
+        assert_eq!(layouts[0].fields[0].size, 8);
     }
 
     // ── C++ class: single inheritance ─────────────────────────────────────────
@@ -2206,6 +2468,41 @@ class alignas(32) Aligned {
         assert_eq!(l.total_size, 8); // int(4) + char(1) + 3 pad
     }
 
+    // ── __declspec(align(N)) — MSVC alignment attribute ───────────────────────
+
+    #[test]
+    fn declspec_align_on_struct() {
+        // `__declspec(align(64))` on the struct tag raises the struct alignment.
+        let src = "__declspec(align(64)) struct CacheLine { int x; int y; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].align, 64);
+    }
+
+    #[test]
+    fn declspec_align_on_field() {
+        // `__declspec(align(16))` on a field overrides its natural alignment.
+        let src = "struct S { __declspec(align(16)) int x; int y; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 1);
+        let x = layouts[0].fields.iter().find(|f| f.name == "x").unwrap();
+        assert_eq!(x.align, 16);
+    }
+
+    #[test]
+    fn extract_declspec_align_unit() {
+        assert_eq!(
+            super::extract_declspec_align("__declspec(align(64))"),
+            Some(64)
+        );
+        assert_eq!(
+            super::extract_declspec_align("__declspec(align(16)) struct Foo {"),
+            Some(16)
+        );
+        assert_eq!(super::extract_declspec_align("__declspec(noinline)"), None);
+        assert_eq!(super::extract_declspec_align("no declspec here"), None);
+    }
+
     // ── anonymous nested structs/unions ───────────────────────────────────────
 
     #[test]
@@ -2479,6 +2776,164 @@ struct NetHeader {
         );
         assert_eq!(
             c_type_size_align("std::function<int(int)>", &X86_64_SYSV),
+            (32, 8)
+        );
+    }
+
+    // ── split_template_args ───────────────────────────────────────────────────
+
+    #[test]
+    fn split_template_args_simple() {
+        assert_eq!(split_template_args("int, double"), vec!["int", "double"]);
+        assert_eq!(split_template_args("int"), vec!["int"]);
+    }
+
+    #[test]
+    fn split_template_args_nested() {
+        // Nested angle brackets must not be split at depth > 0.
+        let args = split_template_args("std::map<int,int>, double");
+        assert_eq!(args, vec!["std::map<int,int>", "double"]);
+        let args = split_template_args("int, std::pair<char, short>, float");
+        assert_eq!(args, vec!["int", "std::pair<char, short>", "float"]);
+    }
+
+    // ── std::variant sizing ───────────────────────────────────────────────────
+
+    #[test]
+    fn cpp_variant_single_int() {
+        // storage=4, align=4 (max'd to 4), total=(4+4).next_mult_of(4)=8
+        assert_eq!(c_type_size_align("std::variant<int>", &X86_64_SYSV), (8, 4));
+    }
+
+    #[test]
+    fn cpp_variant_int_double() {
+        // max_size=8, max_align=8, storage=8, total=(8+4).next_mult_of(8)=16
+        assert_eq!(
+            c_type_size_align("std::variant<int, double>", &X86_64_SYSV),
+            (16, 8)
+        );
+    }
+
+    #[test]
+    fn cpp_variant_nested_template_arg() {
+        // std::variant<std::map<int,int>, double> — bracket-aware split required.
+        let (sz, _) = c_type_size_align("std::variant<std::map<int,int>, double>", &X86_64_SYSV);
+        // map=48, double=8 → max_size=48, max_align=8, total=(48+4).next_mult_of(8)=56
+        assert_eq!(sz, 56);
+    }
+
+    // ── std::pair sizing ─────────────────────────────────────────────────────
+
+    #[test]
+    fn cpp_pair_int_char() {
+        // int(4) at 0, char(1) at 4, raw=5, align=max(4,1)=4, total=8
+        assert_eq!(
+            c_type_size_align("std::pair<int, char>", &X86_64_SYSV),
+            (8, 4)
+        );
+    }
+
+    #[test]
+    fn cpp_pair_char_int() {
+        // char(1) at 0, int(4) at 4 (aligned), raw=8, align=4, total=8
+        assert_eq!(
+            c_type_size_align("std::pair<char, int>", &X86_64_SYSV),
+            (8, 4)
+        );
+    }
+
+    // ── std::tuple sizing ────────────────────────────────────────────────────
+
+    #[test]
+    fn cpp_tuple_three_fields() {
+        // int(4) at 0, double(8) at 8 (aligned), char(1) at 16, raw=17, align=8, total=24
+        assert_eq!(
+            c_type_size_align("std::tuple<int, double, char>", &X86_64_SYSV),
+            (24, 8)
+        );
+    }
+
+    // ── std::array sizing ────────────────────────────────────────────────────
+
+    #[test]
+    fn cpp_array_of_int() {
+        // std::array<int, 4> = 4 * 4B = 16B, align=4
+        assert_eq!(
+            c_type_size_align("std::array<int, 4>", &X86_64_SYSV),
+            (16, 4)
+        );
+    }
+
+    #[test]
+    fn cpp_array_of_double() {
+        // std::array<double, 3> = 3 * 8B = 24B, align=8
+        assert_eq!(
+            c_type_size_align("std::array<double, 3>", &X86_64_SYSV),
+            (24, 8)
+        );
+    }
+
+    // ── std::bitset, std::complex, std::thread, etc. ─────────────────────────
+
+    #[test]
+    fn cpp_bitset_sizing() {
+        // std::bitset<8>: 1B → padded to 8 (word), align 8
+        assert_eq!(c_type_size_align("std::bitset<8>", &X86_64_SYSV), (8, 8));
+        // std::bitset<64>: 8B → already 8, align 8
+        assert_eq!(c_type_size_align("std::bitset<64>", &X86_64_SYSV), (8, 8));
+        // std::bitset<128>: 16B, align 8
+        assert_eq!(c_type_size_align("std::bitset<128>", &X86_64_SYSV), (16, 8));
+    }
+
+    #[test]
+    fn cpp_complex_sizing() {
+        assert_eq!(
+            c_type_size_align("std::complex<float>", &X86_64_SYSV),
+            (8, 4)
+        );
+        assert_eq!(
+            c_type_size_align("std::complex<double>", &X86_64_SYSV),
+            (16, 8)
+        );
+    }
+
+    #[test]
+    fn cpp_thread_sizing() {
+        assert_eq!(c_type_size_align("std::thread", &X86_64_SYSV), (8, 8));
+    }
+
+    #[test]
+    fn cpp_initializer_list_sizing() {
+        assert_eq!(
+            c_type_size_align("std::initializer_list<int>", &X86_64_SYSV),
+            (16, 8)
+        );
+    }
+
+    #[test]
+    fn cpp_chrono_duration_sizing() {
+        // duration<int64_t, nano> → size of int64_t = 8B
+        assert_eq!(
+            c_type_size_align(
+                "std::chrono::duration<int64_t, std::ratio<1,1000000000>>",
+                &X86_64_SYSV
+            ),
+            (8, 8)
+        );
+        // duration<int32_t, milli> → size of int32_t = 4B
+        assert_eq!(
+            c_type_size_align(
+                "std::chrono::duration<int32_t, std::ratio<1,1000>>",
+                &X86_64_SYSV
+            ),
+            (4, 4)
+        );
+    }
+
+    #[test]
+    fn cpp_filesystem_path_sizing() {
+        assert_eq!(
+            c_type_size_align("std::filesystem::path", &X86_64_SYSV),
             (32, 8)
         );
     }

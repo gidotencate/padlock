@@ -683,7 +683,8 @@ padlock run against popular open-source projects — layout issues that accumula
 |---|---|---|---|---|---|---|
 | [tokio](https://tokio.rs) | Rust | 1.51.1 | 367 | 485B | 91/100 A¹ | `TraceStatus` — score 48, false sharing |
 | [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | — | `multiState` — 20% waste, saves 8B |
-| Go `net` + `database/sql` | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53 |
+| Go `net` + `database/sql` | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53; fix pending ([CL 767580](https://go-review.googlesource.com/c/go/+/767580)), 7–25× improvement under concurrent load |
+| [grpc-go](https://github.com/grpc/grpc-go) | Go | latest | — | — | — | `clientStream` — 288B→256B, sizeclass reduction; [PR #9281](https://github.com/grpc/grpc-go/pull/9281) pending |
 | Linux kernel `net/` | C | 6.x | 2 066 | 5 093B | 84/100 B | `virtio_vsock` — score 45, all 4 finding types |
 
 ¹ repr(Rust) structs are severity-downgraded (compiler may already reorder). Use `--hide-repr-rust` to focus on ABI-stable findings only.
@@ -705,7 +706,7 @@ note: repr(Rust) — compiler may reorder; use binary analysis for confirmed lay
 [HIGH]   False sharing: cache line 0: [waitDuration, numClosed, mu]  (inferred from type names — add guard annotations or verify with profiling)
 [MEDIUM] Locality: hot [waitDuration, numClosed, mu] interleaved with cold [connector, freeConn, ...]
 ```
-`waitDuration` and `numClosed` are atomic counters updated on every query. They share a cache line with `mu` — under concurrent load, atomic writes invalidate the line that other goroutines need to lock. The finding is marked `(inferred)` because padlock recognised the field types as concurrent; adding `// padlock:guard=` annotations converts it to a confirmed finding.
+`waitDuration` and `numClosed` are atomic counters updated on every query. They share a cache line with `mu` — under concurrent load, atomic writes invalidate the line that other goroutines need to lock. Fix submitted upstream ([CL 767580](https://go-review.googlesource.com/c/go/+/767580)): separating the atomics with `_ [48]byte` padding shows 7–25× improvement at 1–4 concurrent stressors in microbenchmarks.
 
 **C / Linux kernel `net/` — `virtio_vsock`, score 45 (all 4 finding types):**
 ```

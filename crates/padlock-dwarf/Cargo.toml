@@ -13,7 +13,7 @@ readme                = "README.md"
 padlock-core = { workspace = true }
 anyhow       = "1"
 gimli        = "0.29"
-object       = { version = "0.39", features = ["read"] }
+object       = { version = "0.40", features = ["read"] }
 pdb          = "0.8"
 
 [dev-dependencies]

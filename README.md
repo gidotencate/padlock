@@ -684,7 +684,7 @@ padlock run against popular open-source projects — layout issues that accumula
 | [tokio](https://tokio.rs) | Rust | 1.51.1 | 367 | 485B | 91/100 A¹ | `TraceStatus` — score 48, false sharing |
 | [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | — | `multiState` — 20% waste, saves 8B |
 | Go `net` + `database/sql` | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53; fix pending ([CL 767580](https://go-review.googlesource.com/c/go/+/767580)), 7–25× improvement under concurrent load |
-| [grpc-go](https://github.com/grpc/grpc-go) | Go | latest | — | — | — | `clientStream` — 288B→256B, sizeclass reduction; [PR #9281](https://github.com/grpc/grpc-go/pull/9281) pending |
+| [grpc-go](https://github.com/grpc/grpc-go) | Go | latest | — | — | — | 4 structs fixed — 72B saved/RPC, false sharing on `mu` eliminated ([#9281](https://github.com/grpc/grpc-go/pull/9281), [#9359](https://github.com/grpc/grpc-go/pull/9359), [#9360](https://github.com/grpc/grpc-go/pull/9360), [#9361](https://github.com/grpc/grpc-go/pull/9361) — all merged) |
 | Linux kernel `net/` | C | 6.x | 2 066 | 5 093B | 84/100 B | `virtio_vsock` — score 45, all 4 finding types |
 
 ¹ repr(Rust) structs are severity-downgraded (compiler may already reorder). Use `--hide-repr-rust` to focus on ABI-stable findings only.

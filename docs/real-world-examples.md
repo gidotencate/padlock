@@ -10,12 +10,15 @@ padlock run against popular open-source projects — all findings reflect declar
 |---|---|---|---|---|---|---|---|
 | [tokio](https://tokio.rs) | Rust | 1.51.1 | 367 | 485B | 91/100 A¹ | `TraceStatus` — score 48, false sharing | — |
 | [Redis](https://redis.io) | C | 7.0.15 | 282 | 892B | — | `multiState` — 20% waste, saves 8B | — |
-| [Go net + database](https://pkg.go.dev) | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53 | Fixes submitted upstream² |
+| [Go net + database](https://pkg.go.dev) | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53; 7–25× improvement under concurrent load | Fix pending² |
+| [grpc-go](https://github.com/grpc/grpc-go) | Go | latest | — | — | — | 4 structs fixed — 72B saved/RPC, false sharing eliminated on `mu` | All merged³ |
 | Linux kernel `net/` | C | 6.x | 2 066 | 5 093B | 84/100 B | `virtio_vsock` — score 45, all 4 finding types | — |
 
 ¹ repr(Rust) structs are severity-downgraded (compiler may already reorder). Use `--hide-repr-rust` to focus on ABI-stable findings only. The per-struct average score is 91; the weighted project score is higher due to the majority of clean small structs.
 
-² Three CLs submitted to the Go standard library based on padlock findings — see [CL 767580](https://go-review.googlesource.com/c/go/+/767580), [CL 767600](https://go-review.googlesource.com/c/go/+/767600), [CL 767581](https://go-review.googlesource.com/c/go/+/767581). Pending review.
+² [CL 767580](https://go-review.googlesource.com/c/go/+/767580) — separates hot atomics (`waitDuration`, `numClosed`) onto their own cache line with `_ [48]byte` padding, eliminating false sharing with `mu`. Benchmarks show 7–25× improvement at 1–4 concurrent stressors. Two other CLs ([767581](https://go-review.googlesource.com/c/go/+/767581), [767600](https://go-review.googlesource.com/c/go/+/767600)) were abandoned — see section notes below.
+
+³ Four PRs merged into grpc-go: [#9281](https://github.com/grpc/grpc-go/pull/9281) (`clientStream` 288→256B), [#9359](https://github.com/grpc/grpc-go/pull/9359) (`csAttempt` 240→224B), [#9360](https://github.com/grpc/grpc-go/pull/9360) (`addrConnStream` 256→240B + false sharing fix), [#9361](https://github.com/grpc/grpc-go/pull/9361) (`serverStream` 256→248B + false sharing fix). Each PR drops the struct into a smaller allocator sizeclass and/or eliminates cache-line contention on `mu`.
 
 The Go stdlib score is B (86/100) across 607 structs. 71% are clean; 12% have High findings — almost all from false sharing between atomic and mutex-protected fields rather than padding waste.
 
@@ -199,6 +202,8 @@ Score   86 / 100   B    607 structs · 162 files · 1 236B wasted
 
 Go's layout is deterministic — unlike `repr(Rust)` Rust, the compiler does not reorder struct fields. padlock's analysis of Go source is authoritative without caveats.
 
+**When findings are actionable:** layout issues matter most when the struct is on a CPU-bound hot path — connection pools, scheduler queues, in-memory data structures where contention is the bottleneck. On I/O-dominated paths (HTTP request handling, database wire protocol) round-trip latency (~10s of µs) dwarfs any cache-line benefit (~10 ns), so padlock findings there are real but practically invisible. Use profiling to confirm whether a specific struct is on a hot path before treating a finding as urgent.
+
 ### `database/sql.DB` — false sharing between atomics and mutex-protected fields
 
 Every Go program using a SQL database holds a `*sql.DB`. The struct intermingles atomic counters (accessed lock-free from any goroutine) with mutex-protected connection pool fields on the same cache line:
@@ -244,7 +249,16 @@ type DB struct {
 }
 ```
 
-> **Fix submitted upstream:** [CL 767580](https://go-review.googlesource.com/c/go/+/767580) — adds `_ [48]byte` padding between `numClosed` and `mu`, separating the hot atomics onto their own cache line. Pending review for Go 1.x.
+> **Fix pending:** [CL 767580](https://go-review.googlesource.com/c/go/+/767580) — adds `_ [48]byte` padding between `numClosed` and `mu`, separating the hot atomics onto their own cache line. Benchmarks under concurrent atomic write load:
+>
+> | Benchmark | master | fixed | improvement |
+> |---|---|---|---|
+> | `BenchmarkDBMutex/stressors=0` | 3.44 ns/op | 3.44 ns/op | baseline (no contention) |
+> | `BenchmarkDBMutex/stressors=1` | 27.4 ns/op | 3.5 ns/op | **7.7×** |
+> | `BenchmarkDBMutex/stressors=2` | 46.6 ns/op | 3.4 ns/op | **13.8×** |
+> | `BenchmarkDBMutex/stressors=4` | 85.8 ns/op | 3.4 ns/op | **25×** |
+>
+> The `[48]byte` is `64 − sizeof(atomic.Int64) − sizeof(atomic.Uint64) = 64 − 8 − 8`, platform-independent (both atomic types are always 8 bytes regardless of 32/64-bit). Pending review for Go 1.x.
 
 ### `net/http.Transport` — false sharing across 4 cache lines
 
@@ -269,7 +283,7 @@ The layout (abridged):
 
 `idleMu`, `reqMu`, `altMu`, and `connsPerHostMu` are all mutexes that are locked on every connection request — but they live across two different cache lines (0 and 1), so locking any one of them can invalidate the line that holds another.
 
-> **Fix submitted upstream (partial):** [CL 767600](https://go-review.googlesource.com/c/go/+/767600) — adds `_ [16]byte` padding after `idleLRU` to push `reqMu` onto cache line 1, eliminating the CL0 `idleMu`/`reqMu` conflict. The CL1 `altMu`/`connsPerHostMu` conflict is a separate finding. Pending review for Go 1.x.
+> **Abandoned:** [CL 767600](https://go-review.googlesource.com/c/go/+/767600) — end-to-end `RoundTrip` benchmarks under concurrent load showed no measurable impact. The finding is architecturally real, but `http.Transport` is an **I/O-dominated path**: a typical round-trip takes ~28 µs, which completely drowns out mutex acquisition cost (~10 ns). The false sharing between `idleMu` and `reqMu` only matters if mutex contention is the bottleneck — on any real HTTP workload, the network latency is orders of magnitude larger. The Go team also noted that the benchmark used a test-only method unrepresentative of production usage.
 
 ### `net/http.response` — 22 bytes of alignment padding waste
 
@@ -286,7 +300,70 @@ $ padlock analyze /usr/lib/go-1.22/src/net/http/server.go --filter '^response$'
 
 At 100 000 req/s the current layout wastes 1.6 MB/s of heap allocation compared to the optimal order, directly increasing GC frequency.
 
-> **Fix submitted upstream:** [CL 767581](https://go-review.googlesource.com/c/go/+/767581) — reorders fields by alignment class (pointers/interfaces, mutexes, int64, bool, byte buffers), eliminating all five padding holes. Pending review for Go 1.x.
+> **Abandoned:** [CL 767581](https://go-review.googlesource.com/c/go/+/767581) — the Go team declined on policy grounds: they avoid struct reordering when code clarity is the cost and the gain is modest. The sizeclass savings were confirmed (232B → 216B lands in different allocator classes on amd64/arm64), but synthetic `BenchmarkServerFakeConn` showed only 1–5% improvement — not enough to override the policy. The finding is real; it just doesn't meet the Go project's bar for layout changes.
+
+---
+
+## Go — grpc-go (latest)
+
+Four structs fixed across four PRs. Every gRPC-Go client or server allocates these per-RPC — together they save 72B per client+server RPC pair and eliminate false sharing between `mu` and unguarded bool fields.
+
+| Struct | Before | After | Savings | Fix |
+|---|---|---|---|---|
+| `clientStream` | 288B | 256B | 32B, sizeclass drop | [#9281](https://github.com/grpc/grpc-go/pull/9281) ✓ merged |
+| `csAttempt` | 240B | 224B | 16B, sizeclass drop + false sharing fix | [#9359](https://github.com/grpc/grpc-go/pull/9359) ✓ merged |
+| `addrConnStream` | 256B | 240B | 16B, sizeclass drop + false sharing fix | [#9360](https://github.com/grpc/grpc-go/pull/9360) ✓ merged |
+| `serverStream` | 256B | 248B | 8B + false sharing fix | [#9361](https://github.com/grpc/grpc-go/pull/9361) ✓ merged |
+
+**End-to-end measurement:** gRPC's own `benchmain` tool (3 matched pairs × 20 s per scenario, latency ∈ {0ms, 1ms, 5ms}, 8 and 64 concurrent callers) showed no statistically significant change in throughput or latency — all deltas were within ±3% noise. This is expected: the allocator sizeclass savings show up as lower GC overhead over minutes of sustained load (not seconds), and the false-sharing benefit requires the unguarded bools to be written concurrently with `mu.Lock()`, which doesn't happen continuously in real gRPC workloads. Use `runtime/metrics` or `go tool pprof -alloc_space` to observe the GC benefit at scale.
+
+### `clientStream` — sizeclass reduction 288B→256B
+
+`clientStream` is the core per-RPC state struct in gRPC-Go. Six bool fields are scattered across the struct between pointer and int-sized fields, creating implicit padding that inflates the struct from 256B to 288B — pushing it into the next allocator sizeclass:
+
+```
+$ padlock analyze ~/projects/grpc-go/stream.go --filter '^clientStream$'
+
+[✗] clientStream  288B  fields=29  score=68
+    [MEDIUM] Padding waste: 32B (11%) — bool fields interleaved with 8-byte-aligned fields
+    [MEDIUM] Reorder fields: 288B → 256B (saves 32B)
+```
+
+The fix groups all bool fields at the tail of the struct. On amd64/arm64 the Go allocator uses sizeclasses of 256B and 288B; moving from 288B to 256B means every active RPC allocates from the smaller class, reducing heap fragmentation under load.
+
+> **Merged:** [PR #9281](https://github.com/grpc/grpc-go/pull/9281) — reorders `clientStream` bool fields to the tail. The test that asserted `unsafe.Sizeof(clientStream{}) == 256` was intentionally dropped at reviewer request — struct size tests are too brittle as the struct evolves.
+
+### `csAttempt`, `addrConnStream`, `serverStream` — sizeclass drops + false sharing fix
+
+Three more per-RPC structs had the same bool-interleaving problem. `addrConnStream` and `serverStream` also had `mu` on the same cache line as unguarded bool fields — any goroutine writing one of those bools would invalidate the cache line that other goroutines needed to call `mu.Lock()`.
+
+```
+$ padlock analyze ~/projects/grpc-go/stream.go --filter '^(csAttempt|addrConnStream|serverStream)$'
+
+[✗] csAttempt  240B  fields=17
+    [MEDIUM] Padding waste: 16B — bool fields interleaved with 8-byte-aligned fields
+    [MEDIUM] Reorder fields: 240B → 224B (saves 16B)
+
+[✗] addrConnStream  256B  fields=16
+    [MEDIUM] Padding waste: 16B — bool fields interleaved with 8-byte-aligned fields
+    [HIGH]   False sharing: cache line 3: [mu, sentLast, receivedFirstMsg, decompressorSet]
+    [MEDIUM] Reorder fields: 256B → 240B (saves 16B)
+
+[✗] serverStream  256B  fields=16
+    [MEDIUM] Padding waste: 8B — bool fields interleaved with 8-byte-aligned fields
+    [HIGH]   False sharing: cache line 3: [mu, recvFirstMsg, serverHeaderBinlogged]
+    [MEDIUM] Reorder fields: 256B → 248B (saves 8B)
+```
+
+The fix tails all bool fields and moves `mu` to the end of cache line 2 (bytes 128–191) so the unguarded bools land on cache line 3 (bytes 192+). Microbenchmark under synthetic stressor goroutines continuously writing the unguarded bool:
+
+| Stressors | before (mu.Lock ns) | after (mu.Lock ns) | improvement |
+|---|---|---|---|
+| 0 | 3.7 ns | 3.7 ns | baseline |
+| 1 | ~75 ns | 3.7 ns | **~20×** |
+| 4 | ~78 ns | 3.9 ns | **~20×** |
+
+> **Merged:** [#9359](https://github.com/grpc/grpc-go/pull/9359) (`csAttempt`), [#9360](https://github.com/grpc/grpc-go/pull/9360) (`addrConnStream`), [#9361](https://github.com/grpc/grpc-go/pull/9361) (`serverStream`).
 
 ---
 

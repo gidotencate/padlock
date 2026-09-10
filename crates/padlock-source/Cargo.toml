@@ -20,7 +20,7 @@ tree-sitter-c   = "0.24"
 tree-sitter-cpp = "0.23"
 tree-sitter-go  = "0.25"
 tree-sitter-zig = "1.1"
-similar         = "2"
+similar         = "3"
 
 [dev-dependencies]
 padlock-core = { workspace = true, features = ["test-helpers"] }

@@ -55,6 +55,14 @@
         "title": "padlock: Preview fix (reorder all structs)"
       },
       {
+        "command": "padlock.fixStruct",
+        "title": "padlock: Reorder a single struct"
+      },
+      {
+        "command": "padlock.fixStructPreview",
+        "title": "padlock: Preview reorder of a single struct"
+      },
+      {
         "command": "padlock.clearDiagnostics",
         "title": "padlock: Clear findings"
       }
@@ -93,6 +101,14 @@
         {
           "command": "padlock.clearDiagnostics",
           "when": "resourceExtname =~ /\\.(rs|c|cpp|cc|cxx|h|hpp|go|zig)$/"
+        },
+        {
+          "command": "padlock.fixStruct",
+          "when": "false"
+        },
+        {
+          "command": "padlock.fixStructPreview",
+          "when": "false"
         }
       ]
     },

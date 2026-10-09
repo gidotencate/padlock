@@ -233,7 +233,7 @@ function analyzeFile(filePath: string): void {
     statusBarItem.show();
   }
 
-  runCommand(exe, ["analyze", "--json", filePath, ...extra])
+  runCommand(exe, ["analyze", "--json", filePath, ...extra], filePath)
     .then((output) => applyDiagnostics(output, filePath))
     .catch((err) => {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -312,7 +312,7 @@ async function fixWithTempFile(
     if (filter) {
       args.push("--filter", filter);
     }
-    await runCommand(exe, args);
+    await runCommand(exe, args, filePath);
     return fs.readFileSync(tmpPath, "utf8");
   } catch {
     return null;
@@ -798,13 +798,32 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function runCommand(exe: string, args: string[]): Promise<string> {
+/** Resolve the cwd to run padlock in: the workspace folder that contains
+ *  `filePath` (so multi-root workspaces pick up the right `.padlock.toml`),
+ *  falling back to the first workspace folder. */
+function resolveCwd(filePath?: string): string | undefined {
+  if (filePath) {
+    const folder = vscode.workspace.getWorkspaceFolder(
+      vscode.Uri.file(filePath),
+    );
+    if (folder) {
+      return folder.uri.fsPath;
+    }
+  }
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+function runCommand(
+  exe: string,
+  args: string[],
+  cwdHint?: string,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
 
     const proc = cp.spawn(exe, args, {
-      cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+      cwd: resolveCwd(cwdHint),
       shell: false,
     });
 

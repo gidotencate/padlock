@@ -87,11 +87,13 @@ runs:
     # `cargo install` (~3 min) when no binary is available for the platform.
     - name: Install padlock
       shell: bash
+      env:
+        PADLOCK_VERSION_INPUT: ${{ inputs.padlock-version }}
       run: |
         set -euo pipefail
 
         REPO="gidotencate/padlock"
-        VERSION="${{ inputs.padlock-version }}"
+        VERSION="$PADLOCK_VERSION_INPUT"
 
         # Resolve "latest" → concrete version via GitHub API.
         # Use -L (follow redirects) without -f so a 404 (no releases yet) does
@@ -150,21 +152,30 @@ runs:
       run: |
         set -euo pipefail
 
-        FORMAT="${{ inputs.output-format }}"
-        # Support newline-separated list of paths
-        PATHS=(${{ inputs.path }})
+        FORMAT="$PADLOCK_OUTPUT_FORMAT"
+        # Split on newlines only (IFS=$'\n') so a single path containing
+        # spaces survives intact; paths come from the action input, never
+        # from ${{ }} template interpolation, to avoid script injection.
+        readarray -t RAW_PATHS <<< "$PADLOCK_PATH_INPUT"
+        PATHS=()
+        for p in "${RAW_PATHS[@]}"; do
+          [ -n "$p" ] && PATHS+=("$p")
+        done
 
         # Build optional extra flags
         EXTRA_FLAGS=()
-        if [ -n "${{ inputs.target }}" ]; then
-          EXTRA_FLAGS+=(--target "${{ inputs.target }}")
+        if [ -n "$PADLOCK_TARGET" ]; then
+          EXTRA_FLAGS+=(--target "$PADLOCK_TARGET")
         fi
-        if [ "${{ inputs.hide-repr-rust }}" = "true" ]; then
+        if [ "$PADLOCK_HIDE_REPR_RUST" = "true" ]; then
           EXTRA_FLAGS+=(--hide-repr-rust)
         fi
 
         # Always collect JSON so we can count findings for outputs / thresholds.
-        padlock analyze --json "${PATHS[@]}" "${EXTRA_FLAGS[@]}" > /tmp/padlock-results.json 2>&1 || true
+        # stderr is dropped (not merged via 2>&1): padlock writes skip-notes
+        # there, which would otherwise corrupt the JSON file and silently
+        # zero out every count below.
+        padlock analyze --json "${PATHS[@]}" "${EXTRA_FLAGS[@]}" > /tmp/padlock-results.json 2>/dev/null || true
 
         # Also run the chosen output format for the log / artefacts.
         if [ "$FORMAT" = "sarif" ]; then
@@ -220,6 +231,10 @@ runs:
         PY
       env:
         PADLOCK_FAIL_ON: ${{ inputs.fail-on-severity }}
+        PADLOCK_OUTPUT_FORMAT: ${{ inputs.output-format }}
+        PADLOCK_PATH_INPUT: ${{ inputs.path }}
+        PADLOCK_TARGET: ${{ inputs.target }}
+        PADLOCK_HIDE_REPR_RUST: ${{ inputs.hide-repr-rust }}
 
     # ── Upload SARIF ────────────────────────────────────────────────────────────
     - name: Upload SARIF to GitHub Code Scanning

@@ -1,0 +1,24 @@
+[package]
+name        = "padlock-lsp"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+repository.workspace  = true
+description           = "Language server exposing padlock's struct-layout findings as LSP diagnostics/hover"
+keywords.workspace    = true
+categories.workspace  = true
+readme.workspace       = true
+
+[[bin]]
+name = "padlock-lsp"
+path = "src/main.rs"
+
+[dependencies]
+padlock-core   = { workspace = true }
+padlock-source = { workspace = true }
+lsp-server     = "0.10"
+lsp-types      = "0.97"
+serde          = "1"
+serde_json     = "1"
+url            = "2"
+anyhow         = "1"

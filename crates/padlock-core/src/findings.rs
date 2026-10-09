@@ -133,6 +133,15 @@ pub struct Report {
     pub structs: Vec<StructReport>,
     pub total_structs: usize,
     pub total_wasted_bytes: usize,
+    /// Weighted-by-size aggregate score across every struct (same formula as
+    /// `padlock summary`'s headline number). The single source of truth for
+    /// this computation — consumers (the project-summary renderer, the VS
+    /// Code extension's status bar via JSON) read it here rather than
+    /// reimplementing the weighted-average formula themselves.
+    pub aggregate_score: f64,
+    /// Letter grade (A-F) for `aggregate_score`, using the same thresholds
+    /// everywhere: A >= 90, B >= 80, C >= 70, D >= 60, F otherwise.
+    pub aggregate_grade: char,
     /// Paths that were analyzed to produce this report (populated by the CLI).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub analyzed_paths: Vec<String>,
@@ -147,11 +156,41 @@ pub struct Report {
     pub embedded_in: std::collections::HashMap<String, Vec<String>>,
 }
 
+/// Weighted-by-`total_size` aggregate score across `structs`. Structs with no
+/// findings score 100, so an empty report (no structs) is defined as a clean
+/// 100.0 rather than 0 — "nothing to flag" should not read as "everything is
+/// broken".
+pub fn weighted_score(structs: &[StructReport]) -> f64 {
+    let total_weight: f64 = structs.iter().map(|s| s.total_size as f64).sum();
+    if total_weight <= 0.0 {
+        return 100.0;
+    }
+    structs
+        .iter()
+        .map(|s| s.score * s.total_size as f64)
+        .sum::<f64>()
+        / total_weight
+}
+
+/// Letter grade (A-F) for a 0-100 score, rounded to the nearest integer
+/// before bucketing: A >= 90, B >= 80, C >= 70, D >= 60, F otherwise.
+pub fn letter_grade(score: f64) -> char {
+    match score.round() as i64 {
+        s if s >= 90 => 'A',
+        80..=89 => 'B',
+        70..=79 => 'C',
+        60..=69 => 'D',
+        _ => 'F',
+    }
+}
+
 impl Report {
     /// Run all analysis passes over `layouts` and assemble the full report.
     pub fn from_layouts(layouts: &[StructLayout]) -> Report {
         let structs: Vec<StructReport> = layouts.par_iter().map(analyze_one).collect();
         let total_wasted_bytes = structs.iter().map(|s| s.wasted_bytes).sum();
+        let aggregate_score = weighted_score(&structs);
+        let aggregate_grade = letter_grade(aggregate_score);
 
         // Build reverse-embedding map: inner_struct_name → [outer_struct_names].
         // Any field whose TypeInfo::Opaque name matches a known struct is an embedding.
@@ -177,6 +216,8 @@ impl Report {
         Report {
             total_structs: structs.len(),
             total_wasted_bytes,
+            aggregate_score,
+            aggregate_grade,
             structs,
             analyzed_paths: Vec::new(),
             skipped: Vec::new(),
@@ -353,6 +394,34 @@ mod tests {
                 .iter()
                 .any(|f| matches!(f, Finding::PaddingWaste { .. }))
         );
+    }
+
+    #[test]
+    fn letter_grade_boundaries() {
+        assert_eq!(letter_grade(100.0), 'A');
+        assert_eq!(letter_grade(90.0), 'A');
+        assert_eq!(letter_grade(89.0), 'B');
+        assert_eq!(letter_grade(80.0), 'B');
+        assert_eq!(letter_grade(79.0), 'C');
+        assert_eq!(letter_grade(70.0), 'C');
+        assert_eq!(letter_grade(69.0), 'D');
+        assert_eq!(letter_grade(60.0), 'D');
+        assert_eq!(letter_grade(59.0), 'F');
+        assert_eq!(letter_grade(0.0), 'F');
+        // Rounds before bucketing: 89.6 -> 90 -> A, not B.
+        assert_eq!(letter_grade(89.6), 'A');
+    }
+
+    #[test]
+    fn weighted_score_of_empty_structs_is_a_clean_hundred() {
+        assert_eq!(weighted_score(&[]), 100.0);
+    }
+
+    #[test]
+    fn weighted_score_matches_report_aggregate_score() {
+        let report = Report::from_layouts(&[connection_layout(), packed_layout()]);
+        assert_eq!(report.aggregate_score, weighted_score(&report.structs));
+        assert_eq!(report.aggregate_grade, letter_grade(report.aggregate_score));
     }
 
     #[test]

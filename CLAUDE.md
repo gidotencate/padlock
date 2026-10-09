@@ -46,7 +46,7 @@ cargo fmt --check   # verify clean
 
 ## Crate architecture
 
-This is a Cargo workspace with six crates:
+This is a Cargo workspace with seven crates:
 
 - **`padlock-core`** — Shared IR types, analysis passes, and findings. The central dependency for all other crates. Contains:
   - `ir.rs` — Intermediate representation of struct layouts
@@ -86,6 +86,8 @@ This is a Cargo workspace with six crates:
 - **`padlock-macros`** — Proc-macro crate (`proc-macro = true`). Provides:
   - `#[padlock::assert_no_padding]` — compile-time assertion that `size_of::<Struct>() == sum(size_of::<FieldType>())`. Fails at compile time when padding is present.
   - `#[padlock::assert_size(N)]` — compile-time assertion that `size_of::<Struct>() == N`.
+
+- **`padlock-lsp`** — Standalone `padlock-lsp` binary: a Language Server Protocol server for editors without a bespoke padlock integration (Neovim, Helix, Zed, JetBrains, Sublime). Depends only on `padlock-core` and `padlock-source` — calls `parse_source_str` directly on the live buffer, in-process, on `didOpen`/`didChange`/`didSave`, with no subprocess and no disk write. Diagnostics + hover only (no code actions, no binary/DWARF analysis, no workspace-wide analysis — the CLI and VS Code extension already cover those). Uses `lsp-server`/`lsp-types` synchronously (no async runtime). Caches per-document `StructReport`s keyed by the URI's string form rather than `lsp_types::Uri` directly, since `fluent_uri::Uri`'s internal `Cell` trips clippy's `mutable_key_type` lint. `main()` must `drop(connection)` before `io_threads.join()` — the writer thread only exits once every sender is dropped, so joining while `connection` is still in scope deadlocks the process on `exit`.
 
 ## Data flow
 

@@ -35,6 +35,11 @@ interface PadlockStruct {
 
 interface PadlockOutput {
   structs: PadlockStruct[];
+  /** Weighted-by-size aggregate score across every struct in this response —
+   *  computed once in padlock-core (`Report::from_layouts`) and the single
+   *  source of truth for this number; see `fileAggregateCache` below. */
+  aggregate_score: number;
+  aggregate_grade: string;
 }
 
 // ── Extension state ───────────────────────────────────────────────────────────
@@ -45,6 +50,15 @@ let saveDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /** Cached per-file analysis results: VS Code URI string → PadlockStruct[]. */
 let fileStructCache = new Map<string, PadlockStruct[]>();
+
+/** Cached per-file aggregate score/grade, read straight from padlock's JSON
+ *  (`aggregate_score`/`aggregate_grade`) rather than recomputed here. Only
+ *  populated when a response is scoped to exactly one file (every on-save
+ *  analysis, and "Analyze current file") — a multi-root `analyzeWorkspace`
+ *  response's aggregate spans every file in the scan, not one, so it can't
+ *  populate this cache; `updateStatusBar` falls back to a local computation
+ *  for files whose score has never arrived scoped to just that file. */
+let fileAggregateCache = new Map<string, { score: number; grade: string }>();
 
 /** Virtual documents for fix-preview diff editor. */
 const PREVIEW_SCHEME = "padlock-preview";
@@ -143,6 +157,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("padlock.clearDiagnostics", () => {
       diagnosticCollection.clear();
       fileStructCache.clear();
+      fileAggregateCache.clear();
       updateStatusBar(vscode.window.activeTextEditor?.document);
     }),
 
@@ -195,6 +210,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidCloseTextDocument((doc) => {
       diagnosticCollection.delete(doc.uri);
       fileStructCache.delete(doc.uri.toString());
+      fileAggregateCache.delete(doc.uri.toString());
       updateStatusBar(vscode.window.activeTextEditor?.document);
     }),
   );
@@ -233,7 +249,7 @@ function analyzeFile(filePath: string): void {
     statusBarItem.show();
   }
 
-  runCommand(exe, ["analyze", "--json", filePath, ...extra])
+  runCommand(exe, ["analyze", "--json", filePath, ...extra], filePath)
     .then((output) => applyDiagnostics(output, filePath))
     .catch((err) => {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -312,7 +328,7 @@ async function fixWithTempFile(
     if (filter) {
       args.push("--filter", filter);
     }
-    await runCommand(exe, args);
+    await runCommand(exe, args, filePath);
     return fs.readFileSync(tmpPath, "utf8");
   } catch {
     return null;
@@ -582,26 +598,44 @@ function updateStatusBar(doc: vscode.TextDocument | undefined): void {
     return;
   }
 
-  // Weighted aggregate score (same formula as `padlock summary`)
-  const totalWeight = structs.reduce((sum, s) => sum + s.total_size, 0);
-  const score =
-    totalWeight > 0
-      ? Math.round(
-          structs.reduce((sum, s) => sum + s.score * s.total_size, 0) /
-            totalWeight,
-        )
-      : 100;
-
-  const grade =
-    score >= 90
-      ? "A"
-      : score >= 80
-        ? "B"
-        : score >= 70
-          ? "C"
-          : score >= 60
-            ? "D"
-            : "F";
+  // Prefer the aggregate padlock itself computed (Report::from_layouts in
+  // padlock-core) — set whenever this file was analyzed on its own (every
+  // on-save run, and "Analyze current file"). Only a response scoped to the
+  // whole workspace at once can leave this unset for a given file; that
+  // response's own aggregate spans every file in the scan, not just this
+  // one, so there is no authoritative per-file number to cache from it.
+  const cachedAggregate = fileAggregateCache.get(doc.uri.toString());
+  let score: number;
+  let grade: string;
+  if (cachedAggregate) {
+    score = Math.round(cachedAggregate.score);
+    grade = cachedAggregate.grade;
+  } else {
+    // Fallback for a file whose only data came from a workspace-wide scan:
+    // mirrors padlock_core::findings::{weighted_score, letter_grade}
+    // exactly (same formula, same A/B/C/D/F cutoffs) since there is no
+    // per-file number to read for this case without an extra subprocess
+    // call per open file. Resolves itself the next time this file is
+    // analyzed on its own (e.g. on save).
+    const totalWeight = structs.reduce((sum, s) => sum + s.total_size, 0);
+    score =
+      totalWeight > 0
+        ? Math.round(
+            structs.reduce((sum, s) => sum + s.score * s.total_size, 0) /
+              totalWeight,
+          )
+        : 100;
+    grade =
+      score >= 90
+        ? "A"
+        : score >= 80
+          ? "B"
+          : score >= 70
+            ? "C"
+            : score >= 60
+              ? "D"
+              : "F";
+  }
 
   const allFindings = structs.flatMap((s) => s.findings);
   const highCount = allFindings.filter((f) => f.severity === "High").length;
@@ -667,6 +701,12 @@ function applyDiagnostics(jsonOutput: string, scopeFile?: string): void {
   if (scopeFile) {
     const scopeKey = vscode.Uri.file(scopeFile).toString();
     fileStructCache.set(scopeKey, structsByUri.get(scopeKey) ?? []);
+    // This response is scoped to exactly scopeFile, so its top-level
+    // aggregate is that file's aggregate — cache it verbatim, no recompute.
+    fileAggregateCache.set(scopeKey, {
+      score: parsed.aggregate_score,
+      grade: parsed.aggregate_grade,
+    });
   } else {
     fileStructCache.clear();
     structsByUri.forEach((structs, key) => fileStructCache.set(key, structs));
@@ -798,13 +838,32 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function runCommand(exe: string, args: string[]): Promise<string> {
+/** Resolve the cwd to run padlock in: the workspace folder that contains
+ *  `filePath` (so multi-root workspaces pick up the right `.padlock.toml`),
+ *  falling back to the first workspace folder. */
+function resolveCwd(filePath?: string): string | undefined {
+  if (filePath) {
+    const folder = vscode.workspace.getWorkspaceFolder(
+      vscode.Uri.file(filePath),
+    );
+    if (folder) {
+      return folder.uri.fsPath;
+    }
+  }
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+function runCommand(
+  exe: string,
+  args: string[],
+  cwdHint?: string,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
 
     const proc = cp.spawn(exe, args, {
-      cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+      cwd: resolveCwd(cwdHint),
       shell: false,
     });
 

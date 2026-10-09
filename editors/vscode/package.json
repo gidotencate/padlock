@@ -2,7 +2,7 @@
   "name": "padlock",
   "displayName": "padlock",
   "description": "The lint pass for struct memory layout — finds padding waste, false sharing, and cache locality problems in C, C++, Rust, Go, and Zig.",
-  "version": "0.10.10",
+  "version": "0.11.0",
   "publisher": "gidotencate",
   "icon": "icon.png",
   "license": "MIT OR Apache-2.0",
@@ -55,6 +55,14 @@
         "title": "padlock: Preview fix (reorder all structs)"
       },
       {
+        "command": "padlock.fixStruct",
+        "title": "padlock: Reorder a single struct"
+      },
+      {
+        "command": "padlock.fixStructPreview",
+        "title": "padlock: Preview reorder of a single struct"
+      },
+      {
         "command": "padlock.clearDiagnostics",
         "title": "padlock: Clear findings"
       }
@@ -93,6 +101,14 @@
         {
           "command": "padlock.clearDiagnostics",
           "when": "resourceExtname =~ /\\.(rs|c|cpp|cc|cxx|h|hpp|go|zig)$/"
+        },
+        {
+          "command": "padlock.fixStruct",
+          "when": "false"
+        },
+        {
+          "command": "padlock.fixStructPreview",
+          "when": "false"
         }
       ]
     },
@@ -142,7 +158,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.4",
-    "@types/vscode": "^1.138.0",
+    "@types/vscode": "^1.125.0",
     "@vscode/vsce": "^4.0.0",
     "typescript": "^7.0.2"
   },

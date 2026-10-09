@@ -77,6 +77,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Source coverage** | Header shows `N of M types, X% source coverage` when types are skipped; `< 70%` triggers a "consider binary analysis" hint |
 | **Cache-line visualization** | `padlock explain` adds a `CL` column (zero-indexed cache-line number per field/padding row) and inserts a separator row each time a field crosses into a new 64-byte (or 128-byte) cache line |
 | **VS Code extension** | Findings in the Problems panel on save, status bar health score, hover popups, quick-fix lightbulb, and diff-preview fix-all |
+| **`padlock-lsp`** | Standalone language server — diagnostics + hover for any LSP-capable editor (Neovim, Helix, Zed, JetBrains, Sublime) |
 
 ---
 
@@ -876,6 +877,26 @@ See [editors/vscode/README.md](editors/vscode/README.md) for the full extension 
 
 ---
 
+## Other Editors (LSP)
+
+For editors without a bespoke padlock integration, `padlock-lsp` exposes the same diagnostics and hover findings over the Language Server Protocol:
+
+```bash
+cargo install padlock-lsp
+```
+
+Point your editor's LSP client at the `padlock-lsp` binary for `.c`, `.cpp`, `.rs`, `.go`, and `.zig` files. It analyzes the live buffer in-process on open/change/save — no `padlock` CLI install required, and no subprocess per keystroke. Scope is diagnostics + hover only (no code actions yet); use the CLI's `fix`/`diff` commands for in-place reordering. Example Neovim setup (`nvim-lspconfig`-style, since padlock isn't a built-in config yet):
+
+```lua
+vim.lsp.start({
+  name = 'padlock-lsp',
+  cmd = { 'padlock-lsp' },
+  root_dir = vim.fs.root(0, { '.git', 'Cargo.toml', 'go.mod' }),
+})
+```
+
+---
+
 ## Supported Types
 
 ### SIMD
@@ -966,6 +987,12 @@ padlock-cli       — padlock binary + cargo-padlock subcommand; watch mode
 ├── padlock-output  — formatters: terminal, JSON, SARIF, diff
 ├── padlock-macros  — proc macros: #[assert_no_padding], #[assert_size(N)]
 └── padlock-core    — IR types, analysis passes, findings, scoring
+
+padlock-lsp        — standalone language server (lsp-server/lsp-types) for
+                      editors without a bespoke integration (Neovim, Helix,
+                      Zed, JetBrains via LSP4IJ, Sublime via LSP). Depends
+                      only on padlock-source + padlock-core; analyzes the
+                      live buffer in-process via parse_source_str.
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the full data-flow diagram and crate responsibilities.  

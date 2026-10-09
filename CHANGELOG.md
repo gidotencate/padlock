@@ -2,6 +2,30 @@
 
 All notable changes to padlock are documented here.
 
+## [0.11.0] — 2026-10-10
+
+### Added
+- **`padlock-lsp`**: a new standalone Language Server Protocol binary for editors without a bespoke padlock integration (Neovim, Helix, Zed, JetBrains, Sublime). Calls `parse_source_str` directly, in-process, on the live buffer — no subprocess, no disk write. Diagnostics (`didOpen`/`didChange`/`didSave`) and hover for the same five source languages the CLI supports. `cargo install padlock-lsp`.
+- **`Report::aggregate_score` / `aggregate_grade`**: the weighted-by-size aggregate score and A–F letter grade (same formula as `padlock summary`) are now computed once in `padlock-core` and included in every `--json` response, rather than being recomputed independently by consumers.
+
+### Fixed
+- **`action.yml` shell injection and stderr-corrupted JSON**: every `${{ inputs.* }}` value was interpolated directly into `run:` bash blocks — unquoted and unsandboxed, so a `path`/`target`/`padlock-version` input containing shell metacharacters executed as code. Moved to `env:` vars. Also `PATHS=(${{ inputs.path }})` word-split on spaces despite the newline-separated input contract; switched to `readarray` on newlines only. Also dropped `2>&1` on the JSON-collection step — padlock's skip-notes go to stderr by design, and merging them corrupted the JSON silently instead of failing loudly.
+- **VS Code: `vsce package` was broken outright** — dependabot bumped `@types/vscode` past `engines.vscode` without updating the floor, and `vsce` refuses to package when that happens. Downgraded the devDependency back in range; no API newer than `engines.vscode` was actually in use.
+- **VS Code: multi-root workspace used the wrong `.padlock.toml`** — `runCommand`'s `cwd` always used `workspaceFolders[0]`, not the folder actually containing the analyzed file. Added `resolveCwd()`.
+- **VS Code: `fixStruct`/`fixStructPreview` commands undeclared** — reachable via code actions but missing from `contributes.commands`, so they couldn't be rebound or found in the keybindings UI.
+- **VS Code: hand-duplicated score formula** — the status bar reimplemented the weighted-score/grade formula in TypeScript independently of `padlock-core`'s. Now reads `aggregate_score`/`aggregate_grade` straight from JSON for any single-file-scoped response (every on-save analysis); keeps an explicitly-labeled local fallback only for files whose score has only ever arrived via a multi-root `analyzeWorkspace` scan.
+- **Homebrew formula missing binaries**: `install do` only ran `bin.install "padlock"` — `cargo-padlock` was never installed via brew either, and the new `padlock-lsp` wouldn't have been. All three now installed.
+- **`docs/extending.md` repository-map tree** was missing the new `padlock-lsp` entry.
+- **`padlock-lsp` process hang on `exit`**: `main()` called `io_threads.join()` while `connection` (and its live sender) was still in scope, so the stdout writer thread never saw every sender drop and the process never exited. Fixed by dropping `connection` first.
+
+### Changed
+- CI now builds and attaches the VS Code extension `.vsix` to each GitHub release (`build-vscode-extension` job). This does **not** publish to the Marketplace — PAT-based `vsce publish` auth is currently broken on the Marketplace's side; publish the attached `.vsix` manually via the web UI until that's fixed upstream.
+- Release artifacts (all platform tarballs/zips) now include `padlock-lsp` alongside `padlock`/`cargo-padlock`.
+
+### Dependencies
+- `tree-sitter` (core runtime) 0.25 → 0.27 — 0.25.3 fixed an infinite loop during parser error recovery, relevant now that `padlock-lsp` re-parses malformed mid-edit source on every keystroke. Grammar crates (`tree-sitter-{c,cpp,go,zig}`) unchanged.
+- `syn` 3.0.3 → 3.0.6 (trivial patch; no API change).
+
 ## [0.10.10] — 2026-08-01
 
 ### Added

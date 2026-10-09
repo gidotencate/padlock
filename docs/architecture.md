@@ -65,7 +65,7 @@ Central dependency for all other crates. Contains:
 
 - **`arch.rs`** — `ArchConfig` constants for each supported target (pointer size, cache line size). Statics: `X86_64_SYSV`, `AARCH64`, `AARCH64_APPLE`, `WASM32`, `RISCV64`, `CORTEX_M` (no-cache, 4-byte ptrs), `CORTEX_M4` (32-byte lines, 4-byte ptrs), `AVR` (no-cache, 2-byte ptrs). `arch_by_name()` resolves short names and falls through to `arch_by_triple()` for Rust target triples. `with_overrides(base, cache_line_size, word_size)` creates a heap-leaked `&'static ArchConfig` with user-supplied overrides, used by `--cache-line-size` / `--word-size` CLI flags. When `cache_line_size = 0`, false-sharing and locality analysis is suppressed.
 
-- **`findings.rs`** — `Finding` enum, `StructReport` (includes `num_fields`, `num_holes`, source location, `uncertain_fields`), `Report` (includes `analyzed_paths`, `skipped`), `SkippedStruct { name, reason, source_file }`. `Report::from_layouts` is the single entry point that runs all passes and returns the full report. `Report::skipped` carries types that were encountered but not analyzed (generics/templates/comptime-generic functions) — emitted in JSON output and as SARIF `notifications`.
+- **`findings.rs`** — `Finding` enum, `StructReport` (includes `num_fields`, `num_holes`, source location, `uncertain_fields`), `Report` (includes `analyzed_paths`, `skipped`, `aggregate_score`, `aggregate_grade`), `SkippedStruct { name, reason, source_file }`. `Report::from_layouts` is the single entry point that runs all passes and returns the full report. `Report::skipped` carries types that were encountered but not analyzed (generics/templates/comptime-generic functions) — emitted in JSON output and as SARIF `notifications`. `weighted_score(&[StructReport]) -> f64` (size-weighted average of per-struct scores) and `letter_grade(f64) -> char` (A ≥ 90, B ≥ 80, C ≥ 70, D ≥ 60, F otherwise) are free functions — the single source of truth for these two computations, called once in `from_layouts` to populate `Report::aggregate_score`/`aggregate_grade`, and reused by `padlock-output`'s `project_summary.rs` instead of a second copy. The VS Code extension reads `aggregate_score`/`aggregate_grade` straight from JSON for any response scoped to one file (every on-save analysis) rather than recomputing them; it only falls back to a local, explicitly-labeled mirror of this exact formula for files whose score arrived only via a multi-file `analyzeWorkspace` scan.
 
 - **`analysis/`** — One module per analysis pass:
   - `padding` — re-exports `ir::find_padding`
@@ -160,6 +160,16 @@ Proc-macro crate (`proc-macro = true`). No runtime dependency on any padlock cra
 - **`#[assert_size(N)]`** — Attribute macro that asserts `size_of::<Struct>() == N`. Fails at compile time if the struct grows (e.g. from a field addition) or shrinks unexpectedly.
 
 Both macros pass through the struct definition unchanged — they only append a hidden `const` item.
+
+---
+
+### `padlock-lsp`
+
+A standalone `padlock-lsp` binary implementing the Language Server Protocol, for editors without a bespoke padlock integration (Neovim, Helix, Zed, JetBrains via LSP4IJ, Sublime via LSP, etc.). The VS Code extension does not use this — it shells out to the `padlock` CLI directly and has its own diagnostics/hover rendering.
+
+- **`main.rs`** — Synchronous `lsp-server`/`lsp-types` main loop (no async runtime). Supports `initialize` (capabilities: full-document `textDocumentSync`, `hoverProvider`), `textDocument/didOpen`, `didChange` (full-sync — the last `contentChanges` entry carries the whole document), `didSave`, `didClose`, `textDocument/hover`, and `shutdown`/`exit`. Calls `padlock_source::parse_source_str` directly, in-process, on the live buffer text — no subprocess, no disk write, so results reflect unsaved edits immediately. Per-document `StructReport` results are cached in a `HashMap<String, Vec<StructReport>>` keyed by the URI's string form (not `lsp_types::Uri` itself — `fluent_uri::Uri`'s internal `Cell` trips clippy's `mutable_key_type` lint even though its `Hash`/`Eq` are stably derived from `as_str()`). `main()` explicitly `drop(connection)` before `io_threads.join()`: the stdout writer thread only exits once every sender is dropped, so joining while `connection` (and its live sender) is still in scope deadlocks on `exit`.
+- **`analysis.rs`** — `analyze_text(text, lang, arch) -> Report` wraps `parse_source_str` + `Report::from_layouts`; a parse error (normal mid-edit, e.g. unbalanced braces while typing) yields an empty report rather than propagating an error, so diagnostics just go quiet until the buffer parses again.
+- Binary analysis (DWARF/BTF/PDB) and workspace-wide analysis are intentionally out of scope — the CLI already covers those, and this server's job is live single-document editing feedback.
 
 ---
 

@@ -11,6 +11,8 @@ cargo test
 
 Requires Rust 1.88+.
 
+If you'll be merging branches that touch `editors/vscode/package-lock.json` locally, install the npm merge driver once so lockfile conflicts resolve automatically instead of by hand: `npx npm-merge-driver install`.
+
 ## Commit workflow
 
 Every commit must pass before it lands:

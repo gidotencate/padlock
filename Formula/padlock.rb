@@ -28,6 +28,8 @@ class Padlock < Formula
 
   def install
     bin.install "padlock"
+    bin.install "cargo-padlock"
+    bin.install "padlock-lsp"
   end
 
   test do

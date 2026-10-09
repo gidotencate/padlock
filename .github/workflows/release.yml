@@ -108,3 +108,38 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: padlock-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive }}
+
+  # Builds the VS Code extension .vsix and attaches it to the GitHub release
+  # as a downloadable asset. This does NOT publish to the Marketplace —
+  # `vsce publish` needs an Azure DevOps PAT, and PAT-based publishing is
+  # currently broken on the Marketplace side (Azure AD auth rejects it).
+  # Until that's fixed upstream, publish manually: download the .vsix from
+  # this release and upload it through the Marketplace web UI at
+  # https://marketplace.visualstudio.com/manage (Edit extension → Update →
+  # browse to the .vsix) — that path doesn't need a PAT. See
+  # docs/publishing.md for the full manual publish steps.
+  build-vscode-extension:
+    name: Build VS Code extension (.vsix)
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install and package
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npm run compile
+          npx vsce package --out padlock-${{ env.RELEASE_TAG }}.vsix
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: editors/vscode/padlock-${{ env.RELEASE_TAG }}.vsix

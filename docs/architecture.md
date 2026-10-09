@@ -163,6 +163,16 @@ Both macros pass through the struct definition unchanged — they only append a 
 
 ---
 
+### `padlock-lsp`
+
+A standalone `padlock-lsp` binary implementing the Language Server Protocol, for editors without a bespoke padlock integration (Neovim, Helix, Zed, JetBrains via LSP4IJ, Sublime via LSP, etc.). The VS Code extension does not use this — it shells out to the `padlock` CLI directly and has its own diagnostics/hover rendering.
+
+- **`main.rs`** — Synchronous `lsp-server`/`lsp-types` main loop (no async runtime). Supports `initialize` (capabilities: full-document `textDocumentSync`, `hoverProvider`), `textDocument/didOpen`, `didChange` (full-sync — the last `contentChanges` entry carries the whole document), `didSave`, `didClose`, `textDocument/hover`, and `shutdown`/`exit`. Calls `padlock_source::parse_source_str` directly, in-process, on the live buffer text — no subprocess, no disk write, so results reflect unsaved edits immediately. Per-document `StructReport` results are cached in a `HashMap<String, Vec<StructReport>>` keyed by the URI's string form (not `lsp_types::Uri` itself — `fluent_uri::Uri`'s internal `Cell` trips clippy's `mutable_key_type` lint even though its `Hash`/`Eq` are stably derived from `as_str()`). `main()` explicitly `drop(connection)` before `io_threads.join()`: the stdout writer thread only exits once every sender is dropped, so joining while `connection` (and its live sender) is still in scope deadlocks on `exit`.
+- **`analysis.rs`** — `analyze_text(text, lang, arch) -> Report` wraps `parse_source_str` + `Report::from_layouts`; a parse error (normal mid-edit, e.g. unbalanced braces while typing) yields an empty report rather than propagating an error, so diagnostics just go quiet until the buffer parses again.
+- Binary analysis (DWARF/BTF/PDB) and workspace-wide analysis are intentionally out of scope — the CLI already covers those, and this server's job is live single-document editing feedback.
+
+---
+
 ## Key Design Decisions
 
 ### `&'static ArchConfig`

@@ -76,6 +76,7 @@ cargo publish -p padlock-source
 cargo publish -p padlock-output
 cargo publish -p padlock-macros   # proc-macro crate; no runtime deps on other crates
 cargo publish -p padlock-cli      # installs the `padlock` and `cargo-padlock` binaries
+cargo publish -p padlock-lsp      # installs the `padlock-lsp` language server binary
 ```
 
 Wait ~30 seconds between each to let the registry index propagate. The `cargo-padlock` binary is part of `padlock-cli` and is published alongside it automatically.
@@ -259,6 +260,13 @@ npx vsce publish --pat <your-pat>
 The extension is listed at:
 `https://marketplace.visualstudio.com/items?itemName=gidotencate.padlock`
 
+**PAT-based publishing is currently broken** — the Marketplace's Azure DevOps PAT auth is rejecting valid tokens (an Azure AD issue on Microsoft's side, not ours), and Azure DevOps organization/PAT setup is not available to work around it at the moment. Until that's fixed upstream, `release.yml` builds and attaches the `.vsix` to the GitHub release automatically (see the `build-vscode-extension` job) but does **not** run `vsce publish`. Publish manually instead:
+
+1. Download the `.vsix` from the tagged GitHub release (or build it locally: `cd editors/vscode && npm ci && npm run compile && npx vsce package`).
+2. Go to the [Marketplace publisher dashboard](https://marketplace.visualstudio.com/manage) → padlock → **Update** → upload the `.vsix` file directly through the web UI. This path authenticates via your browser session, not a PAT, so it works even while PAT auth is down.
+
+Re-check whether PAT auth has been fixed before assuming it still needs the manual path — if it has, re-add a `vsce publish --pat ${{ secrets.VSCE_PAT }}` step to the `build-vscode-extension` job.
+
 ### Open VSX Registry (optional — for VSCodium / Eclipse Theia users)
 
 ```bash
@@ -289,7 +297,9 @@ git push -u origin feat/your-branch
 git checkout main && git pull
 git tag -a vX.Y.Z -m "vX.Y.Z — <one-line summary>"
 git push origin vX.Y.Z
-# The release.yml GitHub Action triggers on the tag and builds platform binaries
+# The release.yml GitHub Action triggers on the tag, builds platform binaries
+# (including padlock-lsp), and builds + attaches the .vsix — it does NOT
+# publish the .vsix to the Marketplace (PAT auth is currently broken there).
 
 # 5. Publish crates (wait ~30s between each for index propagation)
 cargo publish -p padlock-core
@@ -298,8 +308,11 @@ cargo publish -p padlock-dwarf
 cargo publish -p padlock-source
 cargo publish -p padlock-output
 cargo publish -p padlock-cli
+cargo publish -p padlock-lsp
 
-# 6. Publish VS Code extension
-cd editors/vscode
-npx vsce publish --pat <your-pat>
+# 6. Publish VS Code extension — manual while PAT auth is broken:
+# download the .vsix from the GitHub release and upload it through
+# https://marketplace.visualstudio.com/manage (see "Publish to the VS Code
+# Marketplace" above). Once PAT auth works again, this step becomes:
+#   cd editors/vscode && npx vsce publish --pat <your-pat>
 ```

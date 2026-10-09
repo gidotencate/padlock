@@ -83,17 +83,17 @@ jobs:
 
       - name: Build (native)
         if: '!matrix.cross'
-        run: cargo build --release --target ${{ matrix.target }} -p padlock-cli
+        run: cargo build --release --target ${{ matrix.target }} -p padlock-cli -p padlock-lsp
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} -p padlock-cli
+        run: cross build --release --target ${{ matrix.target }} -p padlock-cli -p padlock-lsp
 
       - name: Package (Unix tar.gz)
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf padlock-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz padlock cargo-padlock
+          tar czf padlock-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz padlock cargo-padlock padlock-lsp
           mv padlock-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz $GITHUB_WORKSPACE/
 
       - name: Package (Windows zip)
@@ -101,7 +101,7 @@ jobs:
         shell: pwsh
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path padlock.exe, cargo-padlock.exe -DestinationPath $env:GITHUB_WORKSPACE/padlock-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip
+          Compress-Archive -Path padlock.exe, cargo-padlock.exe, padlock-lsp.exe -DestinationPath $env:GITHUB_WORKSPACE/padlock-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v3

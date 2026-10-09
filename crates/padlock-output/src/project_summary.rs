@@ -24,20 +24,11 @@ pub fn render_summary(input: &SummaryInput<'_>) -> String {
     }
 
     // ── aggregate score (weighted by struct size) ──────────────────────────────
-    let total_weight: f64 = report
-        .structs
-        .iter()
-        .map(|s| s.total_size as f64)
-        .sum::<f64>()
-        .max(1.0);
-    let weighted_score: f64 = report
-        .structs
-        .iter()
-        .map(|s| s.score * s.total_size as f64)
-        .sum::<f64>()
-        / total_weight;
-    let score_int = weighted_score.round() as usize;
-    let grade = letter_grade(score_int);
+    // Computed once in Report::from_layouts (padlock-core) — this is the only
+    // place the formula and grade thresholds are defined; the JSON output's
+    // `aggregate_score`/`aggregate_grade` fields come from the same values.
+    let score_int = report.aggregate_score.round() as usize;
+    let grade = report.aggregate_grade;
 
     // ── severity counts ────────────────────────────────────────────────────────
     let mut n_high = 0usize;
@@ -259,16 +250,6 @@ fn skipped_breakdown(skipped: &[SkippedStruct]) -> String {
         .join(", ")
 }
 
-fn letter_grade(score: usize) -> &'static str {
-    match score {
-        90..=100 => "A",
-        80..=89 => "B",
-        70..=79 => "C",
-        60..=69 => "D",
-        _ => "F",
-    }
-}
-
 fn severity_rank(s: &Severity) -> u8 {
     match s {
         Severity::Low => 1,
@@ -380,19 +361,5 @@ mod tests {
             top: 5,
         });
         assert!(out.contains("No structs"));
-    }
-
-    #[test]
-    fn letter_grade_boundaries() {
-        assert_eq!(letter_grade(100), "A");
-        assert_eq!(letter_grade(90), "A");
-        assert_eq!(letter_grade(89), "B");
-        assert_eq!(letter_grade(80), "B");
-        assert_eq!(letter_grade(79), "C");
-        assert_eq!(letter_grade(70), "C");
-        assert_eq!(letter_grade(69), "D");
-        assert_eq!(letter_grade(60), "D");
-        assert_eq!(letter_grade(59), "F");
-        assert_eq!(letter_grade(0), "F");
     }
 }

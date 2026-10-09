@@ -276,7 +276,7 @@ checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -793,7 +793,7 @@ checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
 
 [[package]]
 name = "padlock-cli"
-version = "0.10.10"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-core"
-version = "0.10.10"
+version = "0.11.0"
 dependencies = [
  "rayon",
  "serde",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-dwarf"
-version = "0.10.10"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "gimli",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-lsp"
-version = "0.10.10"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "lsp-server",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-macros"
-version = "0.10.10"
+version = "0.11.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-output"
-version = "0.10.10"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "padlock-core",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-source"
-version = "0.10.10"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "padlock-core",
@@ -1165,7 +1165,7 @@ checksum = "8d3b1629de253c70a0508c3899572da79ca359fdab27c7920ff00406df418906"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1252,7 +1252,7 @@ checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1807,7 +1807,7 @@ checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.6",
  "synstructure",
 ]
 
@@ -1828,7 +1828,7 @@ checksum = "f75b4683f6c7f45248d4d64056a24298c6281e0993356d7d1b4a1a962ef10d4a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.6",
  "synstructure",
 ]
 
@@ -1862,7 +1862,7 @@ checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.6",
 ]
 
 [[package]]

@@ -317,11 +317,16 @@ mod tests {
 
     #[test]
     fn uri_to_path_roundtrips_a_file_uri() {
-        let uri = Uri::from_str("file:///tmp/foo.c").unwrap();
-        assert_eq!(
-            uri_to_path(&uri),
-            Some(std::path::PathBuf::from("/tmp/foo.c"))
-        );
+        // `url::Url::to_file_path()` requires a drive letter on Windows and
+        // a root-relative path on Unix — a real editor always sends the
+        // platform-appropriate form, so the test must too.
+        #[cfg(windows)]
+        let (uri_str, expected) = ("file:///C:/tmp/foo.c", "C:\\tmp\\foo.c");
+        #[cfg(not(windows))]
+        let (uri_str, expected) = ("file:///tmp/foo.c", "/tmp/foo.c");
+
+        let uri = Uri::from_str(uri_str).unwrap();
+        assert_eq!(uri_to_path(&uri), Some(std::path::PathBuf::from(expected)));
     }
 
     #[test]

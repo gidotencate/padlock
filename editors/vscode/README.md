@@ -45,6 +45,10 @@ When a `ReorderSuggestion` diagnostic is active, the lightbulb (⚡) menu offers
 - **Preview reorder of `StructName` (padlock)** — opens the diff editor scoped to just that struct before applying.
 - **Fix all reorder suggestions in file — preview (padlock)** — opens the diff editor showing every reordering in the file before applying.
 
+### CodeLens and line highlighting
+
+Each struct's declaration line gets a clickable CodeLens showing `padlock: score N · MB wasted` — click it to apply the reorder fix directly when one exists (same effect as the lightbulb's "Reorder" action, without opening the menu). The declaration line itself is also given a subtle background tint, red for a struct with a High-severity finding and amber for Medium, so problem structs are visible while scrolling without opening the Problems panel.
+
 ## Requirements
 
 padlock must be installed and on your `PATH`.

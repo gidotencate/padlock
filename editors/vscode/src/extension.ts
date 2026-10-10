@@ -64,6 +64,16 @@ let fileAggregateCache = new Map<string, { score: number; grade: string }>();
 const PREVIEW_SCHEME = "padlock-preview";
 const previewContentMap = new Map<string, string>();
 
+/** Background highlight for a struct's declaration line, tinted by its
+ *  worst finding's severity — created in `activate()` since the color
+ *  theme kind isn't known until then. */
+let highDecoration: vscode.TextEditorDecorationType;
+let mediumDecoration: vscode.TextEditorDecorationType;
+
+/** Fires when `fileStructCache` changes, so the CodeLens provider knows to
+ *  re-request lenses instead of serving stale ones. */
+const codeLensEmitter = new vscode.EventEmitter<void>();
+
 const DEBOUNCE_MS = 600;
 const SUPPORTED_LANGS = ["rust", "c", "cpp", "go", "zig"];
 
@@ -81,6 +91,25 @@ export function activate(context: vscode.ExtensionContext): void {
   statusBarItem.command = "padlock.analyzeFile";
   statusBarItem.tooltip = "padlock struct layout · click to re-analyse";
 
+  // Struct-declaration-line highlights, tinted by worst finding severity.
+  // Separate light/dark RGBA (not a hardcoded single color, and not a
+  // theme-color token whose existence/semantics aren't guaranteed) is the
+  // documented way to keep a custom decoration legible in both themes.
+  highDecoration = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true,
+    light: { backgroundColor: "rgba(220, 50, 47, 0.12)" },
+    dark: { backgroundColor: "rgba(255, 110, 110, 0.14)" },
+    overviewRulerColor: "rgba(220, 50, 47, 0.8)",
+    overviewRulerLane: vscode.OverviewRulerLane.Right,
+  });
+  mediumDecoration = vscode.window.createTextEditorDecorationType({
+    isWholeLine: true,
+    light: { backgroundColor: "rgba(181, 137, 0, 0.12)" },
+    dark: { backgroundColor: "rgba(255, 200, 80, 0.12)" },
+    overviewRulerColor: "rgba(181, 137, 0, 0.8)",
+    overviewRulerLane: vscode.OverviewRulerLane.Right,
+  });
+
   // Content provider that serves fixed-file content for the diff editor
   const contentProvider: vscode.TextDocumentContentProvider = {
     provideTextDocumentContent(uri: vscode.Uri): string {
@@ -91,6 +120,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     diagnosticCollection,
     statusBarItem,
+    highDecoration,
+    mediumDecoration,
+    codeLensEmitter,
     vscode.workspace.registerTextDocumentContentProvider(
       PREVIEW_SCHEME,
       contentProvider,
@@ -159,6 +191,8 @@ export function activate(context: vscode.ExtensionContext): void {
       fileStructCache.clear();
       fileAggregateCache.clear();
       updateStatusBar(vscode.window.activeTextEditor?.document);
+      updateDecorations(vscode.window.activeTextEditor);
+      codeLensEmitter.fire();
     }),
 
     // ── Hover provider ────────────────────────────────────────────────────────
@@ -188,6 +222,15 @@ export function activate(context: vscode.ExtensionContext): void {
       { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
     ),
 
+    // ── CodeLens (clickable score line above each struct) ─────────────────────
+
+    vscode.languages.registerCodeLensProvider(SUPPORTED_LANGS, {
+      onDidChangeCodeLenses: codeLensEmitter.event,
+      provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+        return buildCodeLenses(document);
+      },
+    }),
+
     // ── Run on save ───────────────────────────────────────────────────────────
 
     vscode.workspace.onDidSaveTextDocument((doc) => {
@@ -201,9 +244,12 @@ export function activate(context: vscode.ExtensionContext): void {
       scheduleAnalysis(doc.uri.fsPath);
     }),
 
-    // Update status bar when the active editor changes
+    // Update status bar and line decorations when the active editor changes
+    // (decorations are per-editor, not per-document, so switching tabs back
+    // to an already-analyzed file needs them re-applied)
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       updateStatusBar(editor?.document);
+      updateDecorations(editor);
     }),
 
     // Clean up per-file state when a file is closed
@@ -572,6 +618,75 @@ function buildCodeActions(
   return actions;
 }
 
+// ── CodeLens (clickable score line above each struct) ─────────────────────────
+
+function buildCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+  const structs = fileStructCache.get(document.uri.toString()) ?? [];
+  const lenses: vscode.CodeLens[] = [];
+
+  for (const s of structs) {
+    if (!s.source_line) {
+      continue;
+    }
+    const line = s.source_line - 1; // 0-based
+    if (line < 0 || line >= document.lineCount) {
+      continue;
+    }
+    const range = new vscode.Range(line, 0, line, 0);
+    const hasReorder = s.findings.some((f) => f.kind === "ReorderSuggestion");
+
+    const title =
+      s.wasted_bytes > 0
+        ? `padlock: score ${Math.round(s.score)} · ${s.wasted_bytes}B wasted${hasReorder ? " — click to fix" : ""}`
+        : `padlock: score ${Math.round(s.score)} · no waste`;
+
+    const lens = new vscode.CodeLens(range);
+    lens.command = hasReorder
+      ? {
+          command: "padlock.fixStruct",
+          title,
+          arguments: [document.uri.fsPath, `^${escapeRegex(s.struct_name)}$`],
+        }
+      : {
+          command: "",
+          title,
+        };
+    lenses.push(lens);
+  }
+
+  return lenses;
+}
+
+// ── Severity-tinted struct-line decorations ────────────────────────────────────
+
+function updateDecorations(editor: vscode.TextEditor | undefined): void {
+  if (!editor || !isSupportedFile(editor.document.fileName)) {
+    return;
+  }
+  const structs = fileStructCache.get(editor.document.uri.toString()) ?? [];
+  const highRanges: vscode.Range[] = [];
+  const mediumRanges: vscode.Range[] = [];
+
+  for (const s of structs) {
+    if (!s.source_line || s.findings.length === 0) {
+      continue;
+    }
+    const line = s.source_line - 1;
+    if (line < 0 || line >= editor.document.lineCount) {
+      continue;
+    }
+    const range = editor.document.lineAt(line).range;
+    if (s.findings.some((f) => f.severity === "High")) {
+      highRanges.push(range);
+    } else if (s.findings.some((f) => f.severity === "Medium")) {
+      mediumRanges.push(range);
+    }
+  }
+
+  editor.setDecorations(highDecoration, highRanges);
+  editor.setDecorations(mediumDecoration, mediumRanges);
+}
+
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 function updateStatusBar(doc: vscode.TextDocument | undefined): void {
@@ -740,8 +855,10 @@ function applyDiagnostics(jsonOutput: string, scopeFile?: string): void {
     });
   }
 
-  // Refresh status bar with new data
+  // Refresh status bar, line decorations, and CodeLenses with new data
   updateStatusBar(vscode.window.activeTextEditor?.document);
+  updateDecorations(vscode.window.activeTextEditor);
+  codeLensEmitter.fire();
 }
 
 function makeDiagnostic(

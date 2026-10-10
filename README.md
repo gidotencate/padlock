@@ -888,6 +888,8 @@ Requires `padlock` on your `PATH` (`cargo install padlock-cli`).
 - **Hover** — hover over a struct definition line to see score bar, wasted bytes, and each finding.
 - **Quick-fix lightbulb** — `ReorderSuggestion` diagnostics offer an in-place fix for the struct or a diff-preview fix for the whole file.
 - **`padlock: Fix all (preview)`** — opens the VS Code diff editor before writing any changes; saves a `.bak` backup on apply.
+- **CodeLens** — a clickable `padlock: score N · MB wasted` line above each struct's declaration; click to apply the reorder fix directly (when one exists).
+- **Line highlight** — each struct's declaration line gets a subtle background tint (red for a High finding, amber for Medium) so problem structs stand out while scrolling, without needing to read the Problems panel.
 
 See [editors/vscode/README.md](editors/vscode/README.md) for the full extension documentation.
 

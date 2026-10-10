@@ -13,6 +13,7 @@ All notable changes to padlock are documented here.
 ### Fixed
 - **`padlock-cli`/`padlock-lsp` crates.io packages shipped the wrong README**: both inherited `readme.workspace = true`, which resolves to the root `README.md` — two directories outside the crate's own package root, so `cargo package` silently falls back to whatever stray `README.md` happens to sit in the crate directory instead (a year-old stub for `padlock-cli`; nothing at all for `padlock-lsp`). Both now point `readme` at an in-package file; `padlock-lsp` got one. This fix lands in `0.14.0` — the `0.13.0` package already published to crates.io still has the stale README; crates.io versions are immutable, so it can't be corrected in place.
 - **`collect_layouts` silently dropped duplicate-line structs**: the final dedup pass keyed on `(source_file, source_line)` only, so two distinct C++ template instantiations declared on the same line (same template, different `padlock:instantiate` args) collapsed into one. Dedup key now includes the struct name.
+- **VS Code extension: stale status bar tooltip**: the "not yet analyzed" branch reset the status bar's visible text but not its tooltip, so hovering over it could show a real score/finding count left over from a previous update while the text itself already read the neutral `padlock` state — misleadingly implying the file had been analyzed when it hadn't.
 
 ## [0.13.0] — 2026-10-10
 

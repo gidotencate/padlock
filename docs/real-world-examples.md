@@ -13,6 +13,7 @@ padlock run against popular open-source projects — all findings reflect declar
 | [Go net + database](https://pkg.go.dev) | Go | stdlib 1.22 | 607 | 1 236B | 86/100 B | `sql.DB` — false sharing, score 53; 7–25× improvement under concurrent load | Fix pending² |
 | [grpc-go](https://github.com/grpc/grpc-go) | Go | latest | — | — | — | 4 structs fixed — 72B saved/RPC, false sharing eliminated on `mu` | All merged³ |
 | Linux kernel `net/` | C | 6.x | 2 066 | 5 093B | 84/100 B | `virtio_vsock` — score 45, all 4 finding types | — |
+| [DPDK](https://www.dpdk.org) | C | 26.07.0 | 12 780 | 21 737B | 88/100 B | `rte_hash_parameters` — 23% waste, saves 8B | Limitation found⁴ |
 
 ¹ repr(Rust) structs are severity-downgraded (compiler may already reorder). Use `--hide-repr-rust` to focus on ABI-stable findings only. The per-struct average score is 91; the weighted project score is higher due to the majority of clean small structs.
 
@@ -23,6 +24,8 @@ padlock run against popular open-source projects — all findings reflect declar
 The Go stdlib score is B (86/100) across 607 structs. 71% are clean; 12% have High findings — almost all from false sharing between atomic and mutex-protected fields rather than padding waste.
 
 The Linux `net/` subsystem score is B (84/100) across 2 066 structs. 57% are clean; 12% have High findings — primarily false sharing in driver and protocol structs that have grown organically over many kernel versions.
+
+⁴ padlock silently drops `rte_mbuf`, `rte_mempool`, and `rte_eth_dev_data` — DPDK's three most-allocated structs — because tree-sitter-c misparses `struct __rte_cache_aligned rte_mbuf { ... }` as a *function definition* (`__rte_cache_aligned` read as an anonymous struct return type, `rte_mbuf` as the function name, the field list as a function body). See the DPDK section below for the full AST and why it isn't a quick fix.
 
 ---
 
@@ -438,3 +441,94 @@ $ padlock analyze kernel/rcu/tree.h --filter rcu_node
 ```
 
 The 5 false-sharing conflicts reflect the struct's role as the central node in RCU's scalable tree — multiple independent locks (`boost_mtx`, `kthread_mutex`, `exp_poll_lock`) protect different aspects of the same node and currently share cache lines. These are confirmed architectural trade-offs, not accidental bugs, but padlock surfaces them for review.
+
+---
+
+## C — DPDK 26.07.0
+
+```
+$ padlock summary dpdk/lib dpdk/drivers
+Score   88 / 100   B    12780 structs · 1777 files · 21737B wasted
+
+  🔴 High     █░░░░░░░░░░░░░░░░░░░  1063  (8%)
+  🟡 Medium   ███░░░░░░░░░░░░░░░░░  2175  (17%)
+  🔵 Low      █░░░░░░░░░░░░░░░░░░░   743  (6%)
+  ✅ Clean    █████████████░░░░░░░  8799  (69%)
+```
+
+### Known limitation — `struct __rte_cache_aligned rte_mbuf` isn't analyzed at all
+
+DPDK's three most-allocated structs — `rte_mbuf` (one per packet), `rte_mempool` (one per object pool), and `rte_eth_dev_data` (one per NIC port) — all use the same idiom: a bare macro identifier between `struct` and the tag name, expanding to a cache-line `alignas`:
+
+```c
+// lib/mbuf/rte_mbuf_core.h:475  (as written)
+struct __rte_cache_aligned rte_mbuf {
+    void *buf_addr;
+    rte_iova_t buf_iova;
+    // ... 40+ more fields
+};
+```
+
+padlock doesn't run the C preprocessor, so it sees `struct __rte_cache_aligned rte_mbuf { ... }` as a sequence of raw tokens — three identifiers in a row where tree-sitter-c's grammar only expects two (`struct TAG { ... }`). Printing the AST (`node.to_sexp()`, the standard debugging step documented in `CLAUDE.md`) shows what tree-sitter actually does with it:
+
+```
+(function_definition
+  type: (struct_specifier name: (type_identifier))   ; "struct __rte_cache_aligned" — an anonymous, bodyless struct tag
+  declarator: (identifier)                            ; "rte_mbuf" read as a function name
+  body: (compound_statement ...))                      ; the { ... } read as a function body;
+                                                        ; each field becomes a local variable declaration
+```
+
+tree-sitter-c misparses the whole declaration as a function named `rte_mbuf` returning an anonymous `struct __rte_cache_aligned`, with the field list reinterpreted as the function's body. The real `struct_specifier` node that padlock's frontend walks has a name but no `field_declaration_list` at all — `parse_struct_or_union_specifier` returns `None` immediately, and the struct is dropped silently (not even emitted as `<anonymous>` or `SkippedStruct`, since nothing told padlock a struct was even attempted here).
+
+This isn't a one-line fix like the `_Atomic(T)` or `attributed_declarator` cases documented in `CLAUDE.md`: those patch a node shape padlock's frontend actually receives. Here the real fields never reach the frontend as fields — they're buried inside a misclassified function body, with no reliable signal (short of reimplementing enough of the C grammar to recognize "bare identifier directly after `struct`, before the tag name, with a function-shaped body that contains only declarations and no statements or return") to tell this apart from an actual function that happens to have an empty-looking body. Source analysis can't reliably recover from it; binary (DWARF) analysis against a compiled DPDK build is unaffected, since the compiler has already resolved the real layout by then.
+
+### `rte_hash_parameters` — 23% waste in the hash-table creation config
+
+Every call to `rte_hash_create()` takes one of these by pointer. It has no macros or nested anonymous types — a clean, representative parse:
+
+```c
+// lib/hash/rte_hash.h:82  (as written)
+struct rte_hash_parameters {
+    const char *name;            // offset  0, 8 bytes
+    uint32_t entries;            // offset  8, 4 bytes
+    uint32_t reserved;           // offset 12, 4 bytes
+    uint32_t key_len;            // offset 16, 4 bytes
+    /* 4 bytes padding */
+    rte_hash_function hash_func; // offset 24, 8 bytes (function pointer)
+    uint32_t hash_func_init_val; // offset 32, 4 bytes
+    int socket_id;               // offset 36, 4 bytes
+    uint8_t extra_flag;          // offset 40, 1 byte
+    /* 7 bytes padding (trailing) */
+};                                // total: 48 bytes, 11 wasted (23%)
+```
+
+```
+$ padlock explain dpdk/lib/hash/rte_hash.h --filter '^rte_hash_parameters$'
+
+rte_hash_parameters  48 bytes  align=8  fields=8
+┌────────┬──────┬───────┬────┬──────────────────────────────┐
+│ offset │ size │ align │ CL │ field                        │
+├────────┼──────┼───────┼────┼──────────────────────────────┤
+│      0 │    8 │     8 │  0 │ name: char *                 │
+│      8 │    4 │     4 │  0 │ entries: uint32_t             │
+│     12 │    4 │     4 │  0 │ reserved: uint32_t            │
+│     16 │    4 │     4 │  0 │ key_len: uint32_t             │
+│     20 │    4 │     — │  0 │ <padding>                     │
+│     24 │    8 │     8 │  0 │ hash_func: rte_hash_function  │
+│     32 │    4 │     4 │  0 │ hash_func_init_val: uint32_t  │
+│     36 │    4 │     4 │  0 │ socket_id: int                │
+│     40 │    1 │     1 │  0 │ extra_flag: uint8_t           │
+│     41 │    7 │     — │  0 │ <padding> (trailing)          │
+└────────┴──────┴───────┴────┴──────────────────────────────┘
+11 bytes wasted (23%) — reorder: hash_func, name, entries, hash_func_init_val, key_len, reserved, socket_id, extra_flag → 40 bytes
+```
+
+Moving the 8-byte-aligned `hash_func` pointer ahead of the 4-byte fields removes both the mid-struct and trailing gaps:
+
+```
+[MEDIUM] Padding waste: 11B (23%) — 4B after `key_len` (offset 20), 7B after `extra_flag` (offset 41)
+[HIGH]   Reorder fields: 48B → 40B (saves 8B)
+```
+
+This struct is built once per hash table (not per lookup), so the 8B saving is about allocator sizeclass, not a per-packet hot-path win — included here because it's a clean, trustworthy parse rather than DPDK's most performance-critical path. Candidates like `rte_ring` and `rte_eth_conf` were checked and excluded from this writeup: `rte_ring`'s real fields include a `char name[RTE_RING_NAMESIZE]` array sized by a macro expression (not a literal) and `RTE_CACHE_GUARD` padding macros, both of which padlock can't resolve without a preprocessor — the 32B/5-field result it reports is a parse artifact, not the real ~192B/3-cache-line layout, so it isn't fit to publish as a finding.

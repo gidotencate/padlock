@@ -119,6 +119,8 @@ Add to `PATH` or run directly:
 export PATH="$PWD/target/release:$PATH"
 ```
 
+Building for your own machine rather than for distribution? `RUSTFLAGS="-C target-cpu=native" cargo build --release` lets the compiler use your CPU's full instruction set. Not something the released binaries (or this repo's `Cargo.toml`) can use — they're built once on CI and run on arbitrary end-user CPUs, so baking in `target-cpu=native` there would break portability.
+
 ---
 
 ## Quick Start

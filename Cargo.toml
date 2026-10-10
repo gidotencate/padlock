@@ -29,5 +29,7 @@ padlock-output = { path = "crates/padlock-output", version = "0.12.0" }
 rayon          = "1"
 
 [profile.release]
-lto   = "thin"
-strip = true
+lto           = "thin"
+strip         = true
+panic         = "abort"
+codegen-units = 1

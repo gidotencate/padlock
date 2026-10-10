@@ -7,7 +7,7 @@ repository.workspace  = true
 description           = "Language server exposing padlock's struct-layout findings as LSP diagnostics/hover"
 keywords.workspace    = true
 categories.workspace  = true
-readme.workspace       = true
+readme                 = "README.md"
 
 [[bin]]
 name = "padlock-lsp"

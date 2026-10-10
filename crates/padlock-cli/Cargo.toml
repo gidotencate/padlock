@@ -7,7 +7,7 @@ repository.workspace  = true
 description.workspace = true
 keywords.workspace    = true
 categories.workspace  = true
-readme.workspace      = true
+readme                = "README.md"
 
 [[bin]]
 name = "padlock"

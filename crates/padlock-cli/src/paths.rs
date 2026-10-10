@@ -223,12 +223,17 @@ pub fn collect_layouts(
     // Persist updated cache entries.
     cache.flush();
 
-    // Deduplicate layouts by (source_file, source_line): the same struct parsed
-    // from the same file at the same line is a duplicate.  This happens when a
-    // header is found via multiple overlapping scan paths or passed twice.
-    let mut seen: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
+    // Deduplicate layouts by (source_file, source_line, name): the same struct
+    // parsed from the same file at the same line is a duplicate.  This happens
+    // when a header is found via multiple overlapping scan paths or passed
+    // twice.  `name` is part of the key so that multiple
+    // `// padlock:instantiate(...)` instantiations of the same template
+    // declaration (same file, same line, distinct `Name<Args>`) aren't
+    // mistaken for duplicates of each other.
+    let mut seen: std::collections::HashSet<(String, u32, String)> =
+        std::collections::HashSet::new();
     all_layouts.retain(|l| match (&l.source_file, l.source_line) {
-        (Some(f), Some(line)) => seen.insert((f.clone(), line)),
+        (Some(f), Some(line)) => seen.insert((f.clone(), line, l.name.clone())),
         _ => true,
     });
 
@@ -463,6 +468,24 @@ mod tests {
         assert!(layouts.iter().any(|l| l.name == "A"));
         assert!(layouts.iter().any(|l| l.name == "B"));
         assert_eq!(analyzed.len(), 2);
+    }
+
+    #[test]
+    fn collect_layouts_keeps_distinct_instantiations_on_the_same_line() {
+        // Two `padlock:instantiate` instantiations of the same C++ template
+        // share one (source_file, source_line) but must not be collapsed by
+        // the (file, line) dedup — they're distinct structs, not duplicates.
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("vec3.cpp");
+        fs::write(
+            &file,
+            "// padlock:instantiate(float)\n// padlock:instantiate(double)\n\
+             template<typename T> struct Vector3 { T x; T y; T z; };",
+        )
+        .unwrap();
+        let (layouts, _, _skipped) = collect_layouts(&[file], false, false).unwrap();
+        assert!(layouts.iter().any(|l| l.name == "Vector3<float>"));
+        assert!(layouts.iter().any(|l| l.name == "Vector3<double>"));
     }
 
     #[test]

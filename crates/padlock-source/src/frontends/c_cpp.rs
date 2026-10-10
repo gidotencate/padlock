@@ -960,6 +960,59 @@ fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, Stri
     aliases
 }
 
+/// Extract the ordered type-parameter names from a `template_declaration`
+/// node, e.g. `template<typename T, typename U>` → `["T", "U"]`.
+///
+/// Only plain `typename T` / `class T` parameters are handled; defaulted and
+/// variadic parameters are not matched by `type_parameter_declaration` and so
+/// are silently omitted, which surfaces as an arg-count mismatch (and a
+/// skipped-instantiation note) rather than a silent miscount.
+fn template_param_names(source: &str, tpl_decl: Node<'_>) -> Vec<String> {
+    let Some(param_list) = tpl_decl.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+    (0..param_list.child_count())
+        .filter_map(|i| param_list.child(i))
+        .filter(|c| c.kind() == "type_parameter_declaration")
+        .filter_map(|c| {
+            (0..c.child_count())
+                .filter_map(|j| c.child(j))
+                .find(|gc| gc.kind() == "type_identifier")
+                .map(|gc| source[gc.byte_range()].to_string())
+        })
+        .collect()
+}
+
+/// Collect `// padlock:instantiate(Arg1, Arg2, ...)` annotation comments
+/// immediately preceding `tpl_decl` (no blank/non-comment line in between),
+/// in document order. Each line names one instantiation's concrete type
+/// arguments, positionally matched against the template's parameter list.
+fn collect_instantiate_annotations(source: &str, tpl_decl: Node<'_>) -> Vec<Vec<String>> {
+    let mut lines = Vec::new();
+    let mut current = tpl_decl.prev_sibling();
+    while let Some(c) = current {
+        if c.kind() != "comment" {
+            break;
+        }
+        let text = source[c.byte_range()].trim();
+        let text = text.strip_prefix("//").map(str::trim).unwrap_or(text);
+        if let Some(inner) = text
+            .strip_prefix("padlock:instantiate(")
+            .and_then(|s| s.strip_suffix(')'))
+        {
+            lines.push(
+                split_template_args(inner)
+                    .into_iter()
+                    .map(|a| a.trim().to_string())
+                    .collect(),
+            );
+        }
+        current = c.prev_sibling();
+    }
+    lines.reverse();
+    lines
+}
+
 fn extract_structs_from_tree(
     source: &str,
     root: Node<'_>,
@@ -1001,21 +1054,74 @@ fn extract_structs_from_tree(
         // Skip C++ template structs/classes/unions — without monomorphisation we
         // cannot know T's size, so any sizing would be wrong.  tree-sitter-cpp
         // wraps these as `template_declaration > struct_specifier` etc.
-        let in_template = node
+        //
+        // Exception: a `// padlock:instantiate(Arg1[, Arg2, ...])` comment
+        // immediately above the `template_declaration` names concrete type
+        // arguments for one instantiation. The template's own parameter names
+        // are substituted into the typedef-alias map (the same mechanism that
+        // already resolves `typedef uint32_t MyId`), so the existing field-type
+        // resolution logic sizes the instantiation exactly as if it were a
+        // concrete struct — one synthetic layout per `instantiate` line, named
+        // `Name<Arg1, Arg2>`. Multiple lines produce multiple instantiations.
+        let is_record_specifier = matches!(
+            node.kind(),
+            "struct_specifier" | "union_specifier" | "class_specifier"
+        );
+        let template_decl = node
             .parent()
-            .map(|p| p.kind() == "template_declaration")
-            .unwrap_or(false);
-        if in_template {
+            .filter(|p| is_record_specifier && p.kind() == "template_declaration");
+        if let Some(tpl_decl) = template_decl {
             let tpl_name = (0..node.child_count())
                 .filter_map(|i| node.child(i))
                 .find(|c| c.kind() == "type_identifier")
                 .map(|c| source[c.byte_range()].to_string())
                 .unwrap_or_else(|| "(unknown)".to_string());
-            crate::record_skipped(
-                &tpl_name,
-                "C++ template — layout depends on type arguments; \
-                 use binary analysis for accurate results",
-            );
+
+            let param_names = template_param_names(source, tpl_decl);
+            let instantiations = collect_instantiate_annotations(source, tpl_decl);
+
+            if instantiations.is_empty() {
+                crate::record_skipped(
+                    &tpl_name,
+                    "C++ template — layout depends on type arguments; \
+                     use binary analysis for accurate results",
+                );
+                continue;
+            }
+
+            let is_union = node.kind() == "union_specifier";
+            for args in instantiations {
+                if args.len() != param_names.len() {
+                    eprintln!(
+                        "padlock: note: skipping 'padlock:instantiate({})' for '{tpl_name}' \
+                         — expected {} type argument(s), got {}",
+                        args.join(", "),
+                        param_names.len(),
+                        args.len()
+                    );
+                    continue;
+                }
+                let mut inst_aliases = aliases.clone();
+                for (param, arg) in param_names.iter().zip(args.iter()) {
+                    inst_aliases.insert(param.clone(), arg.clone());
+                }
+                let parsed = if node.kind() == "class_specifier" {
+                    parse_class_specifier(source, node, arch, &inst_aliases, current_pack)
+                } else {
+                    parse_struct_or_union_specifier(
+                        source,
+                        node,
+                        arch,
+                        is_union,
+                        &inst_aliases,
+                        current_pack,
+                    )
+                };
+                if let Some(mut layout) = parsed {
+                    layout.name = format!("{tpl_name}<{}>", args.join(", "));
+                    layouts.push(layout);
+                }
+            }
             continue;
         }
 
@@ -3096,6 +3202,78 @@ struct Concrete { int x; double y; };
             .find(|l| l.name == "Concrete")
             .expect("Concrete must be parsed");
         assert_eq!(concrete.fields.len(), 2);
+    }
+
+    // ── `padlock:instantiate` template instantiation ──────────────────────────
+
+    #[test]
+    fn cpp_template_instantiate_single_arg() {
+        let src = "// padlock:instantiate(float)\ntemplate<typename T> struct Vector3 { T x; T y; T z; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        let v = layouts
+            .iter()
+            .find(|l| l.name == "Vector3<float>")
+            .expect("Vector3<float> must be instantiated");
+        assert_eq!(v.total_size, 12);
+        assert!(v.fields.iter().all(|f| f.size == 4));
+    }
+
+    #[test]
+    fn cpp_template_instantiate_multiple_lines_produce_multiple_layouts() {
+        let src = "// padlock:instantiate(float)\n// padlock:instantiate(double)\n\
+                   template<typename T> struct Vector3 { T x; bool flag; T y; T z; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        let f = layouts
+            .iter()
+            .find(|l| l.name == "Vector3<float>")
+            .expect("Vector3<float> must be instantiated");
+        let d = layouts
+            .iter()
+            .find(|l| l.name == "Vector3<double>")
+            .expect("Vector3<double> must be instantiated");
+        // Verified against a real g++ -g compile of the same instantiations.
+        assert_eq!(f.total_size, 16);
+        assert_eq!(d.total_size, 32);
+        assert!(
+            layouts.iter().all(|l| l.name != "Vector3"),
+            "the unresolved template name itself must not appear as a layout"
+        );
+    }
+
+    #[test]
+    fn cpp_template_instantiate_multi_param() {
+        let src = "// padlock:instantiate(int, double)\n\
+                   template<typename T, typename U> struct Pair { T first; U second; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        let p = layouts
+            .iter()
+            .find(|l| l.name == "Pair<int, double>")
+            .expect("Pair<int, double> must be instantiated");
+        let first = p.fields.iter().find(|f| f.name == "first").unwrap();
+        let second = p.fields.iter().find(|f| f.name == "second").unwrap();
+        assert_eq!(first.size, 4);
+        assert_eq!(second.size, 8);
+    }
+
+    #[test]
+    fn cpp_template_instantiate_arg_count_mismatch_is_skipped_not_wrong() {
+        // One type argument for a two-parameter template: must not silently
+        // substitute a wrong/partial mapping.
+        let src = "// padlock:instantiate(int)\n\
+                   template<typename T, typename U> struct Pair { T first; U second; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        assert!(
+            layouts.iter().all(|l| !l.name.starts_with("Pair")),
+            "mismatched arg count must not produce any Pair instantiation"
+        );
+    }
+
+    #[test]
+    fn cpp_template_without_instantiate_annotation_is_still_skipped() {
+        // No annotation present: existing skip behaviour must be unchanged.
+        let src = "template<typename T> struct Wrapper { T value; };";
+        let layouts = parse_cpp(src, &X86_64_SYSV).unwrap();
+        assert!(layouts.iter().all(|l| !l.name.starts_with("Wrapper")));
     }
 
     // ── _Atomic qualifier and type-specifier form ─────────────────────────────

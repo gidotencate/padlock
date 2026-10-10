@@ -291,6 +291,20 @@ $ padlock diff src/models.rs
  }
 ```
 
+### `padlock diff <path>… --against <git-ref> [--filter PATTERN]`
+
+A different comparison: struct layout at a given git ref vs the current working tree, not declared-vs-optimal order. Catches ABI-relevant changes a plain source diff wouldn't call out — a reordered field, a new member, a size/alignment shift — useful as a pre-merge check on `#[repr(C)]`/`extern` structs shared across an FFI boundary.
+
+```
+$ padlock diff src/wire.rs --against main
+
+~ Header  8B -> 12B  (waste 0B -> 3B, score 100 -> 72)
++ Footer  (new — 4B, score 100)
+- LegacyTrailer  (removed — was 2B, score 100)
+```
+
+Requires the paths to be inside a git repository; `git_ref` is resolved via `git show <ref>:<path>`, so any ref `git` accepts (branch, tag, commit SHA, `HEAD~N`) works. A file that doesn't exist at `git_ref` is treated as new — every struct in it shows as added, not as an error.
+
 ---
 
 ### `padlock fix <path>… [--dry-run] [--backup] [--filter PATTERN]`
@@ -962,11 +976,28 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | Case | Action | Accurate alternative |
 |---|---|---|
 | C/C++ structs with bit-field members | Parsed — consecutive bitfields of the same storage-unit type are grouped into a synthetic field (`[a:3\|b:5]`); MSVC mixed-type packing not modelled | Binary (DWARF) analysis for compiler-accurate bit offsets |
-| C++ template structs/classes/unions (`template<typename T> struct Foo`) | Skipped — note printed to stderr | Binary analysis; or analyse concrete instantiations |
+| C++ template structs/classes/unions (`template<typename T> struct Foo`) | Skipped — note printed to stderr, unless a `// padlock:instantiate(Args...)` annotation names concrete type arguments (see below) | Binary analysis; or analyse concrete instantiations |
 | Rust generic struct definitions (`struct Foo<T>`) | Skipped — note printed to stderr | Binary analysis; or analyse concrete monomorphizations |
 | Rust structs with only lifetime parameters (`struct Cache<'a>`) | Analyzed normally — lifetime params do not affect layout | — |
 | Go generic structs (`type Pair[T any] struct`) | Skipped — note printed to stderr | Binary analysis |
 | Forward-declared / incomplete structs | Skipped | Binary analysis |
+
+### Analyzing specific C++ template instantiations
+
+A bare `template<typename T> struct Foo { T x; };` can't be sized — `T`'s size is unknown until it's instantiated. For a known, fixed set of instantiations (the common case for perf-sensitive template value types: SIMD/math vector types, intrusive container nodes, fixed-point types), name the concrete type arguments directly above the template with a `// padlock:instantiate(...)` comment — one line per desired instantiation:
+
+```cpp
+// padlock:instantiate(float)
+// padlock:instantiate(double)
+template<typename T>
+struct Vector3 {
+    T x, y, z;
+};
+```
+
+produces two analyzed structs, `Vector3<float>` and `Vector3<double>`, each sized by substituting the concrete type for `T` and otherwise using padlock's normal field-layout logic — verified to match a real `g++ -g` compile bit-for-bit for ordinary aggregate types. For a multi-parameter template, list the arguments positionally: `// padlock:instantiate(int, double)` for `template<typename T, typename U>` maps `T → int, U → double`.
+
+This substitution is textual, not a real template instantiator: it does not understand partial specializations, SFINAE/`enable_if`-conditional members, or variadic parameters. For an ordinary "struct holds some `T`s" template it's exact; for template metaprogramming where the compiler would pick a different specialization than the primary template body, it can be wrong. When in doubt, cross-check against binary analysis.
 
 ### Known remaining limitations (source analysis)
 

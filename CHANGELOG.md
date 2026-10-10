@@ -2,6 +2,17 @@
 
 All notable changes to padlock are documented here.
 
+## [0.12.0] — 2026-10-10
+
+### Added
+- **`padlock-lsp` code actions**: quick-fix reorder support — "Reorder `Name` fields" for the struct at the requested range, and "fix all reorder suggestions in file" when more than one struct needs it. Reuses `padlock_source::fixgen::apply_fixes_*` (the same functions the CLI's `fix` command uses) on the cached live buffer text; no subprocess, no disk write. Returns a whole-document `WorkspaceEdit`, matching the VS Code extension's own whole-document-replace approach.
+
+### Changed
+- **`padlock-lsp` per-document cache** now holds the live buffer text and detected language alongside the analysis results (`DocState { text, lang, structs }`), not just the scored `StructReport`s — needed so code actions can produce a fix without re-requesting the document from the client.
+
+### Dependencies
+- `gimli` 0.29 → 0.34. `attr_value()`/`attr()` dropped their `Result` wrapper (now plain `Option`); `next_dfs()`/`next_sibling()` dropped the depth-delta from their return type. Both are mechanical signature changes with no logic impact — verified against the existing 17 extractor unit tests (unchanged) plus real compiled binaries (padded struct, bitfield struct, C++ single inheritance) producing identical results to before the bump. Benefits: overflow checks on LEB128/indexed-offset decoding (padlock's own bitfield-offset logic decodes exactly these forms) and faster LEB128/debug-line parsing.
+
 ## [0.11.0] — 2026-10-10
 
 ### Added

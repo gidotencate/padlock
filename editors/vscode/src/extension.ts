@@ -295,7 +295,11 @@ function analyzeFile(filePath: string): void {
     statusBarItem.show();
   }
 
-  runCommand(exe, ["analyze", "--json", filePath, ...extra], filePath)
+  // --no-cache: a single-file on-save analysis never benefits from
+  // .padlock-cache (every call re-analyzes exactly the one file that just
+  // changed), so writing it is pure overhead and leaves a stray cache
+  // directory in every folder a file was ever saved in.
+  runCommand(exe, ["analyze", "--json", "--no-cache", filePath, ...extra], filePath)
     .then((output) => applyDiagnostics(output, filePath))
     .catch((err) => {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
@@ -640,17 +644,22 @@ function buildCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
         ? `padlock: score ${Math.round(s.score)} · ${s.wasted_bytes}B wasted${hasReorder ? " — click to fix" : ""}`
         : `padlock: score ${Math.round(s.score)} · no waste`;
 
-    const lens = new vscode.CodeLens(range);
-    lens.command = hasReorder
-      ? {
-          command: "padlock.fixStruct",
-          title,
-          arguments: [document.uri.fsPath, `^${escapeRegex(s.struct_name)}$`],
-        }
-      : {
-          command: "",
-          title,
-        };
+    // A CodeLens without a `.command` is "unresolved" — VS Code shows no
+    // text at all unless the provider implements `resolveCodeLens` (this one
+    // doesn't), so every lens needs a real command, not an empty string
+    // ("" is not a no-op; VS Code tries to execute it and surfaces a
+    // "command '' not found" error on click). Structs with nothing to fix
+    // get the same re-analyze command as the status bar's own click action.
+    const lens = new vscode.CodeLens(
+      range,
+      hasReorder
+        ? {
+            command: "padlock.fixStruct",
+            title,
+            arguments: [document.uri.fsPath, `^${escapeRegex(s.struct_name)}$`],
+          }
+        : { command: "padlock.analyzeFile", title },
+    );
     lenses.push(lens);
   }
 

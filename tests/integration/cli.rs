@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use std::io::Write;
 use std::path::Path;
@@ -279,4 +280,102 @@ fn fix_filter_only_rewrites_matching_struct() {
         other_section.find("char x").unwrap() < other_section.find("double y").unwrap(),
         "Other must be untouched"
     );
+}
+
+// ── diff --against <git-ref> ───────────────────────────────────────────────────
+
+/// Set up a throwaway git repo with two commits: `s.rs` growing from
+/// `struct Foo { a: u8, b: u64 }` to also having a `c: u8` field and a new
+/// `Bar` struct. Returns the repo dir and the HEAD~1 ref string.
+fn diff_against_fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "Test"]);
+
+    std::fs::write(dir.path().join("s.rs"), "struct Foo { a: u8, b: u64 }\n").unwrap();
+    git(&["add", "s.rs"]);
+    git(&["commit", "-q", "-m", "initial"]);
+
+    std::fs::write(
+        dir.path().join("s.rs"),
+        "struct Foo { a: u8, b: u64, c: u8 }\nstruct Bar { x: u32 }\n",
+    )
+    .unwrap();
+    git(&["add", "s.rs"]);
+    git(&["commit", "-q", "-m", "add field c and Bar"]);
+
+    dir
+}
+
+#[test]
+fn diff_against_detects_size_change() {
+    let dir = diff_against_fixture();
+    padlock()
+        .args(["diff", "s.rs", "--against", "HEAD~1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(contains("Foo"))
+        .stdout(contains("16B -> 24B"));
+}
+
+#[test]
+fn diff_against_detects_new_struct() {
+    let dir = diff_against_fixture();
+    padlock()
+        .args(["diff", "s.rs", "--against", "HEAD~1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(contains("+ Bar"))
+        .stdout(contains("new"));
+}
+
+#[test]
+fn diff_against_detects_removed_struct() {
+    let dir = diff_against_fixture();
+    // Working tree (HEAD) has Bar; simulate removing it before the next commit.
+    std::fs::write(
+        dir.path().join("s.rs"),
+        "struct Foo { a: u8, b: u64, c: u8 }\n",
+    )
+    .unwrap();
+    padlock()
+        .args(["diff", "s.rs", "--against", "HEAD"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(contains("- Bar"))
+        .stdout(contains("removed"));
+}
+
+#[test]
+fn diff_against_same_ref_reports_no_changes() {
+    let dir = diff_against_fixture();
+    padlock()
+        .args(["diff", "s.rs", "--against", "HEAD"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(contains("No layout changes"));
+}
+
+#[test]
+fn diff_against_filter_narrows_to_matching_struct() {
+    let dir = diff_against_fixture();
+    padlock()
+        .args(["diff", "s.rs", "--against", "HEAD~1", "--filter", "^Bar$"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(contains("Bar"))
+        .stdout(contains("Foo").not());
 }

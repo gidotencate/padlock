@@ -118,6 +118,12 @@ enum Commands {
         /// Include only structs whose names match this regex pattern
         #[arg(long, short = 'F', value_name = "PATTERN")]
         filter: Option<String>,
+        /// Compare struct layouts between a git ref and the working tree,
+        /// instead of the default declared-vs-optimal-order diff. Catches
+        /// size/padding/score changes a plain source diff wouldn't call out
+        /// (e.g. a PR that silently changes a #[repr(C)] struct's ABI).
+        #[arg(long, value_name = "REF")]
+        against: Option<String>,
     },
 
     /// Apply automatic field reordering to source files in-place
@@ -272,7 +278,14 @@ fn main() -> anyhow::Result<()> {
 
         Commands::List { paths, filter } => commands::list::run(&paths, &filter),
 
-        Commands::Diff { paths, filter } => commands::diff::run(&paths, filter.as_deref()),
+        Commands::Diff {
+            paths,
+            filter,
+            against,
+        } => match against {
+            Some(git_ref) => commands::diff::run_against(&paths, &git_ref, filter.as_deref()),
+            None => commands::diff::run(&paths, filter.as_deref()),
+        },
 
         Commands::Fix {
             paths,

@@ -379,3 +379,23 @@ fn diff_against_filter_narrows_to_matching_struct() {
         .stdout(contains("Bar"))
         .stdout(contains("Foo").not());
 }
+
+#[test]
+fn diff_against_resolves_repo_root_from_target_path_not_process_cwd() {
+    // Regression test: git_repo_root() must anchor on the analyzed file's
+    // own directory, not wherever the padlock process happens to be
+    // invoked from. Using an absolute path to the target file while cwd is
+    // set to a *different*, unrelated directory reproduces the real-world
+    // case (e.g. an editor running padlock with its own cwd).
+    let dir = diff_against_fixture();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let abs_file = dir.path().join("s.rs").canonicalize().unwrap();
+
+    padlock()
+        .args(["diff", abs_file.to_str().unwrap(), "--against", "HEAD~1"])
+        .current_dir(outside_dir.path())
+        .assert()
+        .success()
+        .stdout(contains("16B -> 24B"))
+        .stdout(contains("+ Foo").not());
+}

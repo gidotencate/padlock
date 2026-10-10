@@ -78,7 +78,24 @@ pub fn run_against(paths: &[PathBuf], git_ref: &str, filter: Option<&str>) -> an
         })
         .transpose()?;
 
-    let repo_root = git_repo_root()?;
+    // Resolve relative to the analyzed path's own directory, not the CLI
+    // process's cwd — otherwise running `padlock diff ... --against` from
+    // outside the target repo silently resolves the wrong repo (or none),
+    // `git show` fails for every file, and every struct is misreported as
+    // newly added instead of its real size/score change.
+    let anchor = paths
+        .first()
+        .map(|p| {
+            if p.is_dir() {
+                p.clone()
+            } else {
+                p.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."))
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+    let repo_root = git_repo_root(&anchor)?;
     let source_files = expand_to_source_files(paths)?;
     let arch = padlock_dwarf::reader::detect_arch_from_host();
 
@@ -182,8 +199,10 @@ pub fn run_against(paths: &[PathBuf], git_ref: &str, filter: Option<&str>) -> an
     Ok(())
 }
 
-fn git_repo_root() -> anyhow::Result<PathBuf> {
+fn git_repo_root(anchor: &Path) -> anyhow::Result<PathBuf> {
     let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(anchor)
         .args(["rev-parse", "--show-toplevel"])
         .output()?;
     if !output.status.success() {

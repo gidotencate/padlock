@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use padlock_core::findings::Report;
 
-use crate::config::Config;
 use crate::filter::{FailSeverity, FilterArgs};
 use crate::paths::collect_layouts;
+use padlock_core::config::Config;
 
 /// Output and arch options for the `analyze` subcommand.
 pub struct AnalyzeOpts {

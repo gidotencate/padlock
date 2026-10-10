@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 use padlock_core::findings::{Report, Severity};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
 use crate::filter::FilterArgs;
 use crate::paths::collect_layouts;
+use padlock_core::config::Config;
 
 /// Per-struct snapshot stored in the baseline file.
 #[derive(Debug, Clone, Serialize, Deserialize)]

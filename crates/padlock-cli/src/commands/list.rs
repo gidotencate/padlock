@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use comfy_table::{Cell, Table};
 use padlock_core::findings::Report;
 
-use crate::config::Config;
 use crate::filter::FilterArgs;
 use crate::paths::collect_layouts;
+use padlock_core::config::Config;
 
 pub fn run(paths: &[PathBuf], filter: &FilterArgs) -> anyhow::Result<()> {
     let cfg = Config::for_path(

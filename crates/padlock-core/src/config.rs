@@ -1,10 +1,15 @@
-// padlock-cli/src/config.rs
+// padlock-core/src/config.rs
 //
 // Reads and applies per-project configuration from `.padlock.toml`.
 //
 // padlock looks for the config file by walking up from the analysed file's
 // directory to the filesystem root, stopping at the first `.padlock.toml`
 // found. This mirrors how tools like rustfmt and clippy locate their configs.
+//
+// Lives in padlock-core (not padlock-cli) so padlock-lsp can honour the same
+// config without depending on the CLI crate — the LSP needs arch_override,
+// min_severity, and ignore for live-editing diagnostics, not the CLI's
+// clap/output machinery.
 //
 // Example `.padlock.toml`:
 //
@@ -24,7 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
-use padlock_core::findings::Severity;
+use crate::findings::Severity;
 
 const CONFIG_FILENAME: &str = ".padlock.toml";
 

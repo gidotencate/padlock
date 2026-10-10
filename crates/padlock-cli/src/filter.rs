@@ -13,7 +13,7 @@ use clap::{Args, ValueEnum};
 use padlock_core::findings::{Finding, Report, Severity};
 use padlock_core::ir::{StructLayout, find_padding};
 
-use crate::config::Config;
+use padlock_core::config::Config;
 
 /// Severity level for the `--fail-on-severity` flag.
 #[derive(Clone, ValueEnum)]

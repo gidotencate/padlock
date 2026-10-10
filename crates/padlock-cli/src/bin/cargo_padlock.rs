@@ -19,10 +19,7 @@ use std::process::Command;
 use anyhow::{Context, bail};
 use clap::Parser;
 
-// Re-use config from the library part of the crate.
-#[path = "../config.rs"]
-mod config;
-use config::Config;
+use padlock_core::config::Config;
 
 #[derive(Parser)]
 #[command(

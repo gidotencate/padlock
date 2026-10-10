@@ -77,7 +77,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Source coverage** | Header shows `N of M types, X% source coverage` when types are skipped; `< 70%` triggers a "consider binary analysis" hint |
 | **Cache-line visualization** | `padlock explain` adds a `CL` column (zero-indexed cache-line number per field/padding row) and inserts a separator row each time a field crosses into a new 64-byte (or 128-byte) cache line |
 | **VS Code extension** | Findings in the Problems panel on save, status bar health score, hover popups, quick-fix lightbulb, and diff-preview fix-all |
-| **`padlock-lsp`** | Standalone language server — diagnostics + hover for any LSP-capable editor (Neovim, Helix, Zed, JetBrains, Sublime) |
+| **`padlock-lsp`** | Standalone language server — diagnostics, hover, and reorder quick-fixes for any LSP-capable editor (Neovim, Helix, Zed, JetBrains, Sublime) |
 
 ---
 
@@ -885,7 +885,7 @@ For editors without a bespoke padlock integration, `padlock-lsp` exposes the sam
 cargo install padlock-lsp
 ```
 
-Point your editor's LSP client at the `padlock-lsp` binary for `.c`, `.cpp`, `.rs`, `.go`, and `.zig` files. It analyzes the live buffer in-process on open/change/save — no `padlock` CLI install required, and no subprocess per keystroke. Scope is diagnostics + hover only (no code actions yet); use the CLI's `fix`/`diff` commands for in-place reordering. Example Neovim setup (`nvim-lspconfig`-style, since padlock isn't a built-in config yet):
+Point your editor's LSP client at the `padlock-lsp` binary for `.c`, `.cpp`, `.rs`, `.go`, and `.zig` files. It analyzes the live buffer in-process on open/change/save — no `padlock` CLI install required, and no subprocess per keystroke. Diagnostics, hover, and quick-fix code actions (reorder one struct, or all reorderable structs in the file) — no binary/DWARF analysis or workspace-wide scan; use the CLI for those. Example Neovim setup (`nvim-lspconfig`-style, since padlock isn't a built-in config yet):
 
 ```lua
 vim.lsp.start({

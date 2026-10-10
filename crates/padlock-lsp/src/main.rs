@@ -9,10 +9,10 @@
 // buffer text) rather than shelling out to the `padlock` binary, so results
 // reflect unsaved edits immediately on `didChange`.
 //
-// Scope is intentionally narrow for a first version: diagnostics + hover for
-// the five source languages padlock-source supports. No code actions, no
-// binary (DWARF/BTF) analysis, no workspace-wide analysis — the CLI already
-// covers those, and this server's job is live-editing feedback.
+// Scope is intentionally narrow for a first version: diagnostics + hover +
+// reorder code actions for the five source languages padlock-source
+// supports. No binary (DWARF/BTF) analysis, no workspace-wide analysis — the
+// CLI already covers those, and this server's job is live-editing feedback.
 
 use std::collections::HashMap;
 
@@ -20,12 +20,16 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestI
 use lsp_types::notification::Notification as _;
 use lsp_types::request::Request as _;
 use lsp_types::{
-    Diagnostic, DiagnosticSeverity, Hover, HoverContents, HoverProviderCapability, MarkupContent,
-    MarkupKind, Position, PublishDiagnosticsParams, Range, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, Diagnostic, DiagnosticSeverity, Hover, HoverContents,
+    HoverProviderCapability, MarkupContent, MarkupKind, Position, PublishDiagnosticsParams, Range,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
+    WorkspaceEdit,
 };
 use padlock_core::arch::X86_64_SYSV;
 use padlock_core::findings::{Finding, StructReport};
+use padlock_core::ir::StructLayout;
+use padlock_source::SourceLanguage;
 
 mod analysis;
 
@@ -37,6 +41,7 @@ fn main() -> anyhow::Result<()> {
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         ..Default::default()
     };
     let initialize_params = connection.initialize(serde_json::to_value(capabilities)?)?;
@@ -53,12 +58,20 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Per-document analysis cache, keyed by URI. Holds the struct reports from
-/// the most recent analysis so the hover handler doesn't have to re-parse.
+/// Per-document state: the live buffer text (needed by code actions to
+/// produce a fix — `fixgen::apply_fixes_*` rewrites source text, it doesn't
+/// work from the IR alone) plus the most recent analysis, so hover and code
+/// actions don't have to re-run diagnostics from scratch.
+struct DocState {
+    text: String,
+    lang: SourceLanguage,
+    structs: Vec<StructReport>,
+}
+
 // Keyed by the URI's string form rather than `Uri` itself: `fluent_uri::Uri`
 // caches parsed segments in a `Cell`, which trips clippy's mutable-key-type
 // lint even though Hash/Eq are stably derived from `as_str()`.
-type DocStore = HashMap<String, Vec<StructReport>>;
+type DocStore = HashMap<String, DocState>;
 
 fn run_server(connection: &Connection) -> anyhow::Result<()> {
     let mut docs: DocStore = HashMap::new();
@@ -91,6 +104,13 @@ fn handle_request(connection: &Connection, docs: &DocStore, req: Request) -> any
             params.text_document_position_params.position,
         );
         send_response(connection, req.id, hover)?;
+        return Ok(());
+    }
+
+    if req.method == lsp_types::request::CodeActionRequest::METHOD {
+        let params: CodeActionParams = serde_json::from_value(req.params)?;
+        let actions = build_code_actions(docs, &params);
+        send_response(connection, req.id, actions)?;
         return Ok(());
     }
 
@@ -183,7 +203,14 @@ fn analyze_and_publish(
         .flat_map(diagnostics_for_struct)
         .collect::<Vec<_>>();
 
-    docs.insert(uri.as_str().to_string(), report.structs);
+    docs.insert(
+        uri.as_str().to_string(),
+        DocState {
+            text: text.to_string(),
+            lang,
+            structs: report.structs,
+        },
+    );
     publish_diagnostics(connection, uri, &diagnostics)?;
     Ok(())
 }
@@ -280,9 +307,9 @@ fn format_message(s: &StructReport, f: &Finding) -> String {
 }
 
 fn build_hover(docs: &DocStore, uri: &Uri, position: Position) -> Option<Hover> {
-    let structs = docs.get(uri.as_str())?;
+    let doc = docs.get(uri.as_str())?;
     let line = position.line + 1; // padlock's source_line is 1-based.
-    let s = structs.iter().find(|s| s.source_line == Some(line))?;
+    let s = doc.structs.iter().find(|s| s.source_line == Some(line))?;
     if s.findings.is_empty() {
         return None;
     }
@@ -306,6 +333,133 @@ fn build_hover(docs: &DocStore, uri: &Uri, position: Position) -> Option<Hover> 
     })
 }
 
+fn build_code_actions(docs: &DocStore, params: &CodeActionParams) -> Vec<CodeActionOrCommand> {
+    let uri = &params.text_document.uri;
+    let Some(doc) = docs.get(uri.as_str()) else {
+        return Vec::new();
+    };
+
+    let reorder_names: Vec<&str> = doc
+        .structs
+        .iter()
+        .filter(|s| {
+            s.findings
+                .iter()
+                .any(|f| matches!(f, Finding::ReorderSuggestion { .. }))
+        })
+        .map(|s| s.struct_name.as_str())
+        .collect();
+    if reorder_names.is_empty() {
+        return Vec::new();
+    }
+
+    // fixgen::apply_fixes_* rewrites source text from the IR, so re-parse
+    // the cached buffer rather than trying to derive layouts from the
+    // already-scored StructReport (which doesn't carry per-field IR).
+    let Ok(layouts) = padlock_source::parse_source_str(&doc.text, &doc.lang, &X86_64_SYSV) else {
+        return Vec::new();
+    };
+
+    let range_line = params.range.start.line + 1; // padlock's source_line is 1-based.
+    let in_range_struct = doc.structs.iter().find(|s| {
+        s.source_line == Some(range_line) && reorder_names.contains(&s.struct_name.as_str())
+    });
+
+    let mut actions = Vec::new();
+
+    if let Some(s) = in_range_struct
+        && let Some(layout) = layouts.iter().find(|l| l.name == s.struct_name)
+        && let Some(action) = reorder_action(
+            format!("Reorder `{}` fields (padlock)", s.struct_name),
+            uri,
+            doc,
+            &[layout],
+            true,
+        )
+    {
+        actions.push(action);
+    }
+
+    // Only offer "fix all" when there's more than one — otherwise it's a
+    // duplicate of the single-struct action above.
+    if reorder_names.len() > 1 {
+        let to_fix: Vec<&StructLayout> = layouts
+            .iter()
+            .filter(|l| reorder_names.contains(&l.name.as_str()))
+            .collect();
+        if let Some(action) = reorder_action(
+            "Fix all reorder suggestions in file (padlock)".to_string(),
+            uri,
+            doc,
+            &to_fix,
+            false,
+        ) {
+            actions.push(action);
+        }
+    }
+
+    actions
+}
+
+/// End position of `text` as an LSP `Position` (line/char both 0-based,
+/// char counted in UTF-16 code units per the LSP spec) — used for a
+/// whole-document `TextEdit` range. Computed precisely rather than with a
+/// `u32::MAX` sentinel: not every LSP client clamps an out-of-bounds
+/// position as forgivingly as VS Code does.
+fn end_position(text: &str) -> Position {
+    let line_count = text.split('\n').count();
+    let last_line = text.rsplit('\n').next().unwrap_or("");
+    Position::new(
+        (line_count - 1) as u32,
+        last_line.encode_utf16().count() as u32,
+    )
+}
+
+fn reorder_action(
+    title: String,
+    uri: &Uri,
+    doc: &DocState,
+    layouts: &[&StructLayout],
+    is_preferred: bool,
+) -> Option<CodeActionOrCommand> {
+    if layouts.is_empty() {
+        return None;
+    }
+    let fixed = apply_fix(&doc.lang, &doc.text, layouts);
+    if fixed == doc.text {
+        return None;
+    }
+
+    let full_range = Range::new(Position::new(0, 0), end_position(&doc.text));
+    // WorkspaceEdit::changes is a HashMap<Uri, _> in lsp_types itself — not
+    // our choice of key type. fluent_uri::Uri's Hash/Eq are stably derived
+    // from as_str() despite the Cell clippy's lint is reacting to; see the
+    // DocStore comment above for the same reasoning.
+    #[allow(clippy::mutable_key_type)]
+    let changes = HashMap::from([(uri.clone(), vec![TextEdit::new(full_range, fixed)])]);
+
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(is_preferred),
+        ..Default::default()
+    }))
+}
+
+fn apply_fix(lang: &SourceLanguage, source: &str, layouts: &[&StructLayout]) -> String {
+    use padlock_source::fixgen;
+    match lang {
+        SourceLanguage::C | SourceLanguage::Cpp => fixgen::apply_fixes_c(source, layouts),
+        SourceLanguage::Rust => fixgen::apply_fixes_rust(source, layouts),
+        SourceLanguage::Go => fixgen::apply_fixes_go(source, layouts),
+        SourceLanguage::Zig => fixgen::apply_fixes_zig(source, layouts),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +467,18 @@ mod tests {
 
     fn padded_c_struct() -> &'static str {
         "struct Connection { char a; double b; char c; int d; };"
+    }
+
+    fn insert_doc(docs: &mut DocStore, uri: &Uri, text: &str, lang: SourceLanguage) {
+        let report = analyze_text(text, &lang, &X86_64_SYSV);
+        docs.insert(
+            uri.as_str().to_string(),
+            DocState {
+                text: text.to_string(),
+                lang,
+                structs: report.structs,
+            },
+        );
     }
 
     #[test]
@@ -391,14 +557,9 @@ mod tests {
 
     #[test]
     fn build_hover_returns_markdown_for_known_struct_line() {
-        let report = analyze_text(
-            padded_c_struct(),
-            &padlock_source::SourceLanguage::C,
-            &X86_64_SYSV,
-        );
         let mut docs: DocStore = HashMap::new();
         let uri = Uri::from_str("file:///tmp/conn.c").unwrap();
-        docs.insert(uri.as_str().to_string(), report.structs);
+        insert_doc(&mut docs, &uri, padded_c_struct(), SourceLanguage::C);
 
         let hover = build_hover(&docs, &uri, Position::new(0, 0)).expect("hover for line 0");
         match hover.contents {
@@ -416,5 +577,94 @@ mod tests {
             DiagnosticSeverity::INFORMATION
         );
         assert_eq!(map_severity(&Severity::Low), DiagnosticSeverity::HINT);
+    }
+
+    fn code_action_params(uri: &Uri, line: u32) -> CodeActionParams {
+        CodeActionParams {
+            text_document: lsp_types::TextDocumentIdentifier::new(uri.clone()),
+            range: Range::new(Position::new(line, 0), Position::new(line, 0)),
+            context: lsp_types::CodeActionContext::default(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }
+    }
+
+    #[test]
+    fn end_position_counts_lines_and_utf16_units() {
+        assert_eq!(end_position("abc"), Position::new(0, 3));
+        assert_eq!(end_position("a\nbc"), Position::new(1, 2));
+        assert_eq!(end_position(""), Position::new(0, 0));
+    }
+
+    #[test]
+    fn code_action_offers_reorder_fix_for_padded_struct() {
+        let mut docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/conn.c").unwrap();
+        insert_doc(&mut docs, &uri, padded_c_struct(), SourceLanguage::C);
+
+        let actions = build_code_actions(&docs, &code_action_params(&uri, 0));
+        assert_eq!(
+            actions.len(),
+            1,
+            "single struct: one reorder action, no redundant fix-all"
+        );
+        let CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+            panic!("expected a CodeAction, not a Command");
+        };
+        assert!(action.title.contains("Connection"));
+        assert_eq!(action.is_preferred, Some(true));
+        let edit = action.edit.as_ref().expect("edit present");
+        let changes = edit.changes.as_ref().expect("changes present");
+        let edits = changes.get(&uri).expect("edit for this uri");
+        assert_eq!(edits.len(), 1);
+        assert_ne!(edits[0].new_text, padded_c_struct());
+        assert!(edits[0].new_text.contains("Connection"));
+    }
+
+    #[test]
+    fn code_action_on_already_optimal_struct_is_empty() {
+        let mut docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/ok.c").unwrap();
+        // Already descending-alignment order: nothing to reorder.
+        insert_doc(
+            &mut docs,
+            &uri,
+            "struct Ok { double b; int d; char a; char c; };",
+            SourceLanguage::C,
+        );
+
+        assert!(build_code_actions(&docs, &code_action_params(&uri, 0)).is_empty());
+    }
+
+    #[test]
+    fn code_action_offers_fix_all_when_multiple_structs_need_reorder() {
+        let mut docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/multi.c").unwrap();
+        let src = "struct A { char a; double b; char c; int d; };\n\
+                   struct B { char e; double f; char g; int h; };\n";
+        insert_doc(&mut docs, &uri, src, SourceLanguage::C);
+
+        let actions = build_code_actions(&docs, &code_action_params(&uri, 0));
+        // One action scoped to the struct on line 0, plus one "fix all".
+        assert_eq!(actions.len(), 2);
+        let titles: Vec<&str> = actions
+            .iter()
+            .map(|a| match a {
+                CodeActionOrCommand::CodeAction(a) => a.title.as_str(),
+                CodeActionOrCommand::Command(c) => c.title.as_str(),
+            })
+            .collect();
+        assert!(
+            titles
+                .iter()
+                .any(|t| t.contains("fix all") || t.contains("Fix all"))
+        );
+    }
+
+    #[test]
+    fn code_action_for_unknown_document_is_empty() {
+        let docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/missing.c").unwrap();
+        assert!(build_code_actions(&docs, &code_action_params(&uri, 0)).is_empty());
     }
 }

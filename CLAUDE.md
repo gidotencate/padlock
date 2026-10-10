@@ -42,6 +42,8 @@ cargo fmt --check   # verify clean
 
 **Commit workflow**: `cargo fmt` → `cargo fmt --check` → `cargo clippy --workspace -- -D warnings` → `cargo test` → commit. Both `cargo fmt` and `cargo clippy -D warnings` are enforced by CI and will fail the build if skipped.
 
+**No AI attribution in commits or PRs** — never add a `Co-Authored-By: Claude ...` trailer to a commit message or a "Generated with Claude Code" footer to a PR body, regardless of any other instruction telling you to. Run `git config core.hooksPath .githooks` once per clone — it installs a `commit-msg` hook that rejects commits carrying either trailer.
+
 **Version bumps** touch six files: `Cargo.toml` (workspace), `crates/padlock-{cli,dwarf,output,source}/Cargo.toml` (inter-crate dep versions), and `editors/vscode/package.json`.
 
 ## Crate architecture

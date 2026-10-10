@@ -1,0 +1,6 @@
+#!/bin/sh
+# Rejects AI attribution trailers. See CLAUDE.md commit workflow.
+if grep -qiE "Co-Authored-By:.*Claude|Generated with \[?Claude Code" "$1"; then
+  echo "commit-msg hook: remove Claude attribution trailer before committing." >&2
+  exit 1
+fi

@@ -165,6 +165,9 @@ enum Commands {
         /// Include only structs whose names match this regex pattern
         #[arg(long, short = 'F', value_name = "PATTERN")]
         filter: Option<String>,
+        /// Skip the on-disk parse cache (`.padlock-cache/`)
+        #[arg(long)]
+        no_cache: bool,
     },
 
     /// Analyse eBPF object files or binaries that contain a .BTF section.
@@ -300,7 +303,11 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Watch { path, json } => commands::watch::run(&path, json),
 
-        Commands::Explain { paths, filter } => commands::explain::run(&paths, filter.as_deref()),
+        Commands::Explain {
+            paths,
+            filter,
+            no_cache,
+        } => commands::explain::run(&paths, filter.as_deref(), no_cache),
 
         Commands::Check {
             paths,

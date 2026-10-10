@@ -8,11 +8,13 @@ All notable changes to padlock are documented here.
 - **`padlock-lsp` document symbols** (`textDocument/documentSymbol`): one outline entry per struct (`name` + `N bytes · score X` as `detail`).
 - **`padlock-lsp` editor-pushed config**: `initializationOptions` and `workspace/didChangeConfiguration` can now set `minSeverity`/`arch` directly from the editor, layered on top of `.padlock.toml` — a settings change re-analyzes every open document immediately, with no need to touch a repo file. Diagnostics also tag Low-severity findings with `DiagnosticTag::UNNECESSARY` so supporting clients render them faded.
 - **`padlock-lsp` `.padlock.toml` honoring**: `ignore`, `min_severity`, and `arch` overrides from the config file are now applied on every analysis pass, matching the CLI exactly.
+- **`--no-cache`** flag on `analyze`/`summary`/`list`/`check`/`explain`: skips reading from and writing to `.padlock-cache/` entirely. Intended for single-file invocations (e.g. an editor's on-save analysis) where the cache can never be reused and only adds disk I/O and a stray cache directory.
 - CI: `cargo-nextest` for process-isolated, cross-binary parallel test runs, and a `cargo-semver-checks` job that fails a PR on breaking public API changes against the last tag.
 
 ### Fixed
 - **`padlock --version` showing `unknown`** for a `cargo install padlock-cli` from crates.io: `build.rs` only tried `git rev-parse`, which fails outside a git checkout (crates.io strips `.git` from published packages). Now falls back to the commit SHA recorded in `.cargo_vcs_info.json`.
 - Release names and notes are now populated from the matching `## [X.Y.Z]` section of `CHANGELOG.md` instead of being left blank.
+- **`padlock-cli`/`padlock-lsp` crates.io packages shipped the wrong README**: both inherited `readme.workspace = true`, which resolves to the root `README.md` — two directories outside the crate's own package root, so `cargo package` silently falls back to whatever stray `README.md` happens to sit in the crate directory instead (a year-old stub for `padlock-cli`; nothing at all for `padlock-lsp`). Both now point `readme` at an in-package file; `padlock-lsp` got one.
 
 ### Changed
 - **`padlock-core::config`**: moved from `padlock-cli` so `padlock-lsp` can depend on it without depending on the CLI crate. No behavior change.

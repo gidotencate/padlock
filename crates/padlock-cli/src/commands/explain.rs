@@ -9,13 +9,13 @@ use std::path::PathBuf;
 
 use crate::paths::collect_layouts;
 
-pub fn run(paths: &[PathBuf], filter: Option<&str>) -> anyhow::Result<()> {
+pub fn run(paths: &[PathBuf], filter: Option<&str>, no_cache: bool) -> anyhow::Result<()> {
     let re = filter
         .map(regex::Regex::new)
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid --filter pattern: {e}"))?;
 
-    let (layouts, _, _skipped) = collect_layouts(paths, false)?;
+    let (layouts, _, _skipped) = collect_layouts(paths, false, no_cache)?;
 
     let filtered: Vec<_> = layouts
         .iter()

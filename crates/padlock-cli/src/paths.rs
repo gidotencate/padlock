@@ -35,6 +35,7 @@ use rayon::prelude::*;
 pub fn collect_layouts(
     paths: &[PathBuf],
     include_generated: bool,
+    no_cache: bool,
 ) -> anyhow::Result<(Vec<StructLayout>, Vec<String>, Vec<SkippedStruct>)> {
     let mut all_layouts: Vec<StructLayout> = Vec::new();
     let mut analyzed: Vec<String> = Vec::new();
@@ -43,19 +44,23 @@ pub fn collect_layouts(
     // Anchor the cache to the first analyzed path so that running
     // `padlock summary ~/projects/foo/src/` from any CWD always hits
     // the same cache file (~/projects/foo/src/.padlock-cache/layouts.json).
-    let cache_root = paths
-        .first()
-        .map(|p| {
-            if p.is_dir() {
-                p.clone()
-            } else {
-                p.parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from("."))
-            }
-        })
-        .unwrap_or_else(|| PathBuf::from("."));
-    let mut cache = crate::cache::ParseCache::load(&cache_root);
+    let mut cache = if no_cache {
+        crate::cache::ParseCache::disabled()
+    } else {
+        let cache_root = paths
+            .first()
+            .map(|p| {
+                if p.is_dir() {
+                    p.clone()
+                } else {
+                    p.parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("."))
+                }
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
+        crate::cache::ParseCache::load(&cache_root)
+    };
 
     for path in paths {
         if path.is_dir() {
@@ -442,7 +447,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("s.rs");
         fs::write(&file, "struct S { x: i32, y: i32 }").unwrap();
-        let (layouts, analyzed, _skipped) = collect_layouts(&[file], false).unwrap();
+        let (layouts, analyzed, _skipped) = collect_layouts(&[file], false, false).unwrap();
         assert!(!layouts.is_empty());
         assert_eq!(analyzed.len(), 1);
         assert!(layouts.iter().any(|l| l.name == "S"));
@@ -454,7 +459,7 @@ mod tests {
         fs::write(dir.path().join("a.rs"), "struct A { x: i32 }").unwrap();
         fs::write(dir.path().join("b.rs"), "struct B { y: i64 }").unwrap();
         let (layouts, analyzed, _skipped) =
-            collect_layouts(&[dir.path().to_path_buf()], false).unwrap();
+            collect_layouts(&[dir.path().to_path_buf()], false, false).unwrap();
         assert!(layouts.iter().any(|l| l.name == "A"));
         assert!(layouts.iter().any(|l| l.name == "B"));
         assert_eq!(analyzed.len(), 2);
@@ -467,7 +472,7 @@ mod tests {
         let b = dir.path().join("b.rs");
         fs::write(&a, "struct A { x: i32 }").unwrap();
         fs::write(&b, "struct B { y: i64 }").unwrap();
-        let (layouts, _, _skipped) = collect_layouts(&[a, b], false).unwrap();
+        let (layouts, _, _skipped) = collect_layouts(&[a, b], false, false).unwrap();
         assert!(layouts.iter().any(|l| l.name == "A"));
         assert!(layouts.iter().any(|l| l.name == "B"));
     }

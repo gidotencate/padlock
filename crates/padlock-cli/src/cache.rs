@@ -33,6 +33,7 @@ pub struct ParseCache {
     store: CacheStore,
     cache_path: PathBuf,
     dirty: bool,
+    disabled: bool,
 }
 
 impl ParseCache {
@@ -51,6 +52,20 @@ impl ParseCache {
             store,
             cache_path,
             dirty: false,
+            disabled: false,
+        }
+    }
+
+    /// A cache that never reads or writes `.padlock-cache/` — every lookup
+    /// misses and every insert is a no-op. Used for `--no-cache`, where
+    /// re-parsing every file is cheaper than a disk round-trip that will
+    /// never be reused (e.g. single-file on-save analysis).
+    pub fn disabled() -> Self {
+        ParseCache {
+            store: CacheStore::default(),
+            cache_path: PathBuf::new(),
+            dirty: false,
+            disabled: true,
         }
     }
 
@@ -69,6 +84,9 @@ impl ParseCache {
 
     /// Store parsed layouts and skipped items for `path` (uses current mtime).
     pub fn insert(&mut self, path: &Path, layouts: Vec<StructLayout>, skipped: Vec<SkippedStruct>) {
+        if self.disabled {
+            return;
+        }
         let Some(mtime) = file_mtime(path) else {
             return;
         };
@@ -93,7 +111,7 @@ impl ParseCache {
     ///
     /// Silently ignores I/O errors so that cache failures never break analysis.
     pub fn flush(&mut self) {
-        if !self.dirty {
+        if self.disabled || !self.dirty {
             return;
         }
         // Prune entries whose source file no longer exists.
@@ -184,6 +202,7 @@ mod tests {
             store: CacheStore::default(),
             cache_path,
             dirty: false,
+            disabled: false,
         };
         assert!(cache.get(&src).is_none());
     }
@@ -202,6 +221,7 @@ mod tests {
                 store: CacheStore::default(),
                 cache_path: cache_path.clone(),
                 dirty: false,
+                disabled: false,
             };
             cache.insert(&src, vec![simple_layout()], vec![]);
             cache.flush();
@@ -213,6 +233,7 @@ mod tests {
             store,
             cache_path,
             dirty: false,
+            disabled: false,
         };
         let result = reload.get(&src);
         assert!(result.is_some());
@@ -244,6 +265,7 @@ mod tests {
             store,
             cache_path,
             dirty: false,
+            disabled: false,
         };
         // File's actual mtime != 0, so this must be a miss.
         assert!(cache.get(&src).is_none());
@@ -257,9 +279,30 @@ mod tests {
             store: CacheStore::default(),
             cache_path: cache_path.clone(),
             dirty: false,
+            disabled: false,
         };
         cache.flush(); // should be a no-op
         assert!(!cache_path.exists(), "no file written when not dirty");
+    }
+
+    #[test]
+    fn disabled_cache_never_reads_or_writes_disk() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("e.rs");
+        fs::write(&src, "struct E { x: u64 }").unwrap();
+        let cache_path = dir.path().join(".padlock-cache").join("layouts.json");
+
+        let mut cache = ParseCache::disabled();
+        assert!(cache.get(&src).is_none());
+        cache.insert(&src, vec![simple_layout()], vec![]);
+        // insert() on a disabled cache must not mark it dirty, or flush()
+        // would still write a file despite the whole point being no disk I/O.
+        assert!(cache.get(&src).is_none(), "disabled cache must never hit");
+        cache.flush();
+        assert!(
+            !cache_path.exists(),
+            "--no-cache must never create .padlock-cache/"
+        );
     }
 
     #[test]
@@ -281,6 +324,7 @@ mod tests {
                 store: CacheStore::default(),
                 cache_path: cache_path.clone(),
                 dirty: false,
+                disabled: false,
             };
             cache.insert(&src, vec![], skipped.clone());
             cache.flush();
@@ -292,6 +336,7 @@ mod tests {
             store,
             cache_path,
             dirty: false,
+            disabled: false,
         };
         let (layouts, loaded_skipped) = reload.get(&src).expect("cache hit expected");
         assert!(layouts.is_empty());

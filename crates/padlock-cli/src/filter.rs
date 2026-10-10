@@ -93,6 +93,13 @@ pub struct FilterArgs {
     /// Pass this flag to include them.
     #[arg(long)]
     pub include_generated: bool,
+
+    /// Skip the on-disk parse cache (`.padlock-cache/`): neither read from it
+    /// nor write to it. Useful for single-file invocations (e.g. an editor's
+    /// on-save analysis) where the cache can never be reused and only adds
+    /// disk I/O and directory clutter.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 impl FilterArgs {
@@ -235,6 +242,7 @@ mod tests {
             sort_by,
             hide_repr_rust: false,
             include_generated: false,
+            no_cache: false,
         }
     }
 

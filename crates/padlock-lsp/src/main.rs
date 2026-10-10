@@ -22,7 +22,8 @@ use lsp_types::request::Request as _;
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, Diagnostic, DiagnosticSeverity, Hover, HoverContents,
-    HoverProviderCapability, MarkupContent, MarkupKind, Position, PublishDiagnosticsParams, Range,
+    HoverProviderCapability, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
+    InlayHintTooltip, MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range,
     ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
     WorkspaceEdit,
 };
@@ -42,6 +43,7 @@ fn main() -> anyhow::Result<()> {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
     let initialize_params = connection.initialize(serde_json::to_value(capabilities)?)?;
@@ -111,6 +113,13 @@ fn handle_request(connection: &Connection, docs: &DocStore, req: Request) -> any
         let params: CodeActionParams = serde_json::from_value(req.params)?;
         let actions = build_code_actions(docs, &params);
         send_response(connection, req.id, actions)?;
+        return Ok(());
+    }
+
+    if req.method == lsp_types::request::InlayHintRequest::METHOD {
+        let params: InlayHintParams = serde_json::from_value(req.params)?;
+        let hints = build_inlay_hints(docs, &params);
+        send_response(connection, req.id, hints)?;
         return Ok(());
     }
 
@@ -306,14 +315,10 @@ fn format_message(s: &StructReport, f: &Finding) -> String {
     }
 }
 
-fn build_hover(docs: &DocStore, uri: &Uri, position: Position) -> Option<Hover> {
-    let doc = docs.get(uri.as_str())?;
-    let line = position.line + 1; // padlock's source_line is 1-based.
-    let s = doc.structs.iter().find(|s| s.source_line == Some(line))?;
-    if s.findings.is_empty() {
-        return None;
-    }
-
+/// Shared full-detail markdown body for a struct's findings — used by both
+/// hover (as the content) and inlay hints (as the tooltip shown on hover
+/// over the hint itself), so the two surfaces stay in sync.
+fn struct_markdown(s: &StructReport) -> String {
     let mut text = format!("**padlock** — `{}`\n\n", s.struct_name);
     text += &format!("Score **{:.0}**/100 · {}B", s.score, s.total_size);
     if s.wasted_bytes > 0 {
@@ -323,14 +328,97 @@ fn build_hover(docs: &DocStore, uri: &Uri, position: Position) -> Option<Hover> 
     for f in &s.findings {
         text += &format!("- **{}** — {}\n", f.kind_name(), format_message(s, f));
     }
+    text
+}
+
+fn build_hover(docs: &DocStore, uri: &Uri, position: Position) -> Option<Hover> {
+    let doc = docs.get(uri.as_str())?;
+    let line = position.line + 1; // padlock's source_line is 1-based.
+    let s = doc.structs.iter().find(|s| s.source_line == Some(line))?;
+    if s.findings.is_empty() {
+        return None;
+    }
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value: text,
+            value: struct_markdown(s),
         }),
         range: None,
     })
+}
+
+/// Compact one-line label for a struct's inlay hint — the full detail lives
+/// in the hint's tooltip (`struct_markdown`), reusing the same split hover
+/// already uses (compact signal always visible, detail on demand).
+fn inlay_label(s: &StructReport) -> Option<String> {
+    if s.wasted_bytes > 0 {
+        return Some(format!(
+            " {}B wasted (score {:.0})",
+            s.wasted_bytes, s.score
+        ));
+    }
+    if let Some(Finding::ReorderSuggestion { savings, .. }) = s
+        .findings
+        .iter()
+        .find(|f| matches!(f, Finding::ReorderSuggestion { .. }))
+    {
+        return Some(format!(" reorder saves {savings}B"));
+    }
+    if s.findings
+        .iter()
+        .any(|f| matches!(f, Finding::FalseSharing { .. }))
+    {
+        return Some(" false sharing".to_string());
+    }
+    if s.findings
+        .iter()
+        .any(|f| matches!(f, Finding::LocalityIssue { .. }))
+    {
+        return Some(" locality issue".to_string());
+    }
+    None
+}
+
+/// Character offset (UTF-16 code units, per the LSP spec) of the end of
+/// `line` in `text` — used to anchor the inlay hint after the struct's
+/// declaration rather than overlapping it.
+fn line_end_char(text: &str, line: u32) -> u32 {
+    text.split('\n')
+        .nth(line as usize)
+        .map(|l| l.encode_utf16().count() as u32)
+        .unwrap_or(0)
+}
+
+fn build_inlay_hints(docs: &DocStore, params: &InlayHintParams) -> Vec<InlayHint> {
+    let Some(doc) = docs.get(params.text_document.uri.as_str()) else {
+        return Vec::new();
+    };
+
+    doc.structs
+        .iter()
+        .filter_map(|s| {
+            let line0 = s.source_line?.saturating_sub(1); // LSP lines are 0-based.
+            if line0 < params.range.start.line || line0 > params.range.end.line {
+                return None;
+            }
+            let label = inlay_label(s)?;
+
+            Some(InlayHint {
+                position: Position::new(line0, line_end_char(&doc.text, line0)),
+                label: InlayHintLabel::String(label),
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: struct_markdown(s),
+                })),
+                padding_left: Some(true),
+                padding_right: None,
+                data: None,
+            })
+        })
+        .collect()
 }
 
 fn build_code_actions(docs: &DocStore, params: &CodeActionParams) -> Vec<CodeActionOrCommand> {
@@ -597,6 +685,9 @@ mod tests {
     }
 
     #[test]
+    // Same false-positive as `reorder_action`'s allow above: `changes` is a
+    // `HashMap<Uri, _>` owned by lsp_types, not a type this code chose.
+    #[allow(clippy::mutable_key_type)]
     fn code_action_offers_reorder_fix_for_padded_struct() {
         let mut docs: DocStore = HashMap::new();
         let uri = Uri::from_str("file:///tmp/conn.c").unwrap();
@@ -666,5 +757,70 @@ mod tests {
         let docs: DocStore = HashMap::new();
         let uri = Uri::from_str("file:///tmp/missing.c").unwrap();
         assert!(build_code_actions(&docs, &code_action_params(&uri, 0)).is_empty());
+    }
+
+    fn inlay_hint_params(uri: &Uri, start_line: u32, end_line: u32) -> InlayHintParams {
+        InlayHintParams {
+            work_done_progress_params: Default::default(),
+            text_document: lsp_types::TextDocumentIdentifier::new(uri.clone()),
+            range: Range::new(Position::new(start_line, 0), Position::new(end_line, 0)),
+        }
+    }
+
+    #[test]
+    fn line_end_char_counts_utf16_units_per_line() {
+        assert_eq!(line_end_char("abc\nde", 0), 3);
+        assert_eq!(line_end_char("abc\nde", 1), 2);
+        assert_eq!(line_end_char("abc\nde", 5), 0);
+    }
+
+    #[test]
+    fn inlay_hint_reports_wasted_bytes_for_padded_struct() {
+        let mut docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/conn.c").unwrap();
+        insert_doc(&mut docs, &uri, padded_c_struct(), SourceLanguage::C);
+
+        let hints = build_inlay_hints(&docs, &inlay_hint_params(&uri, 0, 0));
+        assert_eq!(hints.len(), 1);
+        let InlayHintLabel::String(label) = &hints[0].label else {
+            panic!("expected string label");
+        };
+        assert!(label.contains("wasted"));
+        assert_eq!(hints[0].position.line, 0);
+        assert!(hints[0].tooltip.is_some());
+    }
+
+    #[test]
+    fn inlay_hint_on_struct_with_no_findings_is_empty() {
+        let mut docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/ok.c").unwrap();
+        // Two 8-byte-aligned fields, no gaps, no trailing padding: genuinely
+        // zero findings (unlike the 4-field fixture used for code actions,
+        // which still has 2B of unavoidable trailing padding).
+        insert_doc(
+            &mut docs,
+            &uri,
+            "struct Ok { double b; long d; };",
+            SourceLanguage::C,
+        );
+
+        assert!(build_inlay_hints(&docs, &inlay_hint_params(&uri, 0, 0)).is_empty());
+    }
+
+    #[test]
+    fn inlay_hint_respects_requested_line_range() {
+        let mut docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/conn.c").unwrap();
+        insert_doc(&mut docs, &uri, padded_c_struct(), SourceLanguage::C);
+
+        // Struct is on line 0; a range starting at line 5 should exclude it.
+        assert!(build_inlay_hints(&docs, &inlay_hint_params(&uri, 5, 10)).is_empty());
+    }
+
+    #[test]
+    fn inlay_hint_for_unknown_document_is_empty() {
+        let docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/missing.c").unwrap();
+        assert!(build_inlay_hints(&docs, &inlay_hint_params(&uri, 0, 0)).is_empty());
     }
 }

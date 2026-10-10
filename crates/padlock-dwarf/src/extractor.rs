@@ -34,7 +34,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
         let typedef_names = self.collect_typedef_names(unit)?;
 
         let mut entries = unit.entries();
-        while let Some((_, entry)) = entries.next_dfs()? {
+        while let Some(entry) = entries.next_dfs()? {
             // DW_TAG_class_type is the DWARF tag for C++ `class` declarations;
             // it has the same layout rules as DW_TAG_structure_type.
             let is_struct_like = entry.tag() == gimli::DW_TAG_structure_type
@@ -59,7 +59,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
     ) -> anyhow::Result<HashMap<UnitOffset<R::Offset>, String>> {
         let mut map = HashMap::new();
         let mut entries = unit.entries();
-        while let Some((_, entry)) = entries.next_dfs()? {
+        while let Some(entry) = entries.next_dfs()? {
             if entry.tag() != gimli::DW_TAG_typedef {
                 continue;
             }
@@ -67,7 +67,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
                 Some(n) => n,
                 None => continue,
             };
-            let struct_offset = match entry.attr_value(gimli::DW_AT_type)? {
+            let struct_offset = match entry.attr_value(gimli::DW_AT_type) {
                 Some(gimli::AttributeValue::UnitRef(off)) => off,
                 _ => continue,
             };
@@ -81,7 +81,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
         unit: &Unit<R>,
         entry: &DebuggingInformationEntry<R>,
     ) -> anyhow::Result<Option<StructLayout>> {
-        if entry.attr(gimli::DW_AT_declaration)?.is_some() {
+        if entry.attr(gimli::DW_AT_declaration).is_some() {
             return Ok(None);
         }
 
@@ -92,14 +92,14 @@ impl<'a, R: Reader> Extractor<'a, R> {
         // DW_AT_byte_size is normally normalized to Udata by gimli, but
         // DW_FORM_implicit_const (used when the size is the same for every
         // abbreviation entry, e.g. a pointer-sized struct) arrives as Sdata.
-        let total_size = match entry.attr_value(gimli::DW_AT_byte_size)? {
+        let total_size = match entry.attr_value(gimli::DW_AT_byte_size) {
             Some(gimli::AttributeValue::Udata(s)) => s as usize,
             Some(gimli::AttributeValue::Sdata(s)) if s >= 0 => s as usize,
             _ => return Ok(None),
         };
 
         let source_file = self.attr_string(unit, entry, gimli::DW_AT_decl_file)?;
-        let source_line = entry.attr_value(gimli::DW_AT_decl_line)?.and_then(|v| {
+        let source_line = entry.attr_value(gimli::DW_AT_decl_line).and_then(|v| {
             if let gimli::AttributeValue::Udata(n) = v {
                 Some(n as u32)
             } else {
@@ -181,13 +181,13 @@ impl<'a, R: Reader> Extractor<'a, R> {
                     flush_bf(g, &mut fields, &mut uncertain_fields);
                 }
 
-                let base_offset = match child_entry.attr_value(gimli::DW_AT_data_member_location)? {
+                let base_offset = match child_entry.attr_value(gimli::DW_AT_data_member_location) {
                     Some(gimli::AttributeValue::Udata(n)) => n as usize,
                     Some(gimli::AttributeValue::Sdata(n)) => n as usize,
                     _ => 0, // single-inheritance default: base always at offset 0
                 };
 
-                let type_offset = match child_entry.attr_value(gimli::DW_AT_type)? {
+                let type_offset = match child_entry.attr_value(gimli::DW_AT_type) {
                     Some(gimli::AttributeValue::UnitRef(off)) => off,
                     _ => continue,
                 };
@@ -223,19 +223,19 @@ impl<'a, R: Reader> Extractor<'a, R> {
                 continue;
             }
 
-            let is_bitfield = child_entry.attr(gimli::DW_AT_bit_size)?.is_some();
+            let is_bitfield = child_entry.attr(gimli::DW_AT_bit_size).is_some();
 
             if is_bitfield {
                 // DWARF4 uses DW_AT_data_member_location (byte offset).
                 // DWARF5 uses DW_AT_data_bit_offset (absolute bit offset from struct start).
                 // Returns (byte_offset, abs_bit_offset_if_known).
                 let (byte_offset, abs_bit_offset) =
-                    match child_entry.attr_value(gimli::DW_AT_data_member_location)? {
+                    match child_entry.attr_value(gimli::DW_AT_data_member_location) {
                         Some(gimli::AttributeValue::Udata(n)) => (n as usize, None),
                         Some(gimli::AttributeValue::Sdata(n)) => (n as usize, None),
                         _ => {
                             let raw: Option<u64> =
-                                match child_entry.attr_value(gimli::DW_AT_data_bit_offset)? {
+                                match child_entry.attr_value(gimli::DW_AT_data_bit_offset) {
                                     Some(gimli::AttributeValue::Udata(v)) => Some(v),
                                     Some(gimli::AttributeValue::Sdata(v)) => Some(v as u64),
                                     Some(gimli::AttributeValue::Data1(v)) => Some(v as u64),
@@ -257,7 +257,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
                         }
                     };
 
-                let bit_size = match child_entry.attr_value(gimli::DW_AT_bit_size)? {
+                let bit_size = match child_entry.attr_value(gimli::DW_AT_bit_size) {
                     Some(gimli::AttributeValue::Udata(n)) => n as usize,
                     Some(gimli::AttributeValue::Sdata(n)) => n.unsigned_abs() as usize,
                     Some(gimli::AttributeValue::Data1(n)) => n as usize,
@@ -268,7 +268,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
 
                 // DW_AT_byte_size on a bitfield member gives the storage unit size.
                 // Absent for DWARF5 groups; derived from bit span in flush_bf instead.
-                let storage_bytes = match child_entry.attr_value(gimli::DW_AT_byte_size)? {
+                let storage_bytes = match child_entry.attr_value(gimli::DW_AT_byte_size) {
                     Some(gimli::AttributeValue::Udata(n)) => n as usize,
                     Some(gimli::AttributeValue::Data1(n)) => n as usize,
                     Some(gimli::AttributeValue::Data2(n)) => n as usize,
@@ -356,13 +356,13 @@ impl<'a, R: Reader> Extractor<'a, R> {
             .attr_string(unit, entry, gimli::DW_AT_name)?
             .unwrap_or_else(|| "<unnamed>".to_string());
 
-        let offset = match entry.attr_value(gimli::DW_AT_data_member_location)? {
+        let offset = match entry.attr_value(gimli::DW_AT_data_member_location) {
             Some(gimli::AttributeValue::Udata(n)) => n as usize,
             Some(gimli::AttributeValue::Sdata(n)) => n as usize,
             _ => return Ok(None),
         };
 
-        let type_offset = match entry.attr_value(gimli::DW_AT_type)? {
+        let type_offset = match entry.attr_value(gimli::DW_AT_type) {
             Some(gimli::AttributeValue::UnitRef(off)) => off,
             _ => return Ok(None),
         };
@@ -382,7 +382,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
             size,
             align,
             source_file: None,
-            source_line: entry.attr_value(gimli::DW_AT_decl_line)?.and_then(|v| {
+            source_line: entry.attr_value(gimli::DW_AT_decl_line).and_then(|v| {
                 if let gimli::AttributeValue::Udata(n) = v {
                     Some(n as u32)
                 } else {
@@ -399,7 +399,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
         entry: &DebuggingInformationEntry<R>,
         attr: gimli::DwAt,
     ) -> anyhow::Result<Option<String>> {
-        match entry.attr(attr)? {
+        match entry.attr(attr) {
             Some(a) => match self.dwarf.attr_string(unit, a.value()) {
                 Ok(s) => Ok(Some(s.to_string_lossy()?.into_owned())),
                 Err(_) => Ok(None),
@@ -413,7 +413,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
         entry: &DebuggingInformationEntry<R>,
         attr: gimli::DwAt,
     ) -> anyhow::Result<Option<usize>> {
-        match entry.attr_value(attr)? {
+        match entry.attr_value(attr) {
             Some(gimli::AttributeValue::Udata(n)) => Ok(Some(n as usize)),
             Some(gimli::AttributeValue::Data1(n)) => Ok(Some(n as usize)),
             Some(gimli::AttributeValue::Data2(n)) => Ok(Some(n as usize)),

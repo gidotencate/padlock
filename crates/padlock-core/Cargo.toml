@@ -15,3 +15,8 @@ test-helpers = []
 [dependencies]
 rayon = { workspace = true }
 serde = { version = "1", features = ["derive"] }
+toml  = "1"
+glob  = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

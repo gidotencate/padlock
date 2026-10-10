@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 pub mod cache;
-pub mod config;
 pub mod filter;
 pub mod paths;
 

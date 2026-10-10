@@ -21,13 +21,14 @@ use lsp_types::notification::Notification as _;
 use lsp_types::request::Request as _;
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, Diagnostic, DiagnosticSeverity, Hover, HoverContents,
-    HoverProviderCapability, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
-    InlayHintTooltip, MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
-    WorkspaceEdit,
+    CodeActionProviderCapability, Diagnostic, DiagnosticSeverity, DocumentSymbol,
+    DocumentSymbolParams, DocumentSymbolResponse, Hover, HoverContents, HoverProviderCapability,
+    InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, InlayHintTooltip, MarkupContent,
+    MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range, ServerCapabilities, SymbolKind,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
 };
-use padlock_core::arch::X86_64_SYSV;
+use padlock_core::arch::{ArchConfig, X86_64_SYSV, arch_by_name};
+use padlock_core::config::Config;
 use padlock_core::findings::{Finding, StructReport};
 use padlock_core::ir::StructLayout;
 use padlock_source::SourceLanguage;
@@ -44,6 +45,7 @@ fn main() -> anyhow::Result<()> {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         inlay_hint_provider: Some(OneOf::Left(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
     let initialize_params = connection.initialize(serde_json::to_value(capabilities)?)?;
@@ -63,11 +65,32 @@ fn main() -> anyhow::Result<()> {
 /// Per-document state: the live buffer text (needed by code actions to
 /// produce a fix — `fixgen::apply_fixes_*` rewrites source text, it doesn't
 /// work from the IR alone) plus the most recent analysis, so hover and code
-/// actions don't have to re-run diagnostics from scratch.
+/// actions don't have to re-run diagnostics from scratch. `structs` already
+/// reflects the project's `.padlock.toml` (`ignore` and severity filtering
+/// applied in `analyze_text`) so every reader of this cache — hover, code
+/// actions, inlay hints, document symbols — honours it for free. `arch` is
+/// cached alongside so code actions re-parse with the same architecture the
+/// diagnostics were computed against, instead of silently drifting back to
+/// the default on an `arch.override` project.
 struct DocState {
     text: String,
     lang: SourceLanguage,
     structs: Vec<StructReport>,
+    arch: &'static ArchConfig,
+}
+
+/// Resolves `arch.override` from `.padlock.toml` via the same short names
+/// the CLI's `--target` flag accepts (`aarch64`, `wasm32`, ...). Unlike the
+/// CLI, there's no host-architecture fallback for an unrecognised name —
+/// padlock-lsp deliberately doesn't depend on padlock-dwarf for that, so an
+/// invalid override just falls back to the same `X86_64_SYSV` default as no
+/// override at all.
+fn resolve_arch(config: &Config) -> &'static ArchConfig {
+    config
+        .arch_override
+        .as_deref()
+        .and_then(arch_by_name)
+        .unwrap_or(&X86_64_SYSV)
 }
 
 // Keyed by the URI's string form rather than `Uri` itself: `fluent_uri::Uri`
@@ -120,6 +143,13 @@ fn handle_request(connection: &Connection, docs: &DocStore, req: Request) -> any
         let params: InlayHintParams = serde_json::from_value(req.params)?;
         let hints = build_inlay_hints(docs, &params);
         send_response(connection, req.id, hints)?;
+        return Ok(());
+    }
+
+    if req.method == lsp_types::request::DocumentSymbolRequest::METHOD {
+        let params: DocumentSymbolParams = serde_json::from_value(req.params)?;
+        let symbols = build_document_symbols(docs, &params);
+        send_response(connection, req.id, symbols)?;
         return Ok(());
     }
 
@@ -205,7 +235,9 @@ fn analyze_and_publish(
         return Ok(());
     };
 
-    let report = analyze_text(text, &lang, &X86_64_SYSV);
+    let config = Config::for_path(&path);
+    let arch = resolve_arch(&config);
+    let report = analyze_text(text, &lang, arch, &config);
     let diagnostics = report
         .structs
         .iter()
@@ -218,6 +250,7 @@ fn analyze_and_publish(
             text: text.to_string(),
             lang,
             structs: report.structs,
+            arch,
         },
     );
     publish_diagnostics(connection, uri, &diagnostics)?;
@@ -421,6 +454,45 @@ fn build_inlay_hints(docs: &DocStore, params: &InlayHintParams) -> Vec<InlayHint
         .collect()
 }
 
+/// One outline entry per struct, named and scored (`N bytes · score X`) so
+/// the editor's outline/breadcrumb view works as a quick severity overview
+/// without opening hover on each one. `structs` is already filtered by
+/// `.padlock.toml` (see `DocState`'s doc comment), so an ignored struct
+/// doesn't show up here either.
+#[allow(deprecated)] // `DocumentSymbol::deprecated` has no Default to omit it via.
+fn build_document_symbols(
+    docs: &DocStore,
+    params: &DocumentSymbolParams,
+) -> DocumentSymbolResponse {
+    let Some(doc) = docs.get(params.text_document.uri.as_str()) else {
+        return DocumentSymbolResponse::Nested(Vec::new());
+    };
+
+    let symbols = doc
+        .structs
+        .iter()
+        .filter_map(|s| {
+            let line0 = s.source_line?.saturating_sub(1); // LSP lines are 0-based.
+            let range = Range::new(
+                Position::new(line0, 0),
+                Position::new(line0, line_end_char(&doc.text, line0)),
+            );
+            Some(DocumentSymbol {
+                name: s.struct_name.clone(),
+                detail: Some(format!("{}B · score {:.0}", s.total_size, s.score)),
+                kind: SymbolKind::STRUCT,
+                tags: None,
+                deprecated: None,
+                range,
+                selection_range: range,
+                children: None,
+            })
+        })
+        .collect();
+
+    DocumentSymbolResponse::Nested(symbols)
+}
+
 fn build_code_actions(docs: &DocStore, params: &CodeActionParams) -> Vec<CodeActionOrCommand> {
     let uri = &params.text_document.uri;
     let Some(doc) = docs.get(uri.as_str()) else {
@@ -443,8 +515,10 @@ fn build_code_actions(docs: &DocStore, params: &CodeActionParams) -> Vec<CodeAct
 
     // fixgen::apply_fixes_* rewrites source text from the IR, so re-parse
     // the cached buffer rather than trying to derive layouts from the
-    // already-scored StructReport (which doesn't carry per-field IR).
-    let Ok(layouts) = padlock_source::parse_source_str(&doc.text, &doc.lang, &X86_64_SYSV) else {
+    // already-scored StructReport (which doesn't carry per-field IR). Uses
+    // doc.arch (not the bare default) so a reorder computed here matches
+    // the architecture the diagnostics were scored against.
+    let Ok(layouts) = padlock_source::parse_source_str(&doc.text, &doc.lang, doc.arch) else {
         return Vec::new();
     };
 
@@ -558,13 +632,14 @@ mod tests {
     }
 
     fn insert_doc(docs: &mut DocStore, uri: &Uri, text: &str, lang: SourceLanguage) {
-        let report = analyze_text(text, &lang, &X86_64_SYSV);
+        let report = analyze_text(text, &lang, &X86_64_SYSV, &Config::default());
         docs.insert(
             uri.as_str().to_string(),
             DocState {
                 text: text.to_string(),
                 lang,
                 structs: report.structs,
+                arch: &X86_64_SYSV,
             },
         );
     }
@@ -595,6 +670,7 @@ mod tests {
             padded_c_struct(),
             &padlock_source::SourceLanguage::C,
             &X86_64_SYSV,
+            &Config::default(),
         );
         assert_eq!(report.structs.len(), 1);
         assert!(report.structs[0].wasted_bytes > 0);
@@ -606,6 +682,7 @@ mod tests {
             "struct {{{ nonsense",
             &padlock_source::SourceLanguage::C,
             &X86_64_SYSV,
+            &Config::default(),
         );
         assert!(report.structs.is_empty());
     }
@@ -616,6 +693,7 @@ mod tests {
             padded_c_struct(),
             &padlock_source::SourceLanguage::C,
             &X86_64_SYSV,
+            &Config::default(),
         );
         let s = &report.structs[0];
         assert_eq!(s.source_line, Some(1));
@@ -630,6 +708,7 @@ mod tests {
             padded_c_struct(),
             &padlock_source::SourceLanguage::C,
             &X86_64_SYSV,
+            &Config::default(),
         );
         let mut s = report.structs.into_iter().next().unwrap();
         s.source_line = None;
@@ -822,5 +901,66 @@ mod tests {
         let docs: DocStore = HashMap::new();
         let uri = Uri::from_str("file:///tmp/missing.c").unwrap();
         assert!(build_inlay_hints(&docs, &inlay_hint_params(&uri, 0, 0)).is_empty());
+    }
+
+    #[test]
+    fn resolve_arch_honors_valid_override() {
+        let config = Config {
+            arch_override: Some("aarch64".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(resolve_arch(&config).name, "aarch64");
+    }
+
+    #[test]
+    fn resolve_arch_falls_back_on_unknown_override() {
+        let config = Config {
+            arch_override: Some("not-a-real-arch".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(resolve_arch(&config).name, X86_64_SYSV.name);
+    }
+
+    #[test]
+    fn resolve_arch_falls_back_when_absent() {
+        assert_eq!(resolve_arch(&Config::default()).name, X86_64_SYSV.name);
+    }
+
+    fn document_symbol_params(uri: &Uri) -> DocumentSymbolParams {
+        DocumentSymbolParams {
+            text_document: lsp_types::TextDocumentIdentifier::new(uri.clone()),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }
+    }
+
+    #[test]
+    fn document_symbols_lists_struct_with_name_and_detail() {
+        let mut docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/conn.c").unwrap();
+        insert_doc(&mut docs, &uri, padded_c_struct(), SourceLanguage::C);
+
+        let DocumentSymbolResponse::Nested(symbols) =
+            build_document_symbols(&docs, &document_symbol_params(&uri))
+        else {
+            panic!("expected Nested response");
+        };
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "Connection");
+        assert_eq!(symbols[0].kind, SymbolKind::STRUCT);
+        assert!(symbols[0].detail.as_ref().unwrap().contains("score"));
+        assert_eq!(symbols[0].range.start.line, 0);
+    }
+
+    #[test]
+    fn document_symbols_for_unknown_document_is_empty() {
+        let docs: DocStore = HashMap::new();
+        let uri = Uri::from_str("file:///tmp/missing.c").unwrap();
+        let DocumentSymbolResponse::Nested(symbols) =
+            build_document_symbols(&docs, &document_symbol_params(&uri))
+        else {
+            panic!("expected Nested response");
+        };
+        assert!(symbols.is_empty());
     }
 }

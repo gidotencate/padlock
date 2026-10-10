@@ -698,8 +698,14 @@ function updateStatusBar(doc: vscode.TextDocument | undefined): void {
   const structs = fileStructCache.get(doc.uri.toString());
 
   if (!structs) {
-    // File not yet analysed — show neutral state
+    // File not yet analysed — show neutral state. Must also reset tooltip,
+    // not just text: otherwise a stale tooltip from this file's (or a
+    // previous file's) last successful analysis lingers and shows a real
+    // score/finding count on hover while the status bar text itself has
+    // already reverted to neutral — misleadingly implying the file "is"
+    // analyzed when it isn't.
     statusBarItem.text = "$(lock) padlock";
+    statusBarItem.tooltip = "padlock: not yet analyzed · click to analyse";
     statusBarItem.backgroundColor = undefined;
     statusBarItem.show();
     return;

@@ -82,31 +82,61 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    # ── Install padlock ─────────────────────────────────────────────────────────
-    # Prefer pre-built binaries from GitHub Releases (~10 s) and fall back to
-    # `cargo install` (~3 min) when no binary is available for the platform.
-    - name: Install padlock
+    # ── Resolve version ─────────────────────────────────────────────────────────
+    # Pin the cache key to a concrete version so "latest" still gets cache
+    # hits across runs (the cache key itself can't depend on a moving target).
+    - name: Resolve padlock version
+      id: resolve
       shell: bash
       env:
         PADLOCK_VERSION_INPUT: ${{ inputs.padlock-version }}
       run: |
         set -euo pipefail
 
-        REPO="gidotencate/padlock"
         VERSION="$PADLOCK_VERSION_INPUT"
 
         # Resolve "latest" → concrete version via GitHub API.
         # Use -L (follow redirects) without -f so a 404 (no releases yet) does
-        # not kill the script; handle the empty-result case explicitly instead.
+        # not kill the script; an empty result is handled downstream instead.
         if [ "$VERSION" = "latest" ]; then
-          VERSION=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" \
+          VERSION=$(curl -sSL "https://api.github.com/repos/gidotencate/padlock/releases/latest" \
             | grep '"tag_name"' \
             | sed 's/.*"v\([^"]*\)".*/\1/') || true
-          if [ -z "$VERSION" ]; then
-            echo "No GitHub Release found for $REPO; installing latest via cargo..."
-            cargo install padlock-cli
-            exit 0
-          fi
+        fi
+
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+    # ── Cache the installed binary ──────────────────────────────────────────────
+    # Keyed on the resolved version + platform, so a pinned version (or a
+    # "latest" that resolved to the same release) skips the download/cargo
+    # install entirely on a cache hit instead of repeating it every run.
+    - name: Cache padlock binary
+      id: cache
+      if: steps.resolve.outputs.version != ''
+      uses: actions/cache@v4
+      with:
+        path: ~/.padlock-bin
+        key: padlock-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.version }}
+
+    # ── Install padlock ─────────────────────────────────────────────────────────
+    # Prefer pre-built binaries from GitHub Releases (~10 s) and fall back to
+    # `cargo install` (~3 min) when no binary is available for the platform.
+    # Skipped entirely on a cache hit.
+    - name: Install padlock
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        PADLOCK_VERSION: ${{ steps.resolve.outputs.version }}
+      run: |
+        set -euo pipefail
+
+        REPO="gidotencate/padlock"
+        VERSION="$PADLOCK_VERSION"
+
+        if [ -z "$VERSION" ]; then
+          echo "No GitHub Release found for $REPO; installing latest via cargo..."
+          cargo install padlock-cli
+          exit 0
         fi
 
         # Map runner platform to release-asset target triple
@@ -134,7 +164,6 @@ runs:
               # Windows: use PowerShell (available on Windows runners)
               powershell -Command "Expand-Archive -Path '$TMP' -DestinationPath '$INSTALL_DIR' -Force"
             fi
-            echo "$INSTALL_DIR" >> "$GITHUB_PATH"
             echo "Installed padlock ${VERSION} from pre-built binary (${TARGET})"
             DOWNLOADED=true
           fi
@@ -145,6 +174,15 @@ runs:
           cargo install padlock-cli --version "$VERSION"
         fi
 
+    # ── PATH ─────────────────────────────────────────────────────────────────────
+    # Unconditional: needed whether the binary just got cached, just got
+    # downloaded, or the directory doesn't exist at all (cargo install path —
+    # harmless extra PATH entry, the binary is already on PATH via cargo's
+    # own bin dir in that case).
+    - name: Add padlock to PATH
+      shell: bash
+      run: echo "$HOME/.padlock-bin" >> "$GITHUB_PATH"
+
     # ── Run analysis ────────────────────────────────────────────────────────────
     - name: Run padlock analysis
       id: analyse
@@ -154,8 +192,9 @@ runs:
 
         FORMAT="$PADLOCK_OUTPUT_FORMAT"
         # Split on newlines only (IFS=$'\n') so a single path containing
-        # spaces survives intact; paths come from the action input, never
-        # from ${{ }} template interpolation, to avoid script injection.
+        # spaces survives intact; paths come from the action input via the
+        # env var above, never from direct workflow-expression interpolation
+        # into this script, to avoid script injection.
         readarray -t RAW_PATHS <<< "$PADLOCK_PATH_INPUT"
         PATHS=()
         for p in "${RAW_PATHS[@]}"; do

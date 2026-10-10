@@ -2,7 +2,24 @@
 
 All notable changes to padlock are documented here.
 
+## [0.17.0] — 2026-10-10
+
+### Fixed
+- **`padlock diff --against <git-ref>` was broken on Windows**: `git_show()` canonicalized the analyzed path and stripped the repo root off the front to get a git-relative pathspec, but `Path::canonicalize()` on Windows always returns a `\\?\`-verbatim path, which never matches the plain path `git rev-parse --show-toplevel` prints — `strip_prefix` failed on every single invocation, not just the already-fixed "run from outside the repo" case. Now strips the `\\?\` prefix before comparing.
+
 ## [0.16.0] — 2026-10-10
+
+### Fixed
+- **`padlock diff --against <git-ref>` resolved the wrong git repository**: `git_repo_root()` ran `git rev-parse --show-toplevel` using the CLI process's own working directory rather than the analyzed path's directory. Invoking it from outside the target file's repo (the common case for an editor integration) silently resolved a different repo — or none — so `git show` failed for every file and every struct was misreported as newly added instead of showing its real size/score change. Now anchored on the first analyzed path.
+- **VS Code extension: CodeLens showed a `command '' not found` error on click** for structs with nothing to reorder (clean structs, or findings with no applicable fix): the lens was given an empty-string command instead of either a real command or none. Now reuses the `padlock.analyzeFile` re-analyze command for that case — a `CodeLens` with no command at all would render no text, since this provider doesn't implement `resolveCodeLens`.
+- **VS Code extension: on-save analysis wrote a useless `.padlock-cache/`** in every saved file's directory — the `--no-cache` flag (added in `0.14.0`) existed but was never actually passed by the extension's single-file analysis call. Now wired in; the workspace-wide scan still uses the cache, since that one does benefit from it.
+
+## [0.15.0] — 2026-10-10
+
+### Fixed
+- **VS Code extension: stale status bar tooltip**: the "not yet analyzed" branch reset the status bar's visible text but not its tooltip, so hovering over it could show a real score/finding count left over from a previous update while the text itself already read the neutral `padlock` state — misleadingly implying the file had been analyzed when it hadn't.
+
+## [0.14.0] — 2026-10-10
 
 ### Added
 - **`--no-cache`** flag on `analyze`/`summary`/`list`/`check`/`explain`: skips reading from and writing to `.padlock-cache/` entirely. Intended for single-file invocations (e.g. an editor's on-save analysis) where the cache can never be reused and only adds disk I/O and a stray cache directory.
@@ -11,12 +28,8 @@ All notable changes to padlock are documented here.
 - **VS Code extension: CodeLens and line highlighting**: each struct's declaration line gets a clickable `padlock: score N · MB wasted` CodeLens (click to apply the reorder fix directly) and a severity-tinted background (red for High, amber for Medium), so problem structs are visible while scrolling without opening the Problems panel.
 
 ### Fixed
-- **`padlock-cli`/`padlock-lsp` crates.io packages shipped the wrong README**: both inherited `readme.workspace = true`, which resolves to the root `README.md` — two directories outside the crate's own package root, so `cargo package` silently falls back to whatever stray `README.md` happens to sit in the crate directory instead (a year-old stub for `padlock-cli`; nothing at all for `padlock-lsp`). Both now point `readme` at an in-package file; `padlock-lsp` got one. This fix lands in `0.16.0` — the `0.13.0` package already published to crates.io still has the stale README; crates.io versions are immutable, so it can't be corrected in place.
+- **`padlock-cli`/`padlock-lsp` crates.io packages shipped the wrong README**: both inherited `readme.workspace = true`, which resolves to the root `README.md` — two directories outside the crate's own package root, so `cargo package` silently falls back to whatever stray `README.md` happens to sit in the crate directory instead (a year-old stub for `padlock-cli`; nothing at all for `padlock-lsp`). Both now point `readme` at an in-package file; `padlock-lsp` got one. This fix lands in `0.14.0` — the `0.13.0` package already published to crates.io still has the stale README; crates.io versions are immutable, so it can't be corrected in place.
 - **`collect_layouts` silently dropped duplicate-line structs**: the final dedup pass keyed on `(source_file, source_line)` only, so two distinct C++ template instantiations declared on the same line (same template, different `padlock:instantiate` args) collapsed into one. Dedup key now includes the struct name.
-- **VS Code extension: stale status bar tooltip**: the "not yet analyzed" branch reset the status bar's visible text but not its tooltip, so hovering over it could show a real score/finding count left over from a previous update while the text itself already read the neutral `padlock` state — misleadingly implying the file had been analyzed when it hadn't.
-- **`padlock diff --against <git-ref>` resolved the wrong git repository**: `git_repo_root()` ran `git rev-parse --show-toplevel` using the CLI process's own working directory rather than the analyzed path's directory. Invoking it from outside the target file's repo (the common case for an editor integration) silently resolved a different repo — or none — so `git show` failed for every file and every struct was misreported as newly added instead of showing its real size/score change. Now anchored on the first analyzed path.
-- **VS Code extension: CodeLens showed a `command '' not found` error on click** for structs with nothing to reorder (clean structs, or findings with no applicable fix): the lens was given an empty-string command instead of either a real command or none. Now reuses the `padlock.analyzeFile` re-analyze command for that case — a `CodeLens` with no command at all would render no text, since this provider doesn't implement `resolveCodeLens`.
-- **VS Code extension: on-save analysis wrote a useless `.padlock-cache/`** in every saved file's directory — the `--no-cache` flag (added this same cycle) existed but was never actually passed by the extension's single-file analysis call. Now wired in; the workspace-wide scan still uses the cache, since that one does benefit from it.
 
 ## [0.13.0] — 2026-10-10
 

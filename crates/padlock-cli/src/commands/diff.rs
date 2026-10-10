@@ -216,7 +216,12 @@ fn git_repo_root(anchor: &Path) -> anyhow::Result<PathBuf> {
 /// Return `path`'s content as it existed at `git_ref`, or `None` if the file
 /// didn't exist at that ref (new file, or ref predates it).
 fn git_show(repo_root: &Path, git_ref: &str, path: &Path) -> anyhow::Result<Option<String>> {
-    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // On Windows, `canonicalize()` always returns a `\\?\`-verbatim path, but
+    // `git rev-parse --show-toplevel` never does — strip it first, or
+    // `strip_prefix` below fails on every call, not just when invoked from
+    // outside the repo.
+    let abs = strip_verbatim_prefix(canon);
     let rel = abs.strip_prefix(repo_root).unwrap_or(path);
     // git pathspecs always use forward slashes, regardless of host OS.
     let rel_slash = rel.to_string_lossy().replace('\\', "/");
@@ -232,4 +237,28 @@ fn git_show(repo_root: &Path, git_ref: &str, path: &Path) -> anyhow::Result<Opti
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    match p.to_string_lossy().strip_prefix(r"\\?\") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => p,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_verbatim_prefix_removes_windows_prefix() {
+        let p = PathBuf::from(r"\\?\C:\repo\foo.cpp");
+        assert_eq!(strip_verbatim_prefix(p), PathBuf::from(r"C:\repo\foo.cpp"));
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_leaves_normal_path_untouched() {
+        let p = PathBuf::from("/home/user/repo/foo.cpp");
+        assert_eq!(strip_verbatim_prefix(p.clone()), p);
+    }
 }

@@ -13,7 +13,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
         offset: UnitOffset<R::Offset>,
     ) -> anyhow::Result<(usize, usize, TypeInfo)> {
         let mut entries = unit.entries_at_offset(offset)?;
-        let (_, entry) = entries
+        let entry = entries
             .next_dfs()?
             .ok_or_else(|| anyhow::anyhow!("no DIE at offset"))?;
 
@@ -38,7 +38,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
             }
 
             gimli::DW_TAG_typedef => {
-                let inner_offset = match entry.attr_value(gimli::DW_AT_type)? {
+                let inner_offset = match entry.attr_value(gimli::DW_AT_type) {
                     Some(gimli::AttributeValue::UnitRef(off)) => off,
                     _ => return Err(anyhow::anyhow!("typedef with no type")),
                 };
@@ -54,7 +54,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
                 // reads DW_AT_byte_size on the atomic wrapper itself — that attribute is
                 // absent on qualifier tags, so the field was sized as 0 bytes and the
                 // gap after it appeared 4–8 bytes too large.
-                let inner_offset = match entry.attr_value(gimli::DW_AT_type)? {
+                let inner_offset = match entry.attr_value(gimli::DW_AT_type) {
                     Some(gimli::AttributeValue::UnitRef(off)) => off,
                     _ => return Err(anyhow::anyhow!("qualifier with no type")),
                 };
@@ -62,7 +62,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
             }
 
             gimli::DW_TAG_array_type => {
-                let elem_offset = match entry.attr_value(gimli::DW_AT_type)? {
+                let elem_offset = match entry.attr_value(gimli::DW_AT_type) {
                     Some(gimli::AttributeValue::UnitRef(off)) => off,
                     _ => return Err(anyhow::anyhow!("array with no element type")),
                 };

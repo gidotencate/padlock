@@ -21,7 +21,7 @@ use lsp_types::notification::Notification as _;
 use lsp_types::request::Request as _;
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, Diagnostic, DiagnosticSeverity, DocumentSymbol,
+    CodeActionProviderCapability, Diagnostic, DiagnosticSeverity, DiagnosticTag, DocumentSymbol,
     DocumentSymbolParams, DocumentSymbolResponse, Hover, HoverContents, HoverProviderCapability,
     InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, InlayHintTooltip, MarkupContent,
     MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range, ServerCapabilities, SymbolKind,
@@ -29,7 +29,7 @@ use lsp_types::{
 };
 use padlock_core::arch::{ArchConfig, X86_64_SYSV, arch_by_name};
 use padlock_core::config::Config;
-use padlock_core::findings::{Finding, StructReport};
+use padlock_core::findings::{Finding, Severity, StructReport};
 use padlock_core::ir::StructLayout;
 use padlock_source::SourceLanguage;
 
@@ -49,9 +49,12 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let initialize_params = connection.initialize(serde_json::to_value(capabilities)?)?;
-    let _ = initialize_params;
+    let overrides = initialize_params
+        .get("initializationOptions")
+        .map(EditorOverrides::from_json)
+        .unwrap_or_default();
 
-    run_server(&connection)?;
+    run_server(&connection, overrides)?;
 
     // Drop the connection (and its sender half) before joining the I/O
     // threads: the stdout writer thread only exits once every sender is
@@ -98,7 +101,61 @@ fn resolve_arch(config: &Config) -> &'static ArchConfig {
 // lint even though Hash/Eq are stably derived from `as_str()`.
 type DocStore = HashMap<String, DocState>;
 
-fn run_server(connection: &Connection) -> anyhow::Result<()> {
+/// Editor-pushed config, layered on top of `.padlock.toml`: set once from
+/// `initializationOptions` at startup, and replaced wholesale on every
+/// `workspace/didChangeConfiguration` notification — so an editor's own
+/// settings UI works as an alternative to editing the config file, for
+/// clients that prefer pushing settings over a repo file.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct EditorOverrides {
+    min_severity: Option<Severity>,
+    arch_override: Option<String>,
+}
+
+impl EditorOverrides {
+    /// Accepts either a dedicated settings object (`initializationOptions`,
+    /// which is already padlock's own) or a client's whole settings tree
+    /// with a `padlock` section (common shape for `didChangeConfiguration`,
+    /// e.g. VS Code's `{ "padlock": { "minSeverity": "high" } }`) — looks
+    /// for a nested `padlock` object first and falls back to the value
+    /// itself, so both shapes parse the same way.
+    fn from_json(value: &serde_json::Value) -> Self {
+        let scoped = value.get("padlock").unwrap_or(value);
+        Self {
+            min_severity: scoped
+                .get("minSeverity")
+                .and_then(|v| v.as_str())
+                .and_then(parse_severity),
+            arch_override: scoped
+                .get("arch")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        }
+    }
+
+    /// Layers these overrides onto a `.padlock.toml`-derived config —
+    /// editor settings win when present, the file's value otherwise.
+    fn apply_to(&self, mut config: Config) -> Config {
+        if let Some(sev) = self.min_severity.clone() {
+            config.min_severity = sev;
+        }
+        if self.arch_override.is_some() {
+            config.arch_override = self.arch_override.clone();
+        }
+        config
+    }
+}
+
+fn parse_severity(s: &str) -> Option<Severity> {
+    match s.to_ascii_lowercase().as_str() {
+        "high" => Some(Severity::High),
+        "medium" | "med" => Some(Severity::Medium),
+        "low" => Some(Severity::Low),
+        _ => None,
+    }
+}
+
+fn run_server(connection: &Connection, mut overrides: EditorOverrides) -> anyhow::Result<()> {
     let mut docs: DocStore = HashMap::new();
 
     for msg in &connection.receiver {
@@ -110,7 +167,7 @@ fn run_server(connection: &Connection) -> anyhow::Result<()> {
                 handle_request(connection, &docs, req)?;
             }
             Message::Notification(not) => {
-                handle_notification(connection, &mut docs, not)?;
+                handle_notification(connection, &mut docs, &mut overrides, not)?;
             }
             Message::Response(_) => {
                 // We never send requests to the client, so no responses expected.
@@ -176,10 +233,12 @@ fn send_response<T: serde::Serialize>(
 fn handle_notification(
     connection: &Connection,
     docs: &mut DocStore,
+    overrides: &mut EditorOverrides,
     not: Notification,
 ) -> anyhow::Result<()> {
     use lsp_types::notification::{
-        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
+        DidChangeConfiguration, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
+        DidSaveTextDocument,
     };
 
     match not.method.as_str() {
@@ -188,6 +247,7 @@ fn handle_notification(
             analyze_and_publish(
                 connection,
                 docs,
+                overrides,
                 &params.text_document.uri,
                 &params.text_document.text,
             )?;
@@ -197,19 +257,50 @@ fn handle_notification(
                 serde_json::from_value(not.params)?;
             // Full sync: the last content change carries the entire document text.
             if let Some(change) = params.content_changes.into_iter().last() {
-                analyze_and_publish(connection, docs, &params.text_document.uri, &change.text)?;
+                analyze_and_publish(
+                    connection,
+                    docs,
+                    overrides,
+                    &params.text_document.uri,
+                    &change.text,
+                )?;
             }
         }
         m if m == DidSaveTextDocument::METHOD => {
             let params: lsp_types::DidSaveTextDocumentParams = serde_json::from_value(not.params)?;
             if let Some(text) = params.text {
-                analyze_and_publish(connection, docs, &params.text_document.uri, &text)?;
+                analyze_and_publish(
+                    connection,
+                    docs,
+                    overrides,
+                    &params.text_document.uri,
+                    &text,
+                )?;
             }
         }
         m if m == DidCloseTextDocument::METHOD => {
             let params: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(not.params)?;
             docs.remove(params.text_document.uri.as_str());
             publish_diagnostics(connection, &params.text_document.uri, &[])?;
+        }
+        m if m == DidChangeConfiguration::METHOD => {
+            let params: lsp_types::DidChangeConfigurationParams =
+                serde_json::from_value(not.params)?;
+            *overrides = EditorOverrides::from_json(&params.settings);
+
+            // Re-run analysis for every open document under the new
+            // overrides immediately, rather than waiting for the next edit
+            // — a settings change should take effect right away, matching
+            // what editors expect from e.g. a severity-filter toggle.
+            let open: Vec<(String, String)> = docs
+                .iter()
+                .map(|(uri, doc)| (uri.clone(), doc.text.clone()))
+                .collect();
+            for (uri_str, text) in open {
+                if let Ok(uri) = uri_str.parse::<Uri>() {
+                    analyze_and_publish(connection, docs, overrides, &uri, &text)?;
+                }
+            }
         }
         _ => {}
     }
@@ -225,6 +316,7 @@ fn uri_to_path(uri: &Uri) -> Option<std::path::PathBuf> {
 fn analyze_and_publish(
     connection: &Connection,
     docs: &mut DocStore,
+    overrides: &EditorOverrides,
     uri: &Uri,
     text: &str,
 ) -> anyhow::Result<()> {
@@ -235,7 +327,7 @@ fn analyze_and_publish(
         return Ok(());
     };
 
-    let config = Config::for_path(&path);
+    let config = overrides.apply_to(Config::for_path(&path));
     let arch = resolve_arch(&config);
     let report = analyze_text(text, &lang, arch, &config);
     let diagnostics = report
@@ -289,6 +381,11 @@ fn diagnostics_for_struct(s: &StructReport) -> Vec<Diagnostic> {
         .map(|f| Diagnostic {
             range,
             severity: Some(map_severity(f.severity())),
+            // Low-severity findings are real but minor — tag them
+            // UNNECESSARY so editors that support it render a faded/
+            // strikethrough hint instead of a full warning squiggle,
+            // rather than drawing the same attention as a High finding.
+            tags: matches!(f.severity(), Severity::Low).then(|| vec![DiagnosticTag::UNNECESSARY]),
             source: Some("padlock".to_string()),
             code: Some(lsp_types::NumberOrString::String(f.kind_name().to_string())),
             message: format_message(s, f),
@@ -962,5 +1059,78 @@ mod tests {
             panic!("expected Nested response");
         };
         assert!(symbols.is_empty());
+    }
+
+    #[test]
+    fn editor_overrides_from_json_reads_nested_padlock_section() {
+        let value = serde_json::json!({"padlock": {"minSeverity": "high", "arch": "aarch64"}});
+        let overrides = EditorOverrides::from_json(&value);
+        assert_eq!(overrides.min_severity, Some(Severity::High));
+        assert_eq!(overrides.arch_override.as_deref(), Some("aarch64"));
+    }
+
+    #[test]
+    fn editor_overrides_from_json_reads_flat_shape() {
+        // initializationOptions is already padlock's own object — no
+        // nested "padlock" key, unlike a client's whole settings tree.
+        let value = serde_json::json!({"minSeverity": "low"});
+        let overrides = EditorOverrides::from_json(&value);
+        assert_eq!(overrides.min_severity, Some(Severity::Low));
+    }
+
+    #[test]
+    fn editor_overrides_from_json_ignores_unknown_severity() {
+        let value = serde_json::json!({"minSeverity": "bogus"});
+        assert_eq!(EditorOverrides::from_json(&value).min_severity, None);
+    }
+
+    #[test]
+    fn editor_overrides_from_json_empty_object_is_default() {
+        assert_eq!(
+            EditorOverrides::from_json(&serde_json::json!({})),
+            EditorOverrides::default()
+        );
+    }
+
+    #[test]
+    fn apply_to_overrides_file_config_min_severity_and_arch() {
+        let overrides = EditorOverrides {
+            min_severity: Some(Severity::High),
+            arch_override: Some("wasm32".to_string()),
+        };
+        let config = overrides.apply_to(Config::default());
+        assert_eq!(config.min_severity, Severity::High);
+        assert_eq!(config.arch_override.as_deref(), Some("wasm32"));
+    }
+
+    #[test]
+    fn apply_to_leaves_file_config_when_overrides_absent() {
+        let file_config = Config {
+            min_severity: Severity::Medium,
+            arch_override: Some("riscv64".to_string()),
+            ..Config::default()
+        };
+        let config = EditorOverrides::default().apply_to(file_config.clone());
+        assert_eq!(config, file_config);
+    }
+
+    #[test]
+    fn diagnostics_for_struct_tags_only_low_severity_as_unnecessary() {
+        let report = analyze_text(
+            padded_c_struct(),
+            &padlock_source::SourceLanguage::C,
+            &X86_64_SYSV,
+            &Config::default(),
+        );
+        let diags = diagnostics_for_struct(&report.structs[0]);
+        assert!(!diags.is_empty());
+        for d in &diags {
+            let is_low = d.severity == Some(DiagnosticSeverity::HINT);
+            assert_eq!(
+                d.tags.as_deref() == Some(&[DiagnosticTag::UNNECESSARY][..]),
+                is_low,
+                "only Low-severity (HINT) diagnostics should carry the UNNECESSARY tag"
+            );
+        }
     }
 }

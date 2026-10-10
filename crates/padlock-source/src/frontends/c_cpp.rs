@@ -729,7 +729,7 @@ fn parse_class_specifier(
         struct_alignas = extract_declspec_align(header_text);
     }
     if struct_alignas.is_none() && node.start_byte() > 0 {
-        let look_back = node.start_byte().saturating_sub(256);
+        let look_back = floor_to_char_boundary(source, node.start_byte().saturating_sub(256));
         struct_alignas = extract_declspec_align(&source[look_back..node.start_byte()]);
     }
 
@@ -1289,7 +1289,7 @@ fn parse_struct_or_union_specifier(
         struct_alignas = extract_declspec_align(header_text);
     }
     if struct_alignas.is_none() && node.start_byte() > 0 {
-        let look_back = node.start_byte().saturating_sub(256);
+        let look_back = floor_to_char_boundary(source, node.start_byte().saturating_sub(256));
         struct_alignas = extract_declspec_align(&source[look_back..node.start_byte()]);
     }
 
@@ -1515,6 +1515,18 @@ fn extract_aligned_from_c_field_text(field_source: &str) -> Option<usize> {
 
 /// Parse an alignment value from MSVC `__declspec(align(N))`.
 /// Returns `None` when no such specifier is present or the value cannot be parsed.
+/// Nudges `index` forward to the nearest UTF-8 char boundary. Used for a fixed-size
+/// byte look-back window (e.g. `start.saturating_sub(256)`), which can otherwise land
+/// inside a multi-byte character — an em dash or box-drawing glyph in a comment panics
+/// on slicing (`str` indices must be char boundaries). Moving forward only shrinks the
+/// window slightly rather than guessing backward past the start.
+fn floor_to_char_boundary(source: &str, mut index: usize) -> usize {
+    while index < source.len() && !source.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
 fn extract_declspec_align(source: &str) -> Option<usize> {
     let mut search = source;
     while let Some(pos) = search.find("__declspec(") {
@@ -3403,5 +3415,73 @@ struct CacheAligned {
             l.total_size, 64,
             "struct must be padded to 64B (struct align=64)"
         );
+    }
+
+    #[test]
+    fn floor_to_char_boundary_nudges_forward_past_multibyte_char() {
+        // '─' (U+2500) is 3 bytes: 0xE2 0x94 0x80. Position it so a byte at
+        // offset 255 starts it, meaning offsets 256 and 257 land inside it.
+        let mut s = String::new();
+        s.push_str(&"a".repeat(255));
+        s.push('─');
+        s.push_str(&"a".repeat(10));
+        assert!(s.is_char_boundary(255));
+        assert!(!s.is_char_boundary(256));
+        assert!(!s.is_char_boundary(257));
+        assert!(s.is_char_boundary(258));
+
+        assert_eq!(floor_to_char_boundary(&s, 256), 258);
+        assert_eq!(floor_to_char_boundary(&s, 257), 258);
+        // Already-valid boundaries are returned unchanged.
+        assert_eq!(floor_to_char_boundary(&s, 255), 255);
+        assert_eq!(floor_to_char_boundary(&s, 258), 258);
+    }
+
+    #[test]
+    fn cpp_struct_with_multibyte_comment_in_lookback_window_does_not_panic() {
+        // Regression test: `__declspec(align(N))` detection falls back to
+        // scanning a fixed 256-byte window before the struct's start byte.
+        // A multi-byte character (em dash, box-drawing glyph — common in
+        // "pretty" separator comments) anywhere in that window used to panic
+        // with "byte index N is not a char boundary" because the window's
+        // start was raw arithmetic (`start_byte - 256`), not derived from any
+        // char-aware search.
+        let mut src = String::from("// ");
+        src.push_str(&"a".repeat(252));
+        src.push('─'); // 3-byte char, deliberately not aligned to the window
+        src.push_str(&"a".repeat(254));
+        src.push('\n');
+        src.push_str("struct Foo { int x; };\n");
+
+        let struct_pos = src.find("struct Foo").expect("test fixture built wrong");
+        // Confirm this fixture actually exercises the bug before relying on it.
+        assert!(
+            !src.is_char_boundary(struct_pos.saturating_sub(256)),
+            "test fixture must place a non-boundary offset inside the 256-byte lookback window"
+        );
+
+        let layouts = parse_cpp(&src, &X86_64_SYSV).expect("must not panic on non-ASCII comment");
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].name, "Foo");
+    }
+
+    #[test]
+    fn cpp_class_with_multibyte_comment_in_lookback_window_does_not_panic() {
+        let mut src = String::from("// ");
+        src.push_str(&"a".repeat(252));
+        src.push('─');
+        src.push_str(&"a".repeat(254));
+        src.push('\n');
+        src.push_str("class Foo { public: int x; };\n");
+
+        let struct_pos = src.find("class Foo").expect("test fixture built wrong");
+        assert!(
+            !src.is_char_boundary(struct_pos.saturating_sub(256)),
+            "test fixture must place a non-boundary offset inside the 256-byte lookback window"
+        );
+
+        let layouts = parse_cpp(&src, &X86_64_SYSV).expect("must not panic on non-ASCII comment");
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].name, "Foo");
     }
 }

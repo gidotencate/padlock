@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.19.0] — 2026-10-10
+
+### Fixed
+- **C/C++ analysis panicked on non-ASCII characters in comments**: `parse_class_specifier`/`parse_struct_or_union_specifier`'s `__declspec(align(N))` fallback scans a fixed 256-byte look-back window before the struct's start byte (`start_byte.saturating_sub(256)`), raw arithmetic with no awareness of UTF-8 char boundaries. A multi-byte character anywhere in that window (an em dash, a box-drawing separator like `─`, an arrow `→` — exactly the kind of "pretty" divider comment real codebases use) could land the window's start inside it, panicking with `byte index N is not a char boundary`. Since the VS Code extension and LSP both shell out to (or embed) this frontend, this surfaced as "analysis failed"/"doesn't analyze" for an otherwise perfectly ordinary file, with no indication the cause was a stray `─` in a comment three structs up. Fixed with a `floor_to_char_boundary` helper that nudges the window start forward to a valid boundary; both occurrences of the pattern fixed.
+
 ## [0.18.0] — 2026-10-10
 
 ### Fixed

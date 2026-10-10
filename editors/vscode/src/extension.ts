@@ -317,6 +317,15 @@ function analyzeFile(filePath: string): void {
               );
             }
           });
+      } else {
+        // Any other failure (a CLI flag this binary doesn't recognise yet —
+        // e.g. an installed `padlock` older than this extension expects,
+        // a parse crash, anything exiting non-zero with no JSON on stdout)
+        // was previously swallowed entirely: the status bar just silently
+        // reverted with no indication analysis had stopped working at all.
+        vscode.window.showWarningMessage(
+          `padlock: analysis failed — ${err.message.split("\n")[0]}`,
+        );
       }
       // Restore status bar to previous state on error
       updateStatusBar(vscode.window.activeTextEditor?.document);

@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.18.0] — 2026-10-10
+
+### Fixed
+- **VS Code extension: on-save analysis failures were silently swallowed**: `analyzeFile()`'s error handler only surfaced a message for `ENOENT` (executable not found); any other failure — most importantly a CLI flag the resolved `padlock` binary doesn't recognise yet (e.g. a version-skewed install predating `--no-cache`, added in `0.14.0`) — just reverted the status bar with zero indication analysis had stopped working at all. Root-caused live: the globally `cargo install`-ed `padlock` on this machine's PATH was a stale `0.12.0` build, so every on-save call since `--no-cache` was wired in has been failing with `error: unexpected argument '--no-cache' found`, invisibly. Now shows a warning with the actual error for any non-`ENOENT` failure.
+
 ## [0.17.0] — 2026-10-10
 
 ### Fixed

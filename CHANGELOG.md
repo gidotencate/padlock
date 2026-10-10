@@ -2,23 +2,29 @@
 
 All notable changes to padlock are documented here.
 
+## [0.14.0] — 2026-10-10
+
+### Added
+- **`--no-cache`** flag on `analyze`/`summary`/`list`/`check`/`explain`: skips reading from and writing to `.padlock-cache/` entirely. Intended for single-file invocations (e.g. an editor's on-save analysis) where the cache can never be reused and only adds disk I/O and a stray cache directory.
+- **C++ `// padlock:instantiate(Args...)` template instantiation**: name concrete type arguments directly above a `template<...>` declaration to get a real, sized layout for that instantiation instead of a skip note — `// padlock:instantiate(float)` above `template<typename T> struct Vector3 { T x, y, z; }` produces an analyzed `Vector3<float>`. One line per desired instantiation; multi-parameter templates list arguments positionally. Verified against real `g++ -g` DWARF output for ordinary aggregates.
+- **`padlock diff --against <git-ref>`**: compares struct layout between a git ref and the working tree (size, padding, score — not the existing declared-vs-optimal-order diff), so a size/alignment/field change on a `#[repr(C)]`/`extern` struct shows up directly in a pre-merge check instead of hiding in a plain source diff.
+- **VS Code extension: CodeLens and line highlighting**: each struct's declaration line gets a clickable `padlock: score N · MB wasted` CodeLens (click to apply the reorder fix directly) and a severity-tinted background (red for High, amber for Medium), so problem structs are visible while scrolling without opening the Problems panel.
+
+### Fixed
+- **`padlock-cli`/`padlock-lsp` crates.io packages shipped the wrong README**: both inherited `readme.workspace = true`, which resolves to the root `README.md` — two directories outside the crate's own package root, so `cargo package` silently falls back to whatever stray `README.md` happens to sit in the crate directory instead (a year-old stub for `padlock-cli`; nothing at all for `padlock-lsp`). Both now point `readme` at an in-package file; `padlock-lsp` got one. This fix lands in `0.14.0` — the `0.13.0` package already published to crates.io still has the stale README; crates.io versions are immutable, so it can't be corrected in place.
+- **`collect_layouts` silently dropped duplicate-line structs**: the final dedup pass keyed on `(source_file, source_line)` only, so two distinct C++ template instantiations declared on the same line (same template, different `padlock:instantiate` args) collapsed into one. Dedup key now includes the struct name.
+
 ## [0.13.0] — 2026-10-10
 
 ### Added
 - **`padlock-lsp` document symbols** (`textDocument/documentSymbol`): one outline entry per struct (`name` + `N bytes · score X` as `detail`).
 - **`padlock-lsp` editor-pushed config**: `initializationOptions` and `workspace/didChangeConfiguration` can now set `minSeverity`/`arch` directly from the editor, layered on top of `.padlock.toml` — a settings change re-analyzes every open document immediately, with no need to touch a repo file. Diagnostics also tag Low-severity findings with `DiagnosticTag::UNNECESSARY` so supporting clients render them faded.
 - **`padlock-lsp` `.padlock.toml` honoring**: `ignore`, `min_severity`, and `arch` overrides from the config file are now applied on every analysis pass, matching the CLI exactly.
-- **`--no-cache`** flag on `analyze`/`summary`/`list`/`check`/`explain`: skips reading from and writing to `.padlock-cache/` entirely. Intended for single-file invocations (e.g. an editor's on-save analysis) where the cache can never be reused and only adds disk I/O and a stray cache directory.
-- **C++ `// padlock:instantiate(Args...)` template instantiation**: name concrete type arguments directly above a `template<...>` declaration to get a real, sized layout for that instantiation instead of a skip note — `// padlock:instantiate(float)` above `template<typename T> struct Vector3 { T x, y, z; }` produces an analyzed `Vector3<float>`. One line per desired instantiation; multi-parameter templates list arguments positionally. Verified against real `g++ -g` DWARF output for ordinary aggregates.
-- **`padlock diff --against <git-ref>`**: compares struct layout between a git ref and the working tree (size, padding, score — not the existing declared-vs-optimal-order diff), so a size/alignment/field change on a `#[repr(C)]`/`extern` struct shows up directly in a pre-merge check instead of hiding in a plain source diff.
-- **VS Code extension: CodeLens and line highlighting**: each struct's declaration line gets a clickable `padlock: score N · MB wasted` CodeLens (click to apply the reorder fix directly) and a severity-tinted background (red for High, amber for Medium), so problem structs are visible while scrolling without opening the Problems panel.
 - CI: `cargo-nextest` for process-isolated, cross-binary parallel test runs, and a `cargo-semver-checks` job that fails a PR on breaking public API changes against the last tag.
 
 ### Fixed
 - **`padlock --version` showing `unknown`** for a `cargo install padlock-cli` from crates.io: `build.rs` only tried `git rev-parse`, which fails outside a git checkout (crates.io strips `.git` from published packages). Now falls back to the commit SHA recorded in `.cargo_vcs_info.json`.
 - Release names and notes are now populated from the matching `## [X.Y.Z]` section of `CHANGELOG.md` instead of being left blank.
-- **`padlock-cli`/`padlock-lsp` crates.io packages shipped the wrong README**: both inherited `readme.workspace = true`, which resolves to the root `README.md` — two directories outside the crate's own package root, so `cargo package` silently falls back to whatever stray `README.md` happens to sit in the crate directory instead (a year-old stub for `padlock-cli`; nothing at all for `padlock-lsp`). Both now point `readme` at an in-package file; `padlock-lsp` got one.
-- **`collect_layouts` silently dropped duplicate-line structs**: the final dedup pass keyed on `(source_file, source_line)` only, so two distinct C++ template instantiations declared on the same line (same template, different `padlock:instantiate` args) collapsed into one. Dedup key now includes the struct name.
 
 ### Changed
 - **`padlock-core::config`**: moved from `padlock-cli` so `padlock-lsp` can depend on it without depending on the CLI crate. No behavior change.

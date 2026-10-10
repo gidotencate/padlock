@@ -2,7 +2,7 @@
 
 All notable changes to padlock are documented here.
 
-## [0.14.0] — 2026-10-10
+## [0.15.0] — 2026-10-10
 
 ### Added
 - **`--no-cache`** flag on `analyze`/`summary`/`list`/`check`/`explain`: skips reading from and writing to `.padlock-cache/` entirely. Intended for single-file invocations (e.g. an editor's on-save analysis) where the cache can never be reused and only adds disk I/O and a stray cache directory.
@@ -11,7 +11,7 @@ All notable changes to padlock are documented here.
 - **VS Code extension: CodeLens and line highlighting**: each struct's declaration line gets a clickable `padlock: score N · MB wasted` CodeLens (click to apply the reorder fix directly) and a severity-tinted background (red for High, amber for Medium), so problem structs are visible while scrolling without opening the Problems panel.
 
 ### Fixed
-- **`padlock-cli`/`padlock-lsp` crates.io packages shipped the wrong README**: both inherited `readme.workspace = true`, which resolves to the root `README.md` — two directories outside the crate's own package root, so `cargo package` silently falls back to whatever stray `README.md` happens to sit in the crate directory instead (a year-old stub for `padlock-cli`; nothing at all for `padlock-lsp`). Both now point `readme` at an in-package file; `padlock-lsp` got one. This fix lands in `0.14.0` — the `0.13.0` package already published to crates.io still has the stale README; crates.io versions are immutable, so it can't be corrected in place.
+- **`padlock-cli`/`padlock-lsp` crates.io packages shipped the wrong README**: both inherited `readme.workspace = true`, which resolves to the root `README.md` — two directories outside the crate's own package root, so `cargo package` silently falls back to whatever stray `README.md` happens to sit in the crate directory instead (a year-old stub for `padlock-cli`; nothing at all for `padlock-lsp`). Both now point `readme` at an in-package file; `padlock-lsp` got one. This fix lands in `0.15.0` — the `0.13.0` package already published to crates.io still has the stale README; crates.io versions are immutable, so it can't be corrected in place.
 - **`collect_layouts` silently dropped duplicate-line structs**: the final dedup pass keyed on `(source_file, source_line)` only, so two distinct C++ template instantiations declared on the same line (same template, different `padlock:instantiate` args) collapsed into one. Dedup key now includes the struct name.
 - **VS Code extension: stale status bar tooltip**: the "not yet analyzed" branch reset the status bar's visible text but not its tooltip, so hovering over it could show a real score/finding count left over from a previous update while the text itself already read the neutral `padlock` state — misleadingly implying the file had been analyzed when it hadn't.
 

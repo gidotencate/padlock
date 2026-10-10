@@ -394,6 +394,11 @@ All notable changes to padlock are documented here.
   - `cache.rs`: nested `if let Some(dir)` / `if err` collapsed to let-chain
   - `commands/analyze.rs`: 8-argument `run` refactored — output and arch options moved into `AnalyzeOpts` struct, bringing the function back under the 7-argument limit
 
+## [0.7.2] — 2026-04-11
+
+### Fixed
+- `cargo fmt`: long-line reformatting in `go.rs` and `rust.rs`
+
 ## [0.8.0] — 2026-04-11
 
 ### Added
@@ -446,6 +451,16 @@ All notable changes to padlock are documented here.
 
 ### Changed
 - `tree-sitter` upgraded from `0.22` to `0.23`; grammar crates updated to matching versions (`tree-sitter-c 0.23`, `tree-sitter-cpp 0.23`, `tree-sitter-go 0.23`). Language initialisation now uses the `LANGUAGE.into()` API instead of the deprecated `language()` function.
+
+## [0.5.5] — 2026-04-09
+
+### Changed
+- GitHub Action renamed to `padlock-action`; VS Code extension icon and license added
+
+## [0.5.4] — 2026-04-09
+
+### Changed
+- Added CHANGELOG, one-line pitch, pre-commit docs, and VS Code extension
 
 ## [0.5.3] — 2026-04-09
 

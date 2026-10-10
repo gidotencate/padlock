@@ -705,3 +705,86 @@ mod tests {
         assert_eq!(layouts[0].fields[0].name, "x");
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use padlock_core::arch::X86_64_SYSV;
+
+    #[test]
+    fn truncated_header_errors_not_panics() {
+        for len in 0..24 {
+            let data = vec![0u8; len];
+            let r = extract_from_btf(&data, &X86_64_SYSV);
+            assert!(r.is_err(), "len={len} should error, not panic");
+        }
+    }
+
+    #[test]
+    fn huge_type_off_errors_not_panics() {
+        let mut btf = vec![0u8; 24];
+        btf[0..2].copy_from_slice(&BTF_MAGIC.to_le_bytes());
+        btf[4..8].copy_from_slice(&24u32.to_le_bytes()); // hdr_len
+        btf[8..12].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // type_off huge
+        btf[12..16].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // type_len huge
+        let r = extract_from_btf(&btf, &X86_64_SYSV);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn truncated_mid_struct_member_does_not_panic() {
+        // A STRUCT header claiming vlen=5 members but with zero member bytes
+        // actually present in type_data.
+        let strings: &[u8] = b"\0foo\0";
+        let str_len = strings.len() as u32;
+        let mut type_data: Vec<u8> = Vec::new();
+        type_data.extend_from_slice(&1u32.to_le_bytes()); // name_off
+        type_data.extend_from_slice(&((BTF_KIND_STRUCT << 24) | 5u32).to_le_bytes()); // vlen=5, lying
+        type_data.extend_from_slice(&4u32.to_le_bytes()); // size
+        // no member bytes at all follow
+        let type_len = type_data.len() as u32;
+        let hdr_len: u32 = 24;
+        let mut btf = Vec::new();
+        btf.extend_from_slice(&BTF_MAGIC.to_le_bytes());
+        btf.push(1);
+        btf.push(0);
+        btf.extend_from_slice(&hdr_len.to_le_bytes());
+        btf.extend_from_slice(&0u32.to_le_bytes());
+        btf.extend_from_slice(&type_len.to_le_bytes());
+        btf.extend_from_slice(&type_len.to_le_bytes());
+        btf.extend_from_slice(&str_len.to_le_bytes());
+        btf.extend_from_slice(&type_data);
+        btf.extend_from_slice(strings);
+
+        let r = extract_from_btf(&btf, &X86_64_SYSV);
+        assert!(r.is_ok(), "malformed vlen should degrade gracefully: {r:?}");
+    }
+
+    #[test]
+    fn name_off_past_end_of_strings_does_not_panic() {
+        let strings: &[u8] = b"\0";
+        let str_len = strings.len() as u32;
+        let mut type_data: Vec<u8> = Vec::new();
+        // INT type whose name_off points far past the (tiny) string table.
+        type_data.extend_from_slice(&999_999u32.to_le_bytes());
+        type_data.extend_from_slice(&(BTF_KIND_INT << 24).to_le_bytes());
+        type_data.extend_from_slice(&4u32.to_le_bytes());
+        type_data.extend_from_slice(&0u32.to_le_bytes());
+        let type_len = type_data.len() as u32;
+        let hdr_len: u32 = 24;
+        let mut btf = Vec::new();
+        btf.extend_from_slice(&BTF_MAGIC.to_le_bytes());
+        btf.push(1);
+        btf.push(0);
+        btf.extend_from_slice(&hdr_len.to_le_bytes());
+        btf.extend_from_slice(&0u32.to_le_bytes());
+        btf.extend_from_slice(&type_len.to_le_bytes());
+        btf.extend_from_slice(&type_len.to_le_bytes());
+        btf.extend_from_slice(&str_len.to_le_bytes());
+        btf.extend_from_slice(&type_data);
+        btf.extend_from_slice(strings);
+
+        let r = extract_from_btf(&btf, &X86_64_SYSV);
+        assert!(r.is_ok());
+    }
+}

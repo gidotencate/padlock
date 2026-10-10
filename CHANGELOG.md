@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.20.0] — 2026-10-10
+
+### Changed
+- **Audited the BTF binary parser (`padlock-dwarf/src/btf.rs`) for the same unchecked-offset panic class fixed in the C/C++ frontend this cycle.** Found it already correctly bounds-checked at every slice site (header length check, the per-iteration loop guard, explicit `ARRAY`/`STRUCT`/`UNION` member-count guards, and `read_btf_str`'s own offset check). Added 4 permanent adversarial regression tests — truncated header, overflowing `type_off`/`type_len`, a lying `vlen` with no member bytes present, and a name offset past the string table — all confirmed to error gracefully rather than panic. No behavior change; this closes out the "are there other situations where padlock could break" follow-up from the C++ panic fix.
+
 ## [0.19.0] — 2026-10-10
 
 ### Fixed

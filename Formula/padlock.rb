@@ -1,28 +1,28 @@
 class Padlock < Formula
   desc "Struct memory layout analyzer for C, C++, Rust, Go, and Zig"
   homepage "https://github.com/gidotencate/padlock"
-  version "0.11.0"
+  version "0.12.0"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
-      url "https://github.com/gidotencate/padlock/releases/download/v0.11.0/padlock-v0.11.0-aarch64-apple-darwin.tar.gz"
-      sha256 "12eda5449093106f1f716d313771be1408cb8fc38429d4d8b92ae0a2b6553a12"
+      url "https://github.com/gidotencate/padlock/releases/download/v0.12.0/padlock-v0.12.0-aarch64-apple-darwin.tar.gz"
+      sha256 "52ccbfac93c2c90575ef5d30c55cf41fff1ee0a9c7ff6a44d1ec8b84f61a41d0"
     end
     on_intel do
-      url "https://github.com/gidotencate/padlock/releases/download/v0.11.0/padlock-v0.11.0-x86_64-apple-darwin.tar.gz"
-      sha256 "5c1261c87a95c8cbec0d1945e10ce0ca954a344a292b1aa5d8135dc09e4aa499"
+      url "https://github.com/gidotencate/padlock/releases/download/v0.12.0/padlock-v0.12.0-x86_64-apple-darwin.tar.gz"
+      sha256 "c91c567a657816900c9c0039770cbd4017ddf63a52e5e4a7f32596360960b115"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/gidotencate/padlock/releases/download/v0.11.0/padlock-v0.11.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "e9aa07d586935cd8779f8db14bd070c0233f2b3e97f9c6984d230c9e5856ddc6"
+      url "https://github.com/gidotencate/padlock/releases/download/v0.12.0/padlock-v0.12.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "3448a293dcda8a3a4f16df0f60cd962728e0f53adb16b88371ae2fc599aa8f30"
     end
     on_intel do
-      url "https://github.com/gidotencate/padlock/releases/download/v0.11.0/padlock-v0.11.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "4a99478e9ae5cfad725119c36cd2ba11012a088ff169df425dc30bea6237a05b"
+      url "https://github.com/gidotencate/padlock/releases/download/v0.12.0/padlock-v0.12.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "f66e94ae8e1ab0c86ea93a92d30f33fb62633e4e52b91a73c2a384bba49a6d99"
     end
   end
 

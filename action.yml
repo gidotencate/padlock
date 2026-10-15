@@ -113,7 +113,7 @@ runs:
     - name: Cache padlock binary
       id: cache
       if: steps.resolve.outputs.version != ''
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/.padlock-bin
         key: padlock-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.version }}

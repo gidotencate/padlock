@@ -65,7 +65,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Embedding hints** | When a struct with waste is embedded in others, output notes "fixing this would also shrink Foo, Bar" |
 | **Generated-file skipping** | Machine-generated files (`// Code generated`, `// @generated`, `.pb.h`/`.pb.cc`, …) are silently skipped by default; `--include-generated` opts back in |
 | **Path exclusions** | `exclude_paths = ["proto/**", "vendor/**"]` in `.padlock.toml` skips generated or third-party files |
-| **ABI safety** | `padlock fix` warns before reordering fixed-layout structs (`repr(C)`, C, Go, Zig) that may break FFI or serialization |
+| **ABI safety** | `padlock fix` warns before reordering fixed-layout structs (`repr(C)` Rust, C, Go, `extern`/`packed` Zig) that may break FFI or serialization — a plain (non-`extern`, non-`packed`) Zig struct is field-order-unstable like Rust's default `repr(Rust)` and does **not** get this warning, since the compiler may already reorder it |
 | **CI-ready** | SARIF output, `action.yml`, exit-code gating on high-severity findings |
 | **`cargo padlock`** | Cargo subcommand — builds your project then analyses the binary |
 | **Compile-time assertions** | `#[padlock::assert_no_padding]` / `#[padlock::assert_size(N)]` proc macros |
@@ -615,17 +615,21 @@ Each struct receives a score from 0 (worst) to 100 (perfect packing, no concurre
 
 ## Language Support
 
-| Language | Source Analysis | Binary (DWARF/BTF) |
+Source analysis never invokes a compiler — field sizes come from a built-in type table, so how *accurate* that is depends on whether the language's layout is actually fixed by a spec/ABI, or left to the compiler's discretion. These are not equally reliable, even though all five "work":
+
+| Language | Source analysis accuracy | Binary (DWARF/BTF) |
 |---|---|---|
-| C | ✓ | ✓ |
-| C++ | ✓ | ✓ |
-| Rust | ✓ | ✓ |
-| Go | ✓ | ✓ |
-| Zig | ✓ | via DWARF |
+| C | **Accurate** — struct layout is ABI-fixed in declaration order | ✓ |
+| Go | **Accurate** — the language spec guarantees declaration-order layout, never reordered by the compiler | ✓ |
+| Zig (`extern`/`packed`) | **Accurate** — ABI-defined layout | via DWARF |
+| Zig (plain struct) | Approximate — field order is implementation-defined, the compiler may reorder freely; findings are severity-downgraded, same as Rust `repr(Rust)` | via DWARF |
+| Rust (`repr(C)`/`packed`/`transparent`) | **Accurate** | ✓ |
+| Rust (`repr(Rust)`, the default) | Approximate — no layout guarantee at all; useful for finding issues, not for ABI verification | ✓ |
+| C++ | Approximate — templates are skipped entirely (no monomorphisation from source alone), and even ordinary structs aren't compiler-verified; vtable/inheritance/bitfield layout is modeled but not guaranteed to match a specific compiler | ✓ |
 | eBPF (BTF) | — | ✓ (`.BTF` ELF section) |
 
-**Notes on source analysis:**
-- Source analysis is approximate — no compiler is invoked; field sizes come from a built-in type table.
+So: if you only ever pass source files (no `padlock analyze <binary>`), C, Go, and `extern`/`packed` Zig give you compiler-grade accuracy for free. Plain Zig structs and Rust's default `repr(Rust)` carry the same "compiler may reorder" caveat — real, not a padlock limitation, since there genuinely is no fixed layout to report. C++ is the one language where source analysis has a hard structural ceiling (templates, STL internals) regardless of how carefully it's modeled — binary (DWARF) analysis is the only way to get a compiler-verified answer there.
+
 - C++ `alignas(N)` field and struct-level annotations are extracted from source and applied to field alignment and struct trailing padding. For the most precise layout (e.g. complex template instantiations), binary (DWARF) analysis remains the authoritative path.
 
 ### Rust repr support

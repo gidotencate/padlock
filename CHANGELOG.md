@@ -2,6 +2,39 @@
 
 All notable changes to padlock are documented here.
 
+## [0.24.0] — 2026-10-21
+
+### Fixed
+- **Every Rust struct with 2+ `Arc<T>` fields on the same cache line got a High-severity "FalseSharing" finding and a 30-point score hit, regardless of what's inside the `Arc`.** The Rust frontend records only the outer generic name (`"Arc"`) for `Arc<T>`/`Rc<T>` fields, so the concurrency heuristic's `Arc` substring match couldn't tell `Arc<Mutex<T>>` (a real lock) apart from `Arc<String>`/`Arc<Config>`/`Arc<dyn Trait>` (plain shared ownership, no synchronization at all — one of the most common patterns in real Rust code). `struct Config { name: Arc<String>, logger: Arc<Logger> }` scored 70/100 with a High finding for no actual reason. Fixed by recording the inner type's leaf name too (`Arc<Mutex>`, `Arc<String>`) and matching the lock/atomic substrings against *that*, not the bare `Arc` wrapper. `Arc<Mutex<T>>`/`Arc<AtomicUsize>` etc. are still correctly flagged — verified both directions against the real binary.
+
+### Changed
+- **BREAKING (output)**: scores and findings change for any Rust struct holding 2+ `Arc<T>`/`Rc<T>` fields that don't wrap an actual lock/atomic type — such structs now correctly score higher with no spurious `FalseSharing` finding.
+
+## [0.23.0] — 2026-10-21
+
+### Fixed
+- **Per-struct caveat note said "repr(Rust)" for a plain Zig struct.** `is_repr_rust` is shared between Rust `repr(Rust)` structs and plain (non-`extern`/`packed`) Zig structs — both have compiler-defined, not fixed, field order — but the rendered note unconditionally used Rust's own term, which means nothing in Zig and actively misleads a Zig-only user about which language the caveat even applies to. Now picks the wording from the struct's source file extension.
+
+### Changed
+- **README's top-level language-support table flattened five very different accuracy guarantees into uniform checkmarks.** C and Go are genuinely ABI-fixed from source alone (no compiler invoked, and none needed); `extern`/`packed` Zig and `repr(C)`/`packed`/`transparent` Rust are too. But plain Zig structs and Rust's default `repr(Rust)` have no layout guarantee at all — the compiler may reorder freely — and C++ has a hard structural ceiling (templates can't be sized from source without monomorphisation) regardless of how carefully everything else is modeled. The table and a `padlock fix` ABI-safety feature-row description previously said "C, Go, Zig" as if uniformly fixed-layout, which isn't true for a plain Zig struct. Rewritten to show the real accuracy tiers per construct, not per language.
+
+Both found during an audit of whether padlock communicates its own confidence level clearly for each language when only source files (no compiled binary) are analyzed.
+
+## [0.22.0] — 2026-10-21
+
+### Fixed
+- **`padlock watch --json` injected a terminal screen-clear escape sequence into stdout on every re-analysis, even when piped.** `clear_terminal()` was called unconditionally before each refresh — if `--json` output were piped into a consumer (or human-mode output redirected to a file/log), the raw `\x1b[2J\x1b[H` bytes would land directly in the stream, corrupting it. Found via a deliberate audit against the Unix philosophy ("the output of every program should become the input to another, as yet unknown, program"). Now gated on `!json && stdout.is_terminal()`.
+
+## [0.21.0] — 2026-10-21
+
+### Fixed
+- **Scorer silently docked 10 points from ordinary, non-concurrent structs with no finding shown to explain why.** The "potential false sharing" tier called `false_sharing::find_sharing_conflicts`, which flags *any* two fields sharing a cache line regardless of access pattern — true of nearly every struct under 64 bytes, concurrency or not. A perfectly packed, zero-waste `struct { long a; long b; }` scored 90, not 100, with zero findings listed. Replaced with a new `has_potential_sharing_risk` that requires at least one field in the shared cache line to actually be `Concurrent`. Also added the `reorder_deduction` field that was missing from `ScoreBreakdown` (currently unused outside tests, but was silently inconsistent with `total`).
+
+### Changed
+- **BREAKING (output)**: struct scores change for any non-concurrent struct that previously lost 10 points to the bug above — scores for such structs are now higher (correctly) and match what the displayed findings justify.
+
+Found via a deliberate audit of the scorer's internal consistency, verified against the real binary before and after the fix.
+
 ## [0.20.0] — 2026-10-10
 
 ### Changed

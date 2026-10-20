@@ -79,9 +79,16 @@ pub fn has_concurrent_fields(layout: &StructLayout) -> bool {
 fn is_concurrent_type(name: &str, lang: &SourceLanguage) -> bool {
     match lang {
         SourceLanguage::Rust => {
-            name.starts_with("Mutex")
-                || name.starts_with("RwLock")
-                || name.starts_with("Arc")
+            // Plain `Arc<T>`/`Rc<T>` is just shared ownership — not a
+            // synchronization primitive on its own, and most real Rust code
+            // uses Arc for read-mostly sharing (Arc<String>, Arc<Config>,
+            // Arc<dyn Trait>) with no implied lock on the pointer field
+            // itself. Only flag it as concurrent when the type name reveals
+            // an actual lock/atomic *inside* (`Arc<Mutex<T>>`,
+            // `Arc<AtomicUsize>`, …) — see the name-enrichment in
+            // `rust.rs::rust_type_size_align` that makes this visible.
+            name.contains("Mutex")
+                || name.contains("RwLock")
                 || name.contains("Atomic")
                 || name.starts_with("Condvar")
                 || name.starts_with("Once")
@@ -210,5 +217,63 @@ mod tests {
     fn has_concurrent_fields_false_when_none() {
         let layout = layout_with_fields(vec![field_with_type("x", "int")]);
         assert!(!has_concurrent_fields(&layout));
+    }
+
+    // ── plain Arc<T>/Rc<T> must not be treated as a concurrency hazard ─────
+    //
+    // Regression test: a bare `Arc` substring match used to classify every
+    // Arc/Rc field as `Concurrent`, regardless of what's actually inside.
+    // A struct with two ordinary Arc<T> fields (e.g. `Arc<String>`,
+    // `Arc<Logger>`) — an extremely common, completely non-concurrent Rust
+    // pattern — got a real "FalseSharing" High-severity finding and a
+    // 30-point score hit purely because both fields shared a cache line.
+    // Only an Arc wrapping an actual lock/atomic type should count.
+
+    #[test]
+    fn plain_arc_field_is_not_concurrent() {
+        let mut layout = layout_with_fields(vec![field_with_type("name", "Arc<String>")]);
+        annotate_concurrency(&mut layout, &SourceLanguage::Rust);
+        assert!(
+            matches!(layout.fields[0].access, AccessPattern::Unknown),
+            "plain Arc<T> must stay Unknown, not be flagged as a concurrency hazard"
+        );
+    }
+
+    #[test]
+    fn two_plain_arc_fields_have_no_concurrent_fields() {
+        let mut layout = layout_with_fields(vec![
+            field_with_type("name", "Arc<String>"),
+            field_with_type("logger", "Arc<Logger>"),
+        ]);
+        annotate_concurrency(&mut layout, &SourceLanguage::Rust);
+        assert!(
+            !has_concurrent_fields(&layout),
+            "two unrelated Arc<T> fields must not trigger false-sharing analysis at all"
+        );
+    }
+
+    #[test]
+    fn arc_of_mutex_is_still_concurrent() {
+        // Arc<Mutex<T>> genuinely wraps a lock — should still be flagged.
+        let mut layout = layout_with_fields(vec![field_with_type("state", "Arc<Mutex>")]);
+        annotate_concurrency(&mut layout, &SourceLanguage::Rust);
+        assert!(matches!(
+            layout.fields[0].access,
+            AccessPattern::Concurrent {
+                is_atomic: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn arc_of_atomic_is_concurrent_and_atomic() {
+        let mut layout = layout_with_fields(vec![field_with_type("counter", "Arc<AtomicUsize>")]);
+        annotate_concurrency(&mut layout, &SourceLanguage::Rust);
+        if let AccessPattern::Concurrent { is_atomic, .. } = &layout.fields[0].access {
+            assert!(*is_atomic);
+        } else {
+            panic!("expected Concurrent");
+        }
     }
 }

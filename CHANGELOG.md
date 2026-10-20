@@ -2,6 +2,16 @@
 
 All notable changes to padlock are documented here.
 
+## [0.23.0] — 2026-10-21
+
+### Fixed
+- **Per-struct caveat note said "repr(Rust)" for a plain Zig struct.** `is_repr_rust` is shared between Rust `repr(Rust)` structs and plain (non-`extern`/`packed`) Zig structs — both have compiler-defined, not fixed, field order — but the rendered note unconditionally used Rust's own term, which means nothing in Zig and actively misleads a Zig-only user about which language the caveat even applies to. Now picks the wording from the struct's source file extension.
+
+### Changed
+- **README's top-level language-support table flattened five very different accuracy guarantees into uniform checkmarks.** C and Go are genuinely ABI-fixed from source alone (no compiler invoked, and none needed); `extern`/`packed` Zig and `repr(C)`/`packed`/`transparent` Rust are too. But plain Zig structs and Rust's default `repr(Rust)` have no layout guarantee at all — the compiler may reorder freely — and C++ has a hard structural ceiling (templates can't be sized from source without monomorphisation) regardless of how carefully everything else is modeled. The table and a `padlock fix` ABI-safety feature-row description previously said "C, Go, Zig" as if uniformly fixed-layout, which isn't true for a plain Zig struct. Rewritten to show the real accuracy tiers per construct, not per language.
+
+Both found during an audit of whether padlock communicates its own confidence level clearly for each language when only source files (no compiled binary) are analyzed.
+
 ## [0.22.0] — 2026-10-21
 
 ### Fixed

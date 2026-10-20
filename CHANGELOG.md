@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.22.0] — 2026-10-21
+
+### Fixed
+- **`padlock watch --json` injected a terminal screen-clear escape sequence into stdout on every re-analysis, even when piped.** `clear_terminal()` was called unconditionally before each refresh — if `--json` output were piped into a consumer (or human-mode output redirected to a file/log), the raw `\x1b[2J\x1b[H` bytes would land directly in the stream, corrupting it. Found via a deliberate audit against the Unix philosophy ("the output of every program should become the input to another, as yet unknown, program"). Now gated on `!json && stdout.is_terminal()`.
+
 ## [0.21.0] — 2026-10-21
 
 ### Fixed

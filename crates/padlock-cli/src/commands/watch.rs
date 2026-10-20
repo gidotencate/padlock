@@ -16,6 +16,7 @@
 // FSEvents on macOS, ReadDirectoryChangesW on Windows). Directories are
 // watched recursively; files are watched directly.
 
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -66,7 +67,13 @@ pub fn run(path: &Path, json: bool) -> anyhow::Result<()> {
                 }
                 // Brief sleep to let the write fully flush before reading.
                 std::thread::sleep(Duration::from_millis(50));
-                clear_terminal();
+                // Never inject a screen-clear escape into stdout when it isn't
+                // a real terminal (--json piped into a consumer, or human
+                // output redirected to a file/log) — it would corrupt
+                // whatever is reading it. See `clear_terminal`'s own doc.
+                if !json && std::io::stdout().is_terminal() {
+                    clear_terminal();
+                }
                 eprintln!("padlock watch: change detected — re-analysing…\n");
                 analyse_and_print(&path, json);
                 last_run = Instant::now();
@@ -93,9 +100,12 @@ fn is_relevant_event(event: &Event) -> bool {
     )
 }
 
+/// ANSI escape: move cursor to top-left and clear screen. Only call this when
+/// stdout is an actual terminal and human output is being rendered — a raw
+/// escape sequence written into a pipe (`--json | consumer`, or output
+/// redirected to a file) corrupts whatever reads it, violating the basic
+/// expectation that one program's output can become another's input.
 fn clear_terminal() {
-    // ANSI escape: move cursor to top-left and clear screen.
-    // Works on Linux/macOS terminals; no-op on dumb terminals.
     print!("\x1b[2J\x1b[H");
 }
 

@@ -1,0 +1,60 @@
+[workspace]
+
+[package]
+name = "padlock-source-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+padlock-core = { path = "../../padlock-core" }
+padlock-dwarf = { path = "../../padlock-dwarf" }
+
+[dependencies.padlock-source]
+path = ".."
+
+[[bin]]
+name = "fuzz_parse_c"
+path = "fuzz_targets/fuzz_parse_c.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_cpp"
+path = "fuzz_targets/fuzz_parse_cpp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_go"
+path = "fuzz_targets/fuzz_parse_go.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_zig"
+path = "fuzz_targets/fuzz_parse_zig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_rust"
+path = "fuzz_targets/fuzz_parse_rust.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_btf"
+path = "fuzz_targets/fuzz_btf.rs"
+test = false
+doc = false
+bench = false

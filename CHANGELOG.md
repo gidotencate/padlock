@@ -2,6 +2,14 @@
 
 All notable changes to padlock are documented here.
 
+## [0.24.0] — 2026-10-21
+
+### Fixed
+- **Every Rust struct with 2+ `Arc<T>` fields on the same cache line got a High-severity "FalseSharing" finding and a 30-point score hit, regardless of what's inside the `Arc`.** The Rust frontend records only the outer generic name (`"Arc"`) for `Arc<T>`/`Rc<T>` fields, so the concurrency heuristic's `Arc` substring match couldn't tell `Arc<Mutex<T>>` (a real lock) apart from `Arc<String>`/`Arc<Config>`/`Arc<dyn Trait>` (plain shared ownership, no synchronization at all — one of the most common patterns in real Rust code). `struct Config { name: Arc<String>, logger: Arc<Logger> }` scored 70/100 with a High finding for no actual reason. Fixed by recording the inner type's leaf name too (`Arc<Mutex>`, `Arc<String>`) and matching the lock/atomic substrings against *that*, not the bare `Arc` wrapper. `Arc<Mutex<T>>`/`Arc<AtomicUsize>` etc. are still correctly flagged — verified both directions against the real binary.
+
+### Changed
+- **BREAKING (output)**: scores and findings change for any Rust struct holding 2+ `Arc<T>`/`Rc<T>` fields that don't wrap an actual lock/atomic type — such structs now correctly score higher with no spurious `FalseSharing` finding.
+
 ## [0.23.0] — 2026-10-21
 
 ### Fixed

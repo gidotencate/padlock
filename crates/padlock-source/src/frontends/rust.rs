@@ -179,6 +179,32 @@ fn rust_type_size_align(ty: &Type, arch: &'static ArchConfig) -> (usize, usize, 
             } else {
                 primitive_size_align(&name, arch)
             };
+            // Arc<T>/Rc<T> record only the outer "Arc"/"Rc" name below — the
+            // concurrency heuristic (padlock-source::concurrency) matches on
+            // substrings like "Mutex"/"RwLock"/"Atomic" in the type name, and
+            // without the inner type's leaf identifier, `Arc<Mutex<T>>` is
+            // indistinguishable from a plain `Arc<String>`. Append it (one
+            // level only, no deep unwrapping) so the heuristic can tell the
+            // two apart instead of treating every Arc/Rc field as a
+            // concurrency hazard regardless of what's actually inside.
+            let name = if matches!(name.as_str(), "Arc" | "Rc")
+                && let Some(inner_leaf) = seg.and_then(|s| {
+                    if let syn::PathArguments::AngleBracketed(ref ab) = s.arguments {
+                        ab.args.iter().find_map(|a| {
+                            if let syn::GenericArgument::Type(Type::Path(inner_tp)) = a {
+                                inner_tp.path.segments.last().map(|s| s.ident.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                }) {
+                format!("{name}<{inner_leaf}>")
+            } else {
+                name
+            };
             (size, align, TypeInfo::Primitive { name, size, align })
         }
         Type::Ptr(p) => {
@@ -1530,5 +1556,71 @@ struct Conn { port: u16, status: u32 }
             "enum with only lifetime params must be analyzed, not skipped"
         );
         assert_eq!(layouts[0].name, "Ref");
+    }
+
+    // ── Arc<T>/Rc<T> inner-type name enrichment ────────────────────────────
+    //
+    // Regression tests: the concurrency heuristic in `concurrency.rs` matches
+    // on substrings like "Mutex"/"Atomic" in the recorded type name. Without
+    // exposing the inner type, `Arc<Mutex<T>>` and `Arc<String>` were
+    // indistinguishable (both just "Arc"), which caused every multi-field
+    // Arc-holding struct — an extremely common Rust pattern with no
+    // synchronization involved at all — to be misclassified as a
+    // false-sharing hazard. See concurrency.rs's own tests for the
+    // end-to-end effect on `AccessPattern`.
+
+    fn field_type_name(src: &str) -> String {
+        let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
+        match &layouts[0].fields[0].ty {
+            padlock_core::ir::TypeInfo::Primitive { name, .. } => name.clone(),
+            other => panic!("expected Primitive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_of_plain_type_records_inner_name() {
+        assert_eq!(
+            field_type_name("struct S { x: std::sync::Arc<String> }"),
+            "Arc<String>"
+        );
+    }
+
+    #[test]
+    fn arc_of_mutex_records_inner_name() {
+        assert_eq!(
+            field_type_name("struct S { x: std::sync::Arc<std::sync::Mutex<u64>> }"),
+            "Arc<Mutex>"
+        );
+    }
+
+    #[test]
+    fn rc_of_plain_type_records_inner_name() {
+        assert_eq!(
+            field_type_name("struct S { x: std::rc::Rc<u32> }"),
+            "Rc<u32>"
+        );
+    }
+
+    #[test]
+    fn arc_sizing_unaffected_by_name_enrichment() {
+        // The enrichment must not change size/align: Arc<T> is always a
+        // thin pointer unless T is a trait object.
+        let layouts = parse_rust("struct S { x: std::sync::Arc<String> }", &X86_64_SYSV).unwrap();
+        assert_eq!(layouts[0].fields[0].size, 8);
+        assert_eq!(layouts[0].fields[0].align, 8);
+    }
+
+    #[test]
+    fn arc_of_dyn_trait_stays_fat_pointer_unenriched() {
+        // dyn Trait generic args aren't Type::Path, so the enrichment
+        // doesn't apply — name stays plain "Arc", sizing stays fat (2 words).
+        let name = field_type_name("struct S { x: std::sync::Arc<dyn std::fmt::Debug> }");
+        assert_eq!(name, "Arc");
+        let layouts = parse_rust(
+            "struct S { x: std::sync::Arc<dyn std::fmt::Debug> }",
+            &X86_64_SYSV,
+        )
+        .unwrap();
+        assert_eq!(layouts[0].fields[0].size, 16);
     }
 }

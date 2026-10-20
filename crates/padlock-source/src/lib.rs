@@ -724,4 +724,98 @@ class C : public B { int z; };
         assert_eq!(base_b.size, 8, "B is 8 bytes (A's int + B's int)");
         assert_eq!(c.total_size, 12);
     }
+
+    // ── end-to-end: Arc<T> through the real pipeline ───────────────────────
+    //
+    // The name-enrichment fix (rust.rs) and the concurrency classification
+    // fix (concurrency.rs) were each tested in isolation at their own unit
+    // level — rust.rs tests call `parse_rust` directly (which never runs
+    // `annotate_concurrency`), and concurrency.rs tests hand-build a
+    // `StructLayout` with an already-enriched type name string. Neither
+    // proves the two halves actually compose correctly through the real
+    // path a user hits (`parse_source_str`, which chains parse_rust ->
+    // annotate_concurrency). These tests close that gap.
+
+    #[test]
+    fn end_to_end_plain_arc_fields_not_flagged_concurrent() {
+        let src = "struct Config { name: std::sync::Arc<String>, logger: std::sync::Arc<Logger> }";
+        let layouts = parse_source_str(src, &SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        let config = &layouts[0];
+        assert!(
+            !concurrency::has_concurrent_fields(config),
+            "plain Arc<T> fields must not be classified as a concurrency hazard \
+             through the real parse pipeline, not just in isolated unit tests"
+        );
+    }
+
+    #[test]
+    fn end_to_end_arc_mutex_fields_still_flagged_concurrent() {
+        let src = "struct Shared { a: std::sync::Arc<std::sync::Mutex<u64>>, b: std::sync::Arc<std::sync::Mutex<u64>> }";
+        let layouts = parse_source_str(src, &SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        let shared = &layouts[0];
+        assert!(
+            concurrency::has_concurrent_fields(shared),
+            "Arc<Mutex<T>> must still be classified as concurrent through the real pipeline"
+        );
+    }
+
+    #[test]
+    fn end_to_end_arc_rwlock_field_is_concurrent() {
+        // Not covered by any existing unit test: RwLock wrapped in Arc,
+        // exercising the `.contains("RwLock")` branch (changed from
+        // `starts_with` alongside the Mutex fix) through the real pipeline.
+        let src = "struct S { data: std::sync::Arc<std::sync::RwLock<Vec<u8>>> }";
+        let layouts = parse_source_str(src, &SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        assert!(concurrency::has_concurrent_fields(&layouts[0]));
+    }
+
+    #[test]
+    fn end_to_end_rc_refcell_is_not_flagged_concurrent() {
+        // Rc<RefCell<T>> is the standard single-threaded shared-mutable-state
+        // pattern in Rust — RefCell provides no thread synchronization at
+        // all, so this must stay Unknown, not Concurrent, regardless of the
+        // Arc/Rc enrichment change.
+        let src = "struct S { shared: std::rc::Rc<std::cell::RefCell<Vec<u8>>> }";
+        let layouts = parse_source_str(src, &SourceLanguage::Rust, &X86_64_SYSV).unwrap();
+        assert!(!concurrency::has_concurrent_fields(&layouts[0]));
+    }
+
+    // ── C++ shared_ptr<T>/unique_ptr<T>: lock in that this bug class does
+    // not apply here ──────────────────────────────────────────────────────
+    //
+    // C++'s frontend extracts type names as raw source text (tree-sitter
+    // byte ranges), not a collapsed AST leaf identifier like Rust's `syn`
+    // does — so `std::shared_ptr<std::mutex>` naturally keeps "mutex" in
+    // its recorded name with no enrichment needed. Verified against the
+    // real binary (0.24.0) before writing this: plain shared_ptr<T> scores
+    // 100 with no finding; shared_ptr<std::mutex> still correctly triggers
+    // FalseSharing. This test locks that in — it would regress silently if
+    // the C++ type-name extraction ever changed to a simplified form.
+
+    #[test]
+    fn end_to_end_cpp_shared_ptr_plain_not_flagged_concurrent() {
+        let src = r#"
+struct Config {
+    std::shared_ptr<std::string> name;
+    std::shared_ptr<int> logger;
+};
+"#;
+        let layouts = parse_source_str(src, &SourceLanguage::Cpp, &X86_64_SYSV).unwrap();
+        assert!(
+            !concurrency::has_concurrent_fields(&layouts[0]),
+            "plain std::shared_ptr<T> must not be classified as a concurrency hazard"
+        );
+    }
+
+    #[test]
+    fn end_to_end_cpp_shared_ptr_mutex_still_flagged_concurrent() {
+        let src = r#"
+struct Shared {
+    std::shared_ptr<std::mutex> a;
+    std::shared_ptr<std::mutex> b;
+};
+"#;
+        let layouts = parse_source_str(src, &SourceLanguage::Cpp, &X86_64_SYSV).unwrap();
+        assert!(concurrency::has_concurrent_fields(&layouts[0]));
+    }
 }

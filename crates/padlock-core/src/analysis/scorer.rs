@@ -13,6 +13,8 @@ pub struct ScoreBreakdown {
     pub false_sharing_deduction: f64,
     /// Points deducted for hot/cold locality issues (max 15).
     pub locality_deduction: f64,
+    /// Points deducted for reorder-savings potential (max 15).
+    pub reorder_deduction: f64,
 }
 
 /// Score a layout on a 0–100 scale (100 = perfect, 0 = very bad).
@@ -35,11 +37,19 @@ pub fn score_with_breakdown(layout: &StructLayout) -> ScoreBreakdown {
 
     // False sharing: 30 confirmed, 10 potential.
     // Unions place all fields at offset 0 by definition — that is not a sharing hazard.
+    //
+    // The "potential" tier must check for *concurrency-relevant* sharing
+    // (has_potential_sharing_risk), not find_sharing_conflicts — that function
+    // flags any two fields sharing a cache line regardless of access pattern,
+    // which is true of nearly every struct under 64 bytes and was silently
+    // docking 10 points from completely ordinary, non-concurrent structs with
+    // no finding shown to explain why (e.g. a perfectly packed, zero-waste
+    // `struct { long a; long b; }` scored 90, not 100).
     let false_sharing_deduction = if layout.is_union {
         0.0
     } else if false_sharing::has_false_sharing(layout) {
         30.0
-    } else if !false_sharing::find_sharing_conflicts(layout).is_empty() {
+    } else if false_sharing::has_potential_sharing_risk(layout) {
         10.0
     } else {
         0.0
@@ -70,6 +80,7 @@ pub fn score_with_breakdown(layout: &StructLayout) -> ScoreBreakdown {
         padding_deduction,
         false_sharing_deduction,
         locality_deduction,
+        reorder_deduction,
     }
 }
 
@@ -131,5 +142,77 @@ mod tests {
         let bd = score_with_breakdown(&connection_layout());
         assert!(bd.padding_deduction > 0.0);
         assert!(bd.total < 100.0);
+    }
+
+    #[test]
+    fn clean_non_concurrent_struct_scores_100_not_90() {
+        // Regression test: a perfectly packed, zero-waste, non-concurrent
+        // struct with 2+ fields used to lose 10 points to the false-sharing
+        // "potential" tier, which (before the fix) flagged any two fields
+        // sharing a cache line regardless of concurrency — nearly every
+        // struct under 64 bytes. No finding was ever shown to explain the
+        // missing 10 points.
+        use crate::arch::X86_64_SYSV;
+        use crate::ir::{AccessPattern, Field, StructLayout, TypeInfo};
+        let layout = StructLayout {
+            name: "Clean".into(),
+            total_size: 16,
+            align: 8,
+            fields: vec![
+                Field {
+                    name: "a".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "u64".into(),
+                        size: 8,
+                        align: 8,
+                    },
+                    offset: 0,
+                    size: 8,
+                    align: 8,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+                Field {
+                    name: "b".into(),
+                    ty: TypeInfo::Primitive {
+                        name: "u64".into(),
+                        size: 8,
+                        align: 8,
+                    },
+                    offset: 8,
+                    size: 8,
+                    align: 8,
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                },
+            ],
+            source_file: None,
+            source_line: None,
+            arch: &X86_64_SYSV,
+            is_packed: false,
+            is_union: false,
+            is_repr_rust: false,
+            suppressed_findings: Vec::new(),
+            uncertain_fields: Vec::new(),
+        };
+        let bd = score_with_breakdown(&layout);
+        assert_eq!(bd.false_sharing_deduction, 0.0);
+        assert_eq!(bd.total, 100.0);
+    }
+
+    #[test]
+    fn breakdown_components_sum_to_total_deduction() {
+        let bd = score_with_breakdown(&connection_layout());
+        let sum = bd.padding_deduction
+            + bd.false_sharing_deduction
+            + bd.locality_deduction
+            + bd.reorder_deduction;
+        assert!(
+            (100.0 - sum - bd.total).abs() < 1e-9,
+            "breakdown fields must account for the full deduction: sum={sum}, total={}",
+            bd.total
+        );
     }
 }

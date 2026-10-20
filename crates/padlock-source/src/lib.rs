@@ -779,4 +779,43 @@ class C : public B { int z; };
         let layouts = parse_source_str(src, &SourceLanguage::Rust, &X86_64_SYSV).unwrap();
         assert!(!concurrency::has_concurrent_fields(&layouts[0]));
     }
+
+    // ── C++ shared_ptr<T>/unique_ptr<T>: lock in that this bug class does
+    // not apply here ──────────────────────────────────────────────────────
+    //
+    // C++'s frontend extracts type names as raw source text (tree-sitter
+    // byte ranges), not a collapsed AST leaf identifier like Rust's `syn`
+    // does — so `std::shared_ptr<std::mutex>` naturally keeps "mutex" in
+    // its recorded name with no enrichment needed. Verified against the
+    // real binary (0.24.0) before writing this: plain shared_ptr<T> scores
+    // 100 with no finding; shared_ptr<std::mutex> still correctly triggers
+    // FalseSharing. This test locks that in — it would regress silently if
+    // the C++ type-name extraction ever changed to a simplified form.
+
+    #[test]
+    fn end_to_end_cpp_shared_ptr_plain_not_flagged_concurrent() {
+        let src = r#"
+struct Config {
+    std::shared_ptr<std::string> name;
+    std::shared_ptr<int> logger;
+};
+"#;
+        let layouts = parse_source_str(src, &SourceLanguage::Cpp, &X86_64_SYSV).unwrap();
+        assert!(
+            !concurrency::has_concurrent_fields(&layouts[0]),
+            "plain std::shared_ptr<T> must not be classified as a concurrency hazard"
+        );
+    }
+
+    #[test]
+    fn end_to_end_cpp_shared_ptr_mutex_still_flagged_concurrent() {
+        let src = r#"
+struct Shared {
+    std::shared_ptr<std::mutex> a;
+    std::shared_ptr<std::mutex> b;
+};
+"#;
+        let layouts = parse_source_str(src, &SourceLanguage::Cpp, &X86_64_SYSV).unwrap();
+        assert!(concurrency::has_concurrent_fields(&layouts[0]));
+    }
 }

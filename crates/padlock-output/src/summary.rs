@@ -162,10 +162,27 @@ fn render_struct_with_embed(
     }
 
     if sr.is_repr_rust && !sr.findings.is_empty() {
-        out.push_str(
-            "    note: repr(Rust) — compiler may reorder fields; \
-             use binary analysis for actual layout\n",
-        );
+        // `is_repr_rust` is reused across languages (Rust repr(Rust) *and*
+        // plain Zig structs share the same "compiler may reorder" caveat),
+        // so the note text must match the actual language — a Zig file
+        // showing "repr(Rust)" is a Rust-specific term that means nothing
+        // in Zig and actively confuses a Zig-only user.
+        let is_zig = sr
+            .source_file
+            .as_deref()
+            .is_some_and(|f| f.ends_with(".zig"));
+        if is_zig {
+            out.push_str(
+                "    note: field order is implementation-defined in a plain Zig struct \
+                 (not extern/packed) — compiler may reorder fields; \
+                 use binary analysis for actual layout\n",
+            );
+        } else {
+            out.push_str(
+                "    note: repr(Rust) — compiler may reorder fields; \
+                 use binary analysis for actual layout\n",
+            );
+        }
     }
 
     if !sr.uncertain_fields.is_empty() {
@@ -493,6 +510,48 @@ mod tests {
         assert!(
             !out.contains("uncertain field size"),
             "uncertain_fields note must not appear when fields are empty"
+        );
+    }
+
+    fn repr_rust_layout_with_source(source_file: Option<&str>) -> padlock_core::ir::StructLayout {
+        let mut layout = connection_layout();
+        layout.is_repr_rust = true;
+        layout.source_file = source_file.map(str::to_string);
+        layout
+    }
+
+    #[test]
+    fn repr_rust_note_for_rust_source_says_repr_rust() {
+        let layout = repr_rust_layout_with_source(Some("src/pool.rs"));
+        let report = Report::from_layouts(&[layout]);
+        let out = render_struct(&report.structs[0], true);
+        assert!(
+            out.contains("repr(Rust)"),
+            "a .rs file must get the repr(Rust) note: {out}"
+        );
+        assert!(
+            !out.contains("Zig"),
+            "must not mention Zig for a .rs file: {out}"
+        );
+    }
+
+    #[test]
+    fn repr_rust_note_for_zig_source_does_not_say_repr_rust() {
+        // Regression test: is_repr_rust is shared between Rust repr(Rust)
+        // structs and plain (non-extern/packed) Zig structs, but the note
+        // text used to unconditionally say "repr(Rust)" — a Rust-specific
+        // term that means nothing in Zig and actively misleads a Zig-only
+        // user about which language the caveat even applies to.
+        let layout = repr_rust_layout_with_source(Some("src/pool.zig"));
+        let report = Report::from_layouts(&[layout]);
+        let out = render_struct(&report.structs[0], true);
+        assert!(
+            !out.contains("repr(Rust)"),
+            "a .zig file must not get the Rust-specific repr(Rust) note: {out}"
+        );
+        assert!(
+            out.contains("Zig") || out.contains("extern"),
+            "a .zig file must get Zig-specific wording: {out}"
         );
     }
 }

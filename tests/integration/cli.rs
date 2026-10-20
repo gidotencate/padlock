@@ -92,6 +92,46 @@ fn analyze_rust_padded_suggests_reorder() {
         .stdout(contains("ReorderSuggestion"));
 }
 
+// ── analyze: Rust — Arc<T>/Rc<T> false-sharing (regression, 0.24.0) ───────────
+//
+// Library-level tests (padlock-source's lib.rs/concurrency.rs/rust.rs) cover
+// this in-process via parse_source_str. These two exercise the same fix
+// through the actual `padlock` binary end-to-end — a different layer than
+// any existing test for this fix touches.
+
+#[test]
+fn analyze_rust_plain_arc_fields_not_flagged_false_sharing() {
+    // --filter scopes to just this struct — the fixture file's other struct
+    // (SharedMutexConfig) legitimately does have a FalseSharing finding, so
+    // asserting its absence requires excluding that struct from this run.
+    padlock()
+        .args([
+            "analyze",
+            &fixture("arc_fields.rs"),
+            "--json",
+            "--filter",
+            "^PlainArcConfig$",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("PlainArcConfig").and(contains("FalseSharing").not()));
+}
+
+#[test]
+fn analyze_rust_arc_mutex_fields_still_flagged_false_sharing() {
+    padlock()
+        .args([
+            "analyze",
+            &fixture("arc_fields.rs"),
+            "--json",
+            "--filter",
+            "^SharedMutexConfig$",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("SharedMutexConfig").and(contains("FalseSharing")));
+}
+
 // ── analyze: Go ───────────────────────────────────────────────────────────────
 
 #[test]

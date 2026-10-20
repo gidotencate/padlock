@@ -100,6 +100,39 @@ pub fn has_false_sharing(layout: &StructLayout) -> bool {
     false
 }
 
+/// Return `true` if any cache line holds 2+ fields where at least one is
+/// `Concurrent`, but the pair didn't meet `has_false_sharing`'s stricter bar
+/// (same guard, or only one of the pair is concurrent, or both are pure
+/// atomics). A weaker, "worth a human look" signal — as opposed to
+/// `find_sharing_conflicts`, which flags *any* two fields sharing a cache
+/// line regardless of concurrency and is meant only as display detail once
+/// `has_false_sharing` has already confirmed a real hazard.
+pub fn has_potential_sharing_risk(layout: &StructLayout) -> bool {
+    let line = layout.arch.cache_line_size;
+    if line == 0 || layout.fields.is_empty() {
+        return false;
+    }
+
+    let mut buckets: std::collections::BTreeMap<usize, Vec<&AccessPattern>> =
+        std::collections::BTreeMap::new();
+    for field in &layout.fields {
+        if matches!(field.access, AccessPattern::Padding) {
+            continue;
+        }
+        buckets
+            .entry(field.offset / line)
+            .or_default()
+            .push(&field.access);
+    }
+
+    buckets.values().any(|accesses| {
+        accesses.len() > 1
+            && accesses
+                .iter()
+                .any(|a| matches!(a, AccessPattern::Concurrent { .. }))
+    })
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -316,5 +349,38 @@ mod tests {
             concurrent("writers", 8, "lock"),
         ]);
         assert!(!has_false_sharing(&layout));
+    }
+
+    // ── has_potential_sharing_risk ───────────────────────────────────────────
+
+    #[test]
+    fn no_potential_risk_for_two_plain_unrelated_fields() {
+        // Two ordinary, non-concurrent fields sharing a cache line is just
+        // normal struct layout, not a sharing risk of any kind.
+        let layout = make_layout(vec![plain("a", 0), plain("b", 8)]);
+        assert!(!has_potential_sharing_risk(&layout));
+    }
+
+    #[test]
+    fn no_potential_risk_for_single_field_alone_on_its_line() {
+        let layout = make_layout(vec![concurrent("a", 0, "mu")]);
+        assert!(!has_potential_sharing_risk(&layout));
+    }
+
+    #[test]
+    fn potential_risk_for_concurrent_field_sharing_line_with_plain_field() {
+        // Not confirmed false sharing (has_false_sharing requires both sides
+        // to be Concurrent), but still worth a lower-confidence flag.
+        let layout = make_layout(vec![concurrent("mu_guarded", 0, "mu"), plain("b", 8)]);
+        assert!(has_potential_sharing_risk(&layout));
+    }
+
+    #[test]
+    fn potential_risk_for_same_guard_concurrent_pair() {
+        // Same guard means no *confirmed* false sharing, but two
+        // lock-protected fields sharing a line is still worth flagging.
+        let layout = make_layout(vec![concurrent("a", 0, "mu"), concurrent("b", 8, "mu")]);
+        assert!(!has_false_sharing(&layout));
+        assert!(has_potential_sharing_risk(&layout));
     }
 }

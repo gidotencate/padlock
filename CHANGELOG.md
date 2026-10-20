@@ -2,6 +2,16 @@
 
 All notable changes to padlock are documented here.
 
+## [0.21.0] — 2026-10-21
+
+### Fixed
+- **Scorer silently docked 10 points from ordinary, non-concurrent structs with no finding shown to explain why.** The "potential false sharing" tier called `false_sharing::find_sharing_conflicts`, which flags *any* two fields sharing a cache line regardless of access pattern — true of nearly every struct under 64 bytes, concurrency or not. A perfectly packed, zero-waste `struct { long a; long b; }` scored 90, not 100, with zero findings listed. Replaced with a new `has_potential_sharing_risk` that requires at least one field in the shared cache line to actually be `Concurrent`. Also added the `reorder_deduction` field that was missing from `ScoreBreakdown` (currently unused outside tests, but was silently inconsistent with `total`).
+
+### Changed
+- **BREAKING (output)**: struct scores change for any non-concurrent struct that previously lost 10 points to the bug above — scores for such structs are now higher (correctly) and match what the displayed findings justify.
+
+Found via a deliberate audit of the scorer's internal consistency, verified against the real binary before and after the fix.
+
 ## [0.20.0] — 2026-10-10
 
 ### Changed

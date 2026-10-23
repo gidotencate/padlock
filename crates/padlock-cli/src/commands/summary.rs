@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use padlock_core::findings::Report;
 
 use crate::filter::FilterArgs;
-use crate::paths::collect_layouts;
 use padlock_core::config::Config;
 
 pub fn run(
@@ -27,14 +26,18 @@ pub fn run(
             .unwrap_or(std::path::Path::new(".")),
     );
 
+    // Merge config filter defaults (and parse settings: defines, declared order,
+    // instantiations) before parsing; CLI flags take precedence.
+    let mut filter = filter.clone();
+    filter.apply_config_defaults(&cfg);
+
     // Collect layouts from all paths (dirs expanded, binaries via DWARF).
     // Parse sources for the requested target, not just relabel them afterwards.
     crate::paths::set_source_arch(
         target.as_deref().or(cfg.arch_override.as_deref()),
         word_size,
     );
-    let (mut layouts, analyzed, skipped) =
-        collect_layouts(paths, filter.include_generated, filter.no_cache)?;
+    let (mut layouts, analyzed, skipped) = crate::paths::collect_layouts_with(paths, &filter)?;
 
     // Apply arch override: CLI --target takes precedence over config arch.override.
     let arch_name_override = target.as_deref().or(cfg.arch_override.as_deref());
@@ -55,10 +58,6 @@ pub fn run(
                 padlock_core::arch::with_overrides(layout.arch, cache_line_size, word_size);
         }
     }
-
-    // Merge config filter defaults; CLI flags take precedence.
-    let mut filter = filter.clone();
-    filter.apply_config_defaults(&cfg);
 
     // Apply config ignore list and path exclusions, then CLI pre-filters.
     layouts.retain(|l| {

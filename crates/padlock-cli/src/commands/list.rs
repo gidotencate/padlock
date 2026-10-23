@@ -6,7 +6,6 @@ use comfy_table::{Cell, Table};
 use padlock_core::findings::Report;
 
 use crate::filter::FilterArgs;
-use crate::paths::collect_layouts;
 use padlock_core::config::Config;
 
 pub fn run(paths: &[PathBuf], filter: &FilterArgs) -> anyhow::Result<()> {
@@ -18,8 +17,7 @@ pub fn run(paths: &[PathBuf], filter: &FilterArgs) -> anyhow::Result<()> {
     );
     let mut filter = filter.clone();
     filter.apply_config_defaults(&cfg);
-    let (mut layouts, _, _skipped) =
-        collect_layouts(paths, filter.include_generated, filter.no_cache)?;
+    let (mut layouts, _, _skipped) = crate::paths::collect_layouts_with(paths, &filter)?;
     layouts.retain(|l| {
         !cfg.is_ignored(&l.name)
             && !l
@@ -90,6 +88,7 @@ mod tests {
         FilterArgs {
             defines: Vec::new(),
             declared_order: false,
+            compile_commands: None,
             filter: None,
             exclude: None,
             min_holes: None,

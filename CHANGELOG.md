@@ -2,6 +2,15 @@
 
 All notable changes to padlock are documented here.
 
+## [0.44.0] — 2026-10-23
+
+### Added
+- **`--compile-commands compile_commands.json`** (`analyze`, `summary`, `check`, `list`): exact C/C++ layouts. Every translation unit is recompiled with its own flags, defines and include paths plus complete debug info (`-g -fno-eliminate-unused-debug-types`, and `-femit-class-debug-always` / `-fstandalone-debug`), and the layouts the compiler produced are read from the objects. This sees through macros, `#if` configuration, templates (every instantiation actually used) and platform ABI. Types declared under the project's source directory are reported; their source-level estimates are replaced.
+- Binary analysis now reports **source file paths** for DWARF types (resolved through the line-program file table), and decl lines in any data form.
+
+### Fixed
+- `summary` applied `.padlock.toml` parse settings (`defines`, `declared_order`, `[instantiate]`) only after parsing.
+
 ## [0.43.0] — 2026-10-23
 
 ### Added

@@ -6,14 +6,17 @@
 
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use tree_sitter::{Node, Parser};
 
 use crate::CppStdlib;
 
+/// Process-global, not thread-local: parsing runs on rayon worker threads, which
+/// never saw a thread-local set on the main thread (so `--stdlib` was ignored).
+static STDLIB: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 thread_local! {
-    static STDLIB: Cell<CppStdlib> = const { Cell::new(CppStdlib::LibStdCpp) };
     static C_PARSER: RefCell<Parser> = RefCell::new({
         let mut p = Parser::new();
         p.set_language(&tree_sitter_c::LANGUAGE.into())
@@ -28,13 +31,22 @@ thread_local! {
     });
 }
 
-/// Set the active C++ stdlib variant for this thread.  Called from `lib.rs::set_cpp_stdlib`.
+/// Set the active C++ stdlib variant for all threads.  Called from `lib.rs::set_cpp_stdlib`.
 pub(crate) fn set_stdlib(s: CppStdlib) {
-    STDLIB.with(|c| c.set(s));
+    let v = match s {
+        CppStdlib::LibStdCpp => 0,
+        CppStdlib::LibCpp => 1,
+        CppStdlib::Msvc => 2,
+    };
+    STDLIB.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn active_stdlib() -> CppStdlib {
-    STDLIB.with(|c| c.get())
+pub(crate) fn active_stdlib() -> CppStdlib {
+    match STDLIB.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => CppStdlib::LibCpp,
+        2 => CppStdlib::Msvc,
+        _ => CppStdlib::LibStdCpp,
+    }
 }
 
 // ── type resolution ───────────────────────────────────────────────────────────

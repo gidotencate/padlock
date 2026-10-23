@@ -2,6 +2,12 @@
 
 All notable changes to padlock are documented here.
 
+## [0.32.0] — 2026-10-23
+
+### Fixed
+- **`--stdlib libc++` / `msvc` was silently ignored for most files.** The setting was stored thread-locally on the main thread, but parsing runs on rayon worker threads, which kept the libstdc++ default — so `std::string`, `std::mutex` etc. were sized for the wrong standard library. It is now process-global.
+- The parse-cache fingerprint includes the stdlib variant, so switching `--stdlib` re-parses instead of serving cached layouts.
+
 ## [0.31.0] — 2026-10-23
 
 Conformance (`g++ -std=c++17`): C++ 27/28 → 42/42.

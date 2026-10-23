@@ -164,6 +164,7 @@ pub fn extract_from_pdb(
                 uncertain_fields: Vec::new(),
                 forced_align: None,
                 pack_limit: None,
+                cpp: None,
             });
             continue;
         }
@@ -193,6 +194,7 @@ pub fn extract_from_pdb(
             uncertain_fields,
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         });
     }
 

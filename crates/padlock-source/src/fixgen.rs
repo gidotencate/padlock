@@ -1587,6 +1587,7 @@ mod tests {
             uncertain_fields: Vec::new(),
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         };
         let fixed = apply_fixes_go(src, &[&layout]);
         // X (int64, align 8) must appear before Flag (bool, align 1)

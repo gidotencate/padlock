@@ -396,6 +396,7 @@ mod tests {
             uncertain_fields: Vec::new(),
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         };
         let out = render_explain(&big);
         assert!(
@@ -472,6 +473,7 @@ mod tests {
             uncertain_fields: Vec::new(),
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         };
         let out = render_explain(&big);
         // field 'b' starts at offset 64 → cache line 1

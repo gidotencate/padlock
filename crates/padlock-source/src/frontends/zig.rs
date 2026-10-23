@@ -687,6 +687,7 @@ fn parse_union_declaration(
         uncertain_fields,
         forced_align: None,
         pack_limit: None,
+        cpp: None,
     })
 }
 
@@ -822,6 +823,7 @@ fn parse_struct_declaration(
         // A packed struct's size is its backing integer's ABI size.
         forced_align: is_packed.then_some(struct_align),
         pack_limit: None,
+        cpp: None,
     })
 }
 

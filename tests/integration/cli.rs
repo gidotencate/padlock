@@ -681,3 +681,44 @@ fn dwarf_type_units_split_dwarf_and_compression_are_read() {
         );
     }
 }
+
+#[test]
+fn verify_agrees_with_gcc_and_reports_mismatches() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let src = dir.path().join("v.c");
+    std::fs::write(
+        &src,
+        "struct M { char a; short m[2][3]; long l; };\nstruct M g;\nint main(void) { return 0; }\n",
+    )
+    .unwrap();
+    let bin = dir.path().join("v");
+    let built = std::process::Command::new("gcc")
+        .args(["-g", "-O0"])
+        .arg(&src)
+        .arg("-o")
+        .arg(&bin)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !built {
+        eprintln!("gcc not available; skipping");
+        return;
+    }
+    // Source and binary agree (including the 2-D array's 12-byte size).
+    padlock()
+        .args(["verify", "--binary"])
+        .arg(&bin)
+        .arg(&src)
+        .assert()
+        .success()
+        .stdout(contains("1/1 structs match"));
+    // A source that no longer matches the binary is reported and fails.
+    std::fs::write(&src, "struct M { char a; long l; short m[2][3]; };\n").unwrap();
+    padlock()
+        .args(["verify", "--binary"])
+        .arg(&bin)
+        .arg(&src)
+        .assert()
+        .failure()
+        .stdout(contains("size-mismatch"));
+}

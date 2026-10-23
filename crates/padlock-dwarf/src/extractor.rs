@@ -579,19 +579,29 @@ impl<'a, R: Reader> Extractor<'a, R> {
         let root = children.root()?;
         let mut child_iter = root.children();
 
+        // A multi-dimensional array (`short m[2][3]`) has one subrange per
+        // dimension; the element count is their product.
+        let mut total: Option<usize> = None;
         while let Some(child) = child_iter.next()? {
             let child_entry = child.entry();
-            if child_entry.tag() == gimli::DW_TAG_subrange_type {
-                if let Some(count) = self.attr_usize(child_entry, gimli::DW_AT_count)? {
-                    return Ok(count);
-                }
-                if let Some(upper) = self.attr_usize(child_entry, gimli::DW_AT_upper_bound)? {
-                    return Ok(upper + 1);
-                }
+            if child_entry.tag() != gimli::DW_TAG_subrange_type {
+                continue;
             }
+            let lower = self
+                .attr_usize(child_entry, gimli::DW_AT_lower_bound)?
+                .unwrap_or(0);
+            let dim = if let Some(count) = self.attr_usize(child_entry, gimli::DW_AT_count)? {
+                count
+            } else if let Some(upper) = self.attr_usize(child_entry, gimli::DW_AT_upper_bound)? {
+                (upper + 1).saturating_sub(lower)
+            } else {
+                // Flexible / unknown bound (`char data[]`).
+                0
+            };
+            total = Some(total.unwrap_or(1).saturating_mul(dim));
         }
 
-        Ok(0)
+        Ok(total.unwrap_or(0))
     }
 }
 

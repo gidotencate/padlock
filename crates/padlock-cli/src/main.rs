@@ -17,6 +17,7 @@ mod commands {
     pub mod list;
     pub mod report;
     pub mod summary;
+    pub mod verify;
     pub mod watch;
 }
 mod output {
@@ -161,6 +162,25 @@ enum Commands {
         /// Output results as JSON on each refresh
         #[arg(long)]
         json: bool,
+    },
+
+    /// Check padlock's source layouts against the compiler's, read from a binary
+    /// built from those sources with debug info. Exits 1 when any struct's size
+    /// or field offsets differ.
+    Verify {
+        /// Source files or directories to check
+        #[arg(num_args = 1.., value_name = "SOURCE")]
+        paths: Vec<PathBuf>,
+        /// Binary (or object file) built from the sources with debug info (`-g`);
+        /// repeatable
+        #[arg(long = "binary", short = 'b', value_name = "BIN", required = true)]
+        binaries: Vec<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Include only structs whose names match this regex pattern
+        #[arg(long, short = 'F', value_name = "PATTERN")]
+        filter: Option<String>,
     },
 
     /// Show a visual field-by-field memory layout table for each struct
@@ -321,6 +341,19 @@ fn main() -> anyhow::Result<()> {
             filter,
             no_cache,
         } => commands::explain::run(&paths, filter.as_deref(), no_cache),
+
+        Commands::Verify {
+            paths,
+            binaries,
+            json,
+            filter,
+        } => {
+            let all_match = commands::verify::run(&paths, &binaries, json, filter.as_deref())?;
+            if !all_match {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
 
         Commands::Check {
             paths,

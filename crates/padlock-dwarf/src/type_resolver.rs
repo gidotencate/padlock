@@ -59,8 +59,13 @@ impl<'a, R: Reader> Extractor<'a, R> {
                     .resolve_type_attr(unit, entry)?
                     .ok_or_else(|| anyhow::anyhow!("array with no element type"))?;
 
-                let count = self.extract_array_count(unit, entry)?;
-                let total = elem_size * count;
+                // An explicit byte size (Go emits one) is authoritative.
+                let explicit = self.attr_usize(entry, gimli::DW_AT_byte_size)?;
+                let count = match explicit {
+                    Some(bytes) if elem_size > 0 => bytes / elem_size,
+                    _ => self.extract_array_count(unit, entry)?,
+                };
+                let total = explicit.unwrap_or(elem_size * count);
 
                 Ok((
                     total,

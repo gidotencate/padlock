@@ -2,6 +2,14 @@
 
 All notable changes to padlock are documented here.
 
+## [0.40.0] — 2026-10-23
+
+### Added
+- **`padlock verify --binary <BIN> <sources>…`**: checks padlock's source-level layouts against the compiler's own, read from the debug info of a binary built from those sources. Reports every struct whose size or field offsets differ (`size-mismatch`, `offset-mismatch`; compiler-ordered Rust/Zig structs whose sizes agree but offsets differ are reported as `offsets-differ-estimate`, not failures) and exits 1 on any mismatch — a CI guard that source analysis can be trusted for a code base. Matches names across module/namespace qualifiers (`main.Conn`, `ns::Conn`) and template spacing; `--json` and `--filter` supported. On the conformance probes: C 51/51, C++ 57/57, Go 37/37.
+
+### Fixed
+- **Multi-dimensional arrays read from DWARF were sized by their first dimension only** (`short m[2][3]` came out as 4 bytes instead of 12), so padding after them was mis-reported. All subranges are multiplied, `DW_AT_lower_bound` is honoured, and an array's own `DW_AT_byte_size` (Go emits one) wins.
+
 ## [0.39.0] — 2026-10-23
 
 The conformance harness now also checks **binary analysis**: each probe is built with debug info and padlock's DWARF reader is compared against the compiler (`dwarf-<lang>` rows, on by default). Before the fixes below: Go 0/36, Rust 0/60, C++ 39/48, Zig 30/53. Now: Go 36/36, C 50/50, C++ 45/48, Rust 59/60, Zig 53/53, C23 3/3 (the four remaining rows are template names spelled with their default arguments in DWARF; sizes agree).

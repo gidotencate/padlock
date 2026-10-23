@@ -2,6 +2,17 @@
 
 All notable changes to padlock are documented here.
 
+## [0.29.0] — 2026-10-23
+
+### Fixed
+- **C/C++ fields inside `#if` / `#ifdef` / `#else` blocks were silently dropped** — the struct-body walker only looked at direct `field_declaration` children, so a struct with configuration-dependent members was reported smaller than any real build. Conditionals are now resolved the way the preprocessor would: `#ifdef`/`#ifndef`/`#elifdef`, `#if`/`#elif` with `defined(X)`, arithmetic, comparisons and `&&`/`||` over `#define`d constants (undefined identifiers are 0, as in C). Only the compiled-in branch contributes fields. A macro counts as defined only after its `#define`, so header guards work.
+- **Top-level code under `#if 0` (or the losing side of `#ifdef … #else`) was analyzed**, producing dead or duplicate struct definitions.
+
+### Added
+- `-D/--define NAME[=VALUE]` (repeatable) and `defines = [...]` in `.padlock.toml` select `#if` branches like a compiler's `-D`. When a branch choice depends on a macro neither the file nor the user defines, the struct lists `fields under `#ifdef X`` in `uncertain_fields`.
+- The integer constant-expression evaluator understands `== != < > <= >= && || !`.
+- The parse cache fingerprint includes the active defines, so changing `-D` re-parses.
+
 ## [0.28.0] — 2026-10-23
 
 Conformance harness against `zig run` (`@sizeOf` / `@offsetOf`, zig 0.15): Zig 12/18 → 43/43. Overall: Go 33/33, C 48/48, C++ 24/25, Rust 43/44, Zig 43/43.

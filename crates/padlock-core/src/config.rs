@@ -17,6 +17,7 @@
 //   min_severity   = "medium"    # report only medium and above (high|medium|low)
 //   fail_below     = 60          # exit 1 if any struct scores below this
 //   ignore         = ["GeneratedStruct", "FfiLayout"]  # suppress by name
+//   defines        = ["CONFIG_SMP", "WORD_BITS=64"]   # C/C++ `-D` for #if branches
 //
 //   [arch]
 //   override = "aarch64"         # force a specific arch (x86_64|aarch64|aarch64_apple|wasm32|riscv64)
@@ -84,6 +85,10 @@ pub struct Config {
     /// Concurrent, enabling false-sharing detection for project-specific lock types.
     /// Example: `["SeqLock", "TicketLock", "BoundedMPMC"]`
     pub custom_sync_types: Vec<String>,
+    /// Macros treated as defined when choosing `#if`/`#ifdef` branches in C/C++
+    /// struct bodies, like a compiler's `-D`. Entries are `NAME` or `NAME=VALUE`.
+    /// Example: `["CONFIG_SMP", "WORD_BITS=64"]`
+    pub defines: Vec<String>,
 }
 
 impl Default for Config {
@@ -102,6 +107,7 @@ impl Default for Config {
             fail_on_severity: None,
             exclude_paths: Vec::new(),
             custom_sync_types: Vec::new(),
+            defines: Vec::new(),
         }
     }
 }
@@ -236,6 +242,16 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let defines = padlock
+            .and_then(|p| p.get("defines"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Some(Self {
             min_severity,
             fail_below,
@@ -250,6 +266,7 @@ impl Config {
             fail_on_severity,
             exclude_paths,
             custom_sync_types,
+            defines,
         })
     }
 

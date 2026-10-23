@@ -527,6 +527,205 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     }
 }
 
+// ── preprocessor conditionals ────────────────────────────────────────────────
+
+/// Key prefix recording where a macro is first `#define`d (byte offset), in the
+/// same map as the typedef aliases. Externally supplied defines use offset 0.
+const DEF_KEY: &str = "$def:";
+
+/// Record every macro definition site, plus externally supplied defines
+/// (`padlock_source::set_preprocessor_defines`), so `#if` branches can be chosen.
+fn collect_pp_defines(source: &str, root: Node<'_>, aliases: &mut HashMap<String, String>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        for i in (0..node.child_count()).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+        if matches!(node.kind(), "preproc_def" | "preproc_function_def")
+            && let Some(name) = node.child_by_field_name("name")
+        {
+            aliases
+                .entry(format!("{DEF_KEY}{}", &source[name.byte_range()]))
+                .or_insert_with(|| node.start_byte().to_string());
+        }
+    }
+    for (name, value) in crate::preprocessor_defines() {
+        aliases.insert(format!("{DEF_KEY}{name}"), "0".to_string());
+        aliases.insert(format!("{CONST_KEY}{name}"), value);
+    }
+}
+
+/// `Some(true/false)` when `name` is (not) defined before byte `at`; `None` when
+/// the file never defines it and it was not supplied externally — the answer
+/// then depends on the build's `-D` flags.
+fn pp_defined(name: &str, at: usize, aliases: &HashMap<String, String>) -> Option<bool> {
+    let pos: usize = aliases.get(&format!("{DEF_KEY}{name}"))?.parse().ok()?;
+    Some(pos < at)
+}
+
+/// Evaluate an `#if` / `#elif` condition. Undefined identifiers are 0, as in C.
+/// The flag is set when the result depends on a macro the file does not define.
+fn eval_pp_condition(text: &str, at: usize, aliases: &HashMap<String, String>) -> (bool, bool) {
+    let external = std::cell::Cell::new(false);
+    // Replace `defined(X)` / `defined X` with 1 or 0.
+    let mut rewritten = String::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find("defined") {
+        let boundary_before = !rest[..pos]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let after = &rest[pos + "defined".len()..];
+        let trimmed = after.trim_start();
+        let (inner, consumed) = if let Some(p) = trimmed.strip_prefix('(') {
+            match p.find(')') {
+                Some(close) => (p[..close].trim(), after.len() - p.len() + close + 1),
+                None => ("", 0),
+            }
+        } else {
+            let end = trimmed
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(trimmed.len());
+            (&trimmed[..end], after.len() - trimmed.len() + end)
+        };
+        rewritten.push_str(&rest[..pos]);
+        if boundary_before && !inner.is_empty() {
+            let d = pp_defined(inner, at, aliases).unwrap_or_else(|| {
+                external.set(true);
+                false
+            });
+            rewritten.push_str(if d { " 1 " } else { " 0 " });
+            rest = &after[consumed..];
+        } else {
+            rewritten.push_str("defined");
+            rest = after;
+        }
+    }
+    rewritten.push_str(rest);
+
+    let lookup = |id: &str| match pp_defined(id, at, aliases) {
+        Some(true) => Some(
+            aliases
+                .get(&format!("{CONST_KEY}{id}"))
+                .cloned()
+                .unwrap_or_else(|| "1".to_string()),
+        ),
+        Some(false) => Some("0".to_string()),
+        None => {
+            external.set(true);
+            Some("0".to_string())
+        }
+    };
+    let sizeof = |_: &str| None;
+    let value = super::consteval::eval(
+        &rewritten,
+        &super::consteval::Env {
+            lookup: &lookup,
+            sizeof: &sizeof,
+        },
+        0,
+    );
+    // Unevaluable (e.g. a function-like macro call): take the branch as false.
+    (
+        value.is_some_and(|v| v != 0),
+        external.get() || value.is_none(),
+    )
+}
+
+/// For a `#if`/`#ifdef`/`#elif…`/`#else` node, the children of the branch that
+/// is compiled in (empty when none is), plus a label when the choice depends on
+/// a macro the file does not define.
+fn active_pp_branch<'a>(
+    source: &str,
+    node: Node<'a>,
+    aliases: &HashMap<String, String>,
+) -> (Vec<Node<'a>>, Option<String>) {
+    let at = node.start_byte();
+    let (taken, external) = match node.kind() {
+        "preproc_else" => (true, false),
+        "preproc_ifdef" | "preproc_elifdef" => {
+            let negated = node
+                .child(0)
+                .is_some_and(|t| source[t.byte_range()].contains("ndef"));
+            match node.child_by_field_name("name") {
+                Some(n) => match pp_defined(&source[n.byte_range()], at, aliases) {
+                    Some(d) => (d != negated, false),
+                    None => (negated, true),
+                },
+                None => (false, true),
+            }
+        }
+        "preproc_if" | "preproc_elif" => match node.child_by_field_name("condition") {
+            Some(c) => eval_pp_condition(&source[c.byte_range()], at, aliases),
+            None => (false, true),
+        },
+        _ => return (Vec::new(), None),
+    };
+    let label = external.then(|| {
+        let head = source[node.byte_range()]
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim();
+        format!("fields under `{head}`")
+    });
+    if taken {
+        let children = (0..node.child_count())
+            .filter(|&i| {
+                !matches!(
+                    node.field_name_for_child(i),
+                    Some("name" | "condition" | "alternative")
+                )
+            })
+            .filter_map(|i| node.child(i))
+            .filter(|c| c.is_named())
+            .collect();
+        return (children, label);
+    }
+    match node.child_by_field_name("alternative") {
+        Some(alt) => {
+            let (children, alt_label) = active_pp_branch(source, alt, aliases);
+            (children, label.or(alt_label))
+        }
+        None => (Vec::new(), label),
+    }
+}
+
+fn is_pp_conditional(kind: &str) -> bool {
+    matches!(
+        kind,
+        "preproc_if" | "preproc_ifdef" | "preproc_elif" | "preproc_elifdef" | "preproc_else"
+    )
+}
+
+/// Member declarations of a struct body with preprocessor conditionals resolved:
+/// only the compiled-in branch of each `#if` contributes. Also returns labels for
+/// conditionals whose outcome depends on macros the file does not define.
+fn body_members<'a>(
+    source: &str,
+    body: Node<'a>,
+    aliases: &HashMap<String, String>,
+) -> (Vec<Node<'a>>, Vec<String>) {
+    let mut members = Vec::new();
+    let mut labels = Vec::new();
+    let mut queue: Vec<Node<'a>> = (0..body.child_count())
+        .rev()
+        .filter_map(|i| body.child(i))
+        .collect();
+    while let Some(n) = queue.pop() {
+        if is_pp_conditional(n.kind()) {
+            let (children, label) = active_pp_branch(source, n, aliases);
+            labels.extend(label);
+            queue.extend(children.into_iter().rev());
+        } else {
+            members.push(n);
+        }
+    }
+    (members, labels)
+}
+
 // ── integer constant expressions (array lengths) ──────────────────────────────
 
 /// Key prefix under which integer constants (`#define N 8`, `enum { K = 5 }`,
@@ -1084,10 +1283,8 @@ fn parse_class_specifier(
 
     // Collect declared fields: (field_name, type_text, guard, alignas_override, source_line)
     let mut raw_fields: Vec<RawField> = Vec::new();
-    for i in 0..body.child_count() {
-        let Some(child) = body.child(i) else {
-            continue;
-        };
+    let (members, pp_labels) = body_members(source, body, aliases);
+    for child in members {
         if child.kind() == "field_declaration" {
             if let Some(anon_fields) = parse_anonymous_nested(source, child, arch, false, aliases) {
                 raw_fields.extend(anon_fields);
@@ -1153,6 +1350,7 @@ fn parse_class_specifier(
     apply_min_align(&mut layout, struct_alignas.unwrap_or(1), pack_n);
 
     mark_uncertain_arrays(&mut layout);
+    layout.uncertain_fields.extend(pp_labels);
 
     layout.suppressed_findings =
         super::suppress::suppressed_from_preceding_source(source, node.start_byte());
@@ -1317,6 +1515,8 @@ fn extract_structs_from_tree(
     let mut aliases = collect_typedef_aliases(source, root);
     // …and integer constants used in array-length expressions.
     collect_int_constants(source, root, arch, &mut aliases);
+    // …and where macros are defined, to resolve `#if` branches.
+    collect_pp_defines(source, root, &mut aliases);
 
     // Phase 1: extract struct/union/class layouts.
     // We do a single linear pass ordered by byte offset so that `#pragma pack`
@@ -1333,6 +1533,13 @@ fn extract_structs_from_tree(
 
     while let Some(node) = stack.pop() {
         // Push children in reverse so we process left-to-right in document order.
+        // Of a preprocessor conditional only the compiled-in branch is visited, so
+        // `#if 0` code and the losing side of `#ifdef X … #else …` are not analyzed.
+        if is_pp_conditional(node.kind()) {
+            let (children, _) = active_pp_branch(source, node, &aliases);
+            stack.extend(children.into_iter().rev());
+            continue;
+        }
         for i in (0..node.child_count()).rev() {
             if let Some(child) = node.child(i) {
                 stack.push(child);
@@ -1466,6 +1673,11 @@ fn extract_structs_from_tree(
     let cursor2 = root.walk();
     let mut stack2 = vec![root];
     while let Some(node) = stack2.pop() {
+        if is_pp_conditional(node.kind()) {
+            let (children, _) = active_pp_branch(source, node, &aliases);
+            stack2.extend(children.into_iter().rev());
+            continue;
+        }
         for i in (0..node.child_count()).rev() {
             if let Some(child) = node.child(i) {
                 stack2.push(child);
@@ -1600,9 +1812,9 @@ fn parse_struct_or_union_specifier(
     let has_virtual = !is_union && contains_virtual_keyword(source, body);
 
     let mut raw_fields: Vec<RawField> = Vec::new();
+    let (members, pp_labels) = body_members(source, body, aliases);
 
-    for i in 0..body.child_count() {
-        let child = body.child(i)?;
+    for child in members {
         if child.kind() == "field_declaration" {
             // Check for anonymous nested struct/union: a field_declaration whose
             // only non-field-identifier child is a struct_specifier/union_specifier
@@ -1680,6 +1892,7 @@ fn parse_struct_or_union_specifier(
     apply_min_align(&mut layout, struct_alignas.unwrap_or(1), pack_n);
 
     mark_uncertain_arrays(&mut layout);
+    layout.uncertain_fields.extend(pp_labels);
     layout.suppressed_findings =
         super::suppress::suppressed_from_preceding_source(source, node.start_byte());
 
@@ -2003,8 +2216,7 @@ fn parse_anonymous_nested(
         let body = body_node?;
         let mut nested_raw: Vec<RawField> = Vec::new();
 
-        for j in 0..body.child_count() {
-            let inner = body.child(j)?;
+        for inner in body_members(source, body, aliases).0 {
             if inner.kind() == "field_declaration" {
                 // Recurse to handle doubly-nested anonymous structs.
                 if let Some(deeper) =
@@ -4196,5 +4408,52 @@ struct S {
         // A bit-field never straddles its declared type's unit: moves to offset 4.
         let l = layout_of("struct W { char a[3]; int b:20; char c; };", "W", false);
         assert_eq!(offset(&l, "c"), 7);
+    }
+
+    // ── preprocessor conditionals ─────────────────────────────────────────────
+
+    #[test]
+    fn ifdef_fields_follow_the_compiled_branch() {
+        let src = "#define BIG\nstruct S {\n char a;\n#ifdef BIG\n long big;\n#else\n char small;\n#endif\n#if 0\n char dead[64];\n#endif\n char c;\n};";
+        let l = layout_of(src, "S", false);
+        let names: Vec<&str> = l.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["a", "big", "c"]);
+        assert_eq!(l.total_size, 24);
+        assert!(l.uncertain_fields.is_empty());
+    }
+
+    #[test]
+    fn if_conditions_use_defines_and_constants() {
+        let src = "#define LEVEL 3\nstruct S {\n#if LEVEL > 2 && defined(LEVEL)\n int hi;\n#elif LEVEL > 1\n short mid;\n#else\n char lo;\n#endif\n};";
+        let l = layout_of(src, "S", false);
+        assert_eq!(l.fields[0].name, "hi");
+    }
+
+    #[test]
+    fn branch_on_unknown_macro_is_flagged() {
+        let src = "struct S {\n char a;\n#ifdef CONFIG_X\n long x;\n#endif\n};";
+        let l = layout_of(src, "S", false);
+        assert_eq!(l.fields.len(), 1);
+        assert_eq!(
+            l.uncertain_fields,
+            vec!["fields under `#ifdef CONFIG_X`".to_string()]
+        );
+    }
+
+    #[test]
+    fn header_guard_does_not_hide_the_file() {
+        let src = "#ifndef S_H\n#define S_H\nstruct S { char a; int b; };\n#endif\n";
+        let l = layout_of(src, "S", false);
+        assert_eq!(l.total_size, 8);
+    }
+
+    #[test]
+    fn inactive_top_level_definition_is_ignored() {
+        let src =
+            "#if 0\nstruct D { char a; long b; };\n#else\nstruct D { char a; char b; };\n#endif\n";
+        let ls = crate::parse_source_str(src, &crate::SourceLanguage::C, &X86_64_SYSV).unwrap();
+        let d: Vec<_> = ls.iter().filter(|l| l.name == "D").collect();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].total_size, 2);
     }
 }

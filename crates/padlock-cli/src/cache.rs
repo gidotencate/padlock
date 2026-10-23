@@ -32,6 +32,14 @@ struct CacheEntry {
     skipped: Vec<SkippedStruct>,
 }
 
+/// Everything besides the file itself that changes what the parser produces:
+/// the padlock version and the preprocessor defines. A cache written under a
+/// different fingerprint is discarded.
+fn cache_fingerprint() -> String {
+    let defines: Vec<String> = padlock_source::preprocessor_defines_fingerprint();
+    format!("{}|{}", env!("CARGO_PKG_VERSION"), defines.join(","))
+}
+
 /// In-process parse cache backed by `.padlock-cache/layouts.json`.
 pub struct ParseCache {
     store: CacheStore,
@@ -51,7 +59,7 @@ impl ParseCache {
         let store: CacheStore = std::fs::read(&cache_path)
             .ok()
             .and_then(|data| serde_json::from_slice(&data).ok())
-            .filter(|s: &CacheStore| s.version == env!("CARGO_PKG_VERSION"))
+            .filter(|s: &CacheStore| s.version == cache_fingerprint())
             .unwrap_or_default();
         ParseCache {
             store,
@@ -138,7 +146,7 @@ impl ParseCache {
         {
             return;
         }
-        self.store.version = env!("CARGO_PKG_VERSION").to_string();
+        self.store.version = cache_fingerprint();
         if let Ok(file) = std::fs::File::create(&self.cache_path) {
             let writer = std::io::BufWriter::new(file);
             let _ = serde_json::to_writer(writer, &self.store);

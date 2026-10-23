@@ -310,6 +310,9 @@ pub fn collect_layouts_with(
         layouts.extend(exact);
         analyzed.extend(compiled);
     }
+    if filter.go_exact {
+        crate::go_exact::refine(&mut layouts);
+    }
     Ok((layouts, analyzed, skipped))
 }
 

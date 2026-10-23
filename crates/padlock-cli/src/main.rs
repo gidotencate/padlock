@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 pub mod cache;
 pub mod compile_commands;
 pub mod filter;
+pub mod go_exact;
 pub mod paths;
 
 mod commands {

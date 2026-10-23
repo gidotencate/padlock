@@ -82,6 +82,12 @@ pub struct FilterArgs {
     #[arg(long, value_name = "FILE")]
     pub compile_commands: Option<PathBuf>,
 
+    /// Exact Go layouts: run a probe test in each Go package (added virtually with
+    /// `go test -overlay`; nothing is written to the source tree) and use the sizes
+    /// and offsets the Go toolchain reports, including types from other packages.
+    #[arg(long)]
+    pub go_exact: bool,
+
     /// Lay out Rust `repr(Rust)` and plain Zig structs in source declaration order.
     ///
     /// By default padlock shows them in the order the compiler actually uses
@@ -270,6 +276,7 @@ mod tests {
             defines: Vec::new(),
             declared_order: false,
             compile_commands: None,
+            go_exact: false,
             filter: filter.map(str::to_owned),
             exclude: exclude.map(str::to_owned),
             min_holes,

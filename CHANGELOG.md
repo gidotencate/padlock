@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.45.0] — 2026-10-23
+
+### Added
+- **`--go-exact`** (`analyze`, `summary`, `check`, `list`): exact Go layouts from the Go toolchain. A probe test is added to each package *virtually* (`go test -overlay`, `-vet=off`; nothing is written to the source tree) and prints `reflect`'s size, alignment and per-field offset/size for every struct padlock found — exact even for fields whose types come from other packages (`url.URL`, `driver.Connector`, third-party types), which source analysis can only flag as uncertain. Packages whose probe cannot build keep their source-level layouts, with a note.
+
 ## [0.44.0] — 2026-10-23
 
 ### Added

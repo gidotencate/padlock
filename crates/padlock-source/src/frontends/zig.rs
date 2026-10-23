@@ -7,6 +7,7 @@
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{Field, StructLayout, TypeInfo};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Parser};
 
 thread_local! {
@@ -29,6 +30,21 @@ fn is_zig_comptime_type(ty: &str) -> bool {
         ty.trim(),
         "type" | "anytype" | "comptime_int" | "comptime_float"
     )
+}
+
+/// ABI `(size, align)` of a `bits`-wide integer: `u1..u8` → 1, `u9..u16` → 2,
+/// `u17..u32` → 4, `u33..u64` → 8, `u65..u128` → 16, wider → multiples of 16.
+fn int_abi_size_align(bits: usize) -> (usize, usize) {
+    if bits == 0 {
+        return (0, 1);
+    }
+    let bytes = bits.div_ceil(8);
+    if bytes <= 16 {
+        let size = bytes.next_power_of_two();
+        (size, size)
+    } else {
+        (bytes.next_multiple_of(16), 16)
+    }
 }
 
 fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
@@ -59,22 +75,19 @@ fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "c_double" => (8, 8),
         "c_longdouble" => (16, 16),
 
-        // Arbitrary-width integers: uN / iN where N is a decimal number.
-        // In an extern struct the field occupies ceil(N/8) bytes, aligned to
-        // the next power-of-two (capped at 8). In a packed struct all integers
-        // are bit-packed — we cannot model that without knowing the context, so
-        // we use the same ceil-and-align heuristic as a reasonable approximation.
+        // Arbitrary-width integers: uN / iN where N is a decimal number. A field
+        // of such a type occupies the ABI size of the integer: its byte count
+        // rounded up to a power of two (up to 16 bytes), aligned to that size;
+        // wider integers are aligned to 16 and padded to a multiple of 16.
+        // (Inside a `packed struct` the bits are packed instead — see
+        // `zig_type_bit_width`.)
         ty if (ty.starts_with('u') || ty.starts_with('i'))
             && ty[1..].bytes().all(|b| b.is_ascii_digit())
             && !ty[1..].is_empty() =>
         {
-            if let Ok(bits) = ty[1..].parse::<usize>() {
-                let bytes = bits.div_ceil(8).max(1);
-                // Align to next power-of-two, capped at 8
-                let align = bytes.next_power_of_two().min(8);
-                (bytes, align)
-            } else {
-                (arch.pointer_size, arch.pointer_size)
+            match ty[1..].parse::<usize>() {
+                Ok(bits) => int_abi_size_align(bits),
+                Err(_) => (arch.pointer_size, arch.pointer_size),
             }
         }
 
@@ -112,43 +125,215 @@ fn zig_type_bit_width(ty: &str, arch: &'static ArchConfig) -> usize {
     }
 }
 
+// ── file-level context ────────────────────────────────────────────────────────
+
+/// What a pre-pass learns about the file's own declarations.
+struct ZigCtx {
+    arch: &'static ArchConfig,
+    /// `const N = 8;` → name → expression text.
+    consts: HashMap<String, String>,
+    /// `const E = enum(u8) {…}` → name → backing integer type (`u8`).
+    enums: HashMap<String, String>,
+    /// Local `struct` / `union` names, sized later by the nested-struct resolver.
+    containers: HashSet<String>,
+}
+
+/// Size/alignment of a type node plus what the caller needs to finish the job.
+struct ZSized {
+    size: usize,
+    align: usize,
+    /// `[N]LocalStruct`: `(LocalStruct, total element count)` for the resolver.
+    named: Option<(String, usize)>,
+    /// A best guess (array length that could not be evaluated).
+    uncertain: bool,
+}
+
+impl ZSized {
+    fn plain((size, align): (usize, usize)) -> Self {
+        ZSized {
+            size,
+            align,
+            named: None,
+            uncertain: false,
+        }
+    }
+}
+
+fn node_text<'a>(source: &'a str, node: Node<'_>) -> &'a str {
+    source[node.byte_range()].trim()
+}
+
+fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
+    (0..node.named_child_count())
+        .filter_map(|i| node.named_child(i as u32))
+        .collect()
+}
+
+/// Backing integer of a Zig `enum`: the explicit `enum(uN)` tag type, or the
+/// smallest unsigned integer that holds every variant (`u0` for one variant).
+fn enum_backing_type(source: &str, node: Node<'_>) -> String {
+    let explicit = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .find(|c| matches!(c.kind(), "builtin_type" | "identifier"));
+    if let Some(t) = explicit {
+        return node_text(source, t).to_string();
+    }
+    let variants = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .filter(|c| c.kind() == "container_field")
+        .count();
+    let bits = match variants {
+        0 | 1 => 0,
+        n => usize::BITS as usize - (n - 1).leading_zeros() as usize,
+    };
+    format!("u{bits}")
+}
+
+fn collect_zig_decls(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> ZigCtx {
+    let mut ctx = ZigCtx {
+        arch,
+        consts: HashMap::new(),
+        enums: HashMap::new(),
+        containers: HashSet::new(),
+    };
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        for i in (0..node.child_count()).rev() {
+            if let Some(c) = node.child(i) {
+                stack.push(c);
+            }
+        }
+        if node.kind() != "variable_declaration" {
+            continue;
+        }
+        let kids = named_children(node);
+        let Some(name) = kids
+            .iter()
+            .find(|c| c.kind() == "identifier")
+            .map(|c| node_text(source, *c).to_string())
+        else {
+            continue;
+        };
+        // The initialiser is the last named child.
+        let Some(init) = kids.last().filter(|c| c.kind() != "identifier") else {
+            continue;
+        };
+        match init.kind() {
+            "struct_declaration" | "union_declaration" => {
+                ctx.containers.insert(name);
+            }
+            "enum_declaration" => {
+                ctx.enums.insert(name, enum_backing_type(source, *init));
+            }
+            "integer" | "binary_expression" | "builtin_function" | "parenthesized_expression" => {
+                ctx.consts
+                    .insert(name, node_text(source, *init).to_string());
+            }
+            _ => {}
+        }
+    }
+    ctx
+}
+
+fn eval_zig_len(expr: &str, ctx: &ZigCtx) -> Option<usize> {
+    let lookup = |id: &str| ctx.consts.get(id).cloned();
+    let sizeof = |ty: &str| {
+        let ty = ty.trim();
+        let ty = ctx.enums.get(ty).map(String::as_str).unwrap_or(ty);
+        i64::try_from(zig_type_size_align(ty, ctx.arch).0).ok()
+    };
+    let n = super::consteval::eval(
+        expr,
+        &super::consteval::Env {
+            lookup: &lookup,
+            sizeof: &sizeof,
+        },
+        0,
+    )?;
+    usize::try_from(n).ok()
+}
+
 /// Determine size/align of a type node, dispatching by node kind.
-fn type_node_size_align(source: &str, node: Node<'_>, arch: &'static ArchConfig) -> (usize, usize) {
+fn type_node_size_align(source: &str, node: Node<'_>, ctx: &ZigCtx) -> ZSized {
+    let arch = ctx.arch;
+    let ps = arch.pointer_size;
     match node.kind() {
-        "builtin_type" | "identifier" => {
-            let text = source[node.byte_range()].trim();
-            zig_type_size_align(text, arch)
+        "builtin_type" => ZSized::plain(zig_type_size_align(node_text(source, node), arch)),
+        "identifier" => {
+            let text = node_text(source, node);
+            if let Some(backing) = ctx.enums.get(text) {
+                ZSized::plain(zig_type_size_align(backing, arch))
+            } else if ctx.containers.contains(text) {
+                ZSized {
+                    named: Some((text.to_string(), 1)),
+                    ..ZSized::plain((ps, ps))
+                }
+            } else {
+                ZSized::plain(zig_type_size_align(text, arch))
+            }
         }
         // *T — single pointer
-        "pointer_type" => (arch.pointer_size, arch.pointer_size),
-        // ?T — optional; if T is a pointer the optional is pointer-sized (null = 0),
-        // otherwise it is T + 1 byte tag, rounded up. Approximate as pointer-sized.
+        "pointer_type" => ZSized::plain((ps, ps)),
+        // ?T — optional. A pointer or slice uses null as "none" (no extra space);
+        // anything else is T plus a one-byte tag, rounded up to T's alignment.
         "nullable_type" => {
-            // Check if the inner type is a pointer — if so, null-pointer optimisation applies
-            if let Some(inner) = find_child_by_kinds(node, &["pointer_type"]) {
-                let _ = inner; // pointer optionals are pointer-sized
-                (arch.pointer_size, arch.pointer_size)
+            if find_child_by_kinds(node, &["pointer_type"]).is_some() {
+                ZSized::plain((ps, ps))
+            } else if find_child_by_kinds(node, &["slice_type"]).is_some() {
+                ZSized::plain((ps * 2, ps))
             } else if let Some(inner) = find_first_type_child(source, node) {
-                let (sz, al) = type_node_size_align(source, inner, arch);
-                // Add 1 byte tag, round up to alignment
-                let tagged = (sz + 1).next_multiple_of(al.max(1));
-                (tagged, al.max(1))
+                let e = type_node_size_align(source, inner, ctx);
+                let align = e.align.max(1);
+                ZSized {
+                    size: (e.size + 1).next_multiple_of(align),
+                    align,
+                    ..e
+                }
             } else {
-                (arch.pointer_size, arch.pointer_size)
+                ZSized::plain((ps, ps))
             }
         }
         // []T — slice = (ptr, len)
-        "slice_type" => (arch.pointer_size * 2, arch.pointer_size),
-        // [N]T — array; try to parse N and recursively get element size
+        "slice_type" => ZSized::plain((ps * 2, ps)),
+        // [N]T — length is the first child expression, element type the last.
         "array_type" => {
-            if let Some((count, elem_sz, elem_al)) = parse_array_type(source, node, arch) {
-                (elem_sz * count, elem_al)
-            } else {
-                (arch.pointer_size, arch.pointer_size)
+            let kids = named_children(node);
+            let (Some(len), Some(elem)) = (kids.first(), kids.last()) else {
+                return ZSized {
+                    uncertain: true,
+                    ..ZSized::plain((ps, ps))
+                };
+            };
+            let e = type_node_size_align(source, *elem, ctx);
+            let (count, known) = match eval_zig_len(node_text(source, *len), ctx) {
+                Some(n) => (n, true),
+                None => (1, false),
+            };
+            ZSized {
+                size: e.size.saturating_mul(count),
+                align: e.align,
+                named: e.named.map(|(n, c)| (n, c.saturating_mul(count))),
+                uncertain: e.uncertain || !known,
             }
         }
-        // error union E!T — approximate as two words
-        "error_union" => (arch.pointer_size * 2, arch.pointer_size),
+        // E!T — the payload plus a 16-bit error code, larger alignment first.
+        "error_union_type" | "error_union" => {
+            let payload = node
+                .child_by_field_name("ok")
+                .or_else(|| named_children(node).last().copied())
+                .map(|c| type_node_size_align(source, c, ctx));
+            match payload {
+                Some(p) if p.size > 0 => {
+                    let align = p.align.max(2);
+                    ZSized {
+                        size: (p.size.next_multiple_of(2) + 2).next_multiple_of(align),
+                        align,
+                        ..p
+                    }
+                }
+                _ => ZSized::plain((2, 2)),
+            }
+        }
         // @Vector(N, T): SIMD vector type.
         // Size = N × sizeof(T); alignment = size (SIMD vectors are naturally
         // aligned to their own size, capped at 64 bytes for current hardware).
@@ -156,11 +341,11 @@ fn type_node_size_align(source: &str, node: Node<'_>, arch: &'static ArchConfig)
             if let Some((count, elem_sz, elem_al)) = parse_vector_builtin(source, node, arch) {
                 let size = count * elem_sz;
                 let align = size.next_power_of_two().min(64).max(elem_al);
-                return (size, align);
+                return ZSized::plain((size, align));
             }
-            (arch.pointer_size, arch.pointer_size)
+            ZSized::plain((ps, ps))
         }
-        _ => (arch.pointer_size, arch.pointer_size),
+        _ => ZSized::plain((ps, ps)),
     }
 }
 
@@ -205,36 +390,6 @@ fn parse_vector_builtin(
     Some((count?, elem_sz, elem_al))
 }
 
-/// For `[N]T` nodes, return `Some((count, elem_size, elem_align))`.
-fn parse_array_type(
-    source: &str,
-    node: Node<'_>,
-    arch: &'static ArchConfig,
-) -> Option<(usize, usize, usize)> {
-    // array_type children: [ integer_literal ] type_expr
-    let mut count: Option<usize> = None;
-    let mut elem: Option<(usize, usize)> = None;
-
-    for i in 0..node.child_count() {
-        let Some(child) = node.child(i) else { continue };
-        match child.kind() {
-            "integer" | "integer_literal" => {
-                let text = source[child.byte_range()].trim();
-                count = text.parse::<usize>().ok();
-            }
-            "builtin_type" | "identifier" | "pointer_type" | "slice_type" | "array_type"
-            | "nullable_type" => {
-                elem = Some(type_node_size_align(source, child, arch));
-            }
-            _ => {}
-        }
-    }
-
-    let count = count?;
-    let (esz, eal) = elem.unwrap_or((arch.pointer_size, arch.pointer_size));
-    Some((count, esz, eal))
-}
-
 fn find_child_by_kinds<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
     for i in 0..node.child_count() {
         if let Some(c) = node.child(i)
@@ -252,7 +407,7 @@ fn find_first_type_child<'a>(source: &str, node: Node<'a>) -> Option<Node<'a>> {
         if let Some(c) = node.child(i) {
             match c.kind() {
                 "builtin_type" | "identifier" | "pointer_type" | "slice_type" | "array_type"
-                | "nullable_type" | "error_union" => return Some(c),
+                | "nullable_type" | "error_union" | "error_union_type" => return Some(c),
                 _ => {}
             }
         }
@@ -263,6 +418,7 @@ fn find_first_type_child<'a>(source: &str, node: Node<'a>) -> Option<Node<'a>> {
 // ── tree-sitter walker ────────────────────────────────────────────────────────
 
 fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> Vec<StructLayout> {
+    let ctx = collect_zig_decls(source, root, arch);
     let mut layouts = Vec::new();
     let mut stack = vec![root];
 
@@ -274,7 +430,7 @@ fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> V
         }
 
         if node.kind() == "variable_declaration"
-            && let Some(layout) = parse_variable_declaration(source, node, arch)
+            && let Some(layout) = parse_variable_declaration(source, node, &ctx)
         {
             layouts.push(layout);
         } else if node.kind() == "function_declaration" {
@@ -340,11 +496,7 @@ fn note_comptime_generic_fn(source: &str, node: Node<'_>) {
     }
 }
 
-fn parse_variable_declaration(
-    source: &str,
-    node: Node<'_>,
-    arch: &'static ArchConfig,
-) -> Option<StructLayout> {
+fn parse_variable_declaration(source: &str, node: Node<'_>, ctx: &ZigCtx) -> Option<StructLayout> {
     let source_line = node.start_position().row as u32 + 1;
     let decl_start_byte = node.start_byte();
     let mut name: Option<String> = None;
@@ -366,10 +518,10 @@ fn parse_variable_declaration(
 
     let name = name?;
     let mut layout = if let Some(sn) = struct_node {
-        parse_struct_declaration(source, sn, name, arch, source_line)?
+        parse_struct_declaration(source, sn, name, ctx, source_line)?
     } else {
         let un = union_node?;
-        parse_union_declaration(source, un, name, arch, source_line)?
+        parse_union_declaration(source, un, name, ctx, source_line)?
     };
     layout.suppressed_findings =
         super::suppress::suppressed_from_preceding_source(source, decl_start_byte);
@@ -387,11 +539,13 @@ fn parse_union_declaration(
     source: &str,
     node: Node<'_>,
     name: String,
-    arch: &'static ArchConfig,
+    ctx: &ZigCtx,
     source_line: u32,
 ) -> Option<StructLayout> {
+    let arch = ctx.arch;
     let mut is_tagged = false;
     let mut raw_fields: Vec<(String, String, usize, usize, u32)> = Vec::new();
+    let mut uncertain_fields: Vec<String> = Vec::new();
 
     for i in 0..node.child_count() {
         let Some(child) = node.child(i) else { continue };
@@ -402,7 +556,7 @@ fn parse_union_declaration(
             // We detect this by seeing an identifier inside the `(...)` group.
             // Mark it as tagged regardless of the tag type.
             "container_field" => {
-                if let Some(f) = parse_container_field(source, child, arch, false) {
+                if let Some(f) = parse_container_field(source, child, ctx, &mut uncertain_fields) {
                     raw_fields.push(f);
                 }
             }
@@ -497,7 +651,7 @@ fn parse_union_declaration(
         is_union: true,
         is_repr_rust: false,
         suppressed_findings: Vec::new(), // set by parse_variable_declaration
-        uncertain_fields: Vec::new(),
+        uncertain_fields,
     })
 }
 
@@ -505,9 +659,10 @@ fn parse_struct_declaration(
     source: &str,
     node: Node<'_>,
     name: String,
-    arch: &'static ArchConfig,
+    ctx: &ZigCtx,
     source_line: u32,
 ) -> Option<StructLayout> {
+    let arch = ctx.arch;
     let mut is_packed = false;
     let mut is_extern = false;
     // (field_name, type_text, size, align, source_line)
@@ -520,7 +675,7 @@ fn parse_struct_declaration(
             "packed" => is_packed = true,
             "extern" => is_extern = true,
             "container_field" => {
-                if let Some(f) = parse_container_field(source, child, arch, is_packed) {
+                if let Some(f) = parse_container_field(source, child, ctx, &mut uncertain_fields) {
                     if is_zig_comptime_type(&f.1) {
                         uncertain_fields.push(f.0.clone());
                     }
@@ -570,8 +725,10 @@ fn parse_struct_declaration(
             });
             bit_offset += bit_width;
         }
-        offset = bit_offset.div_ceil(8);
-        struct_align = 1;
+        // A packed struct is stored as one integer of `bit_offset` bits, so its
+        // size and alignment are that integer's ABI size (`packed struct { a: u8,
+        // b: u32 }` is a `u40`, which occupies 8 bytes).
+        (offset, struct_align) = int_abi_size_align(bit_offset);
     } else {
         for (fname, type_text, size, align, field_line) in raw_fields {
             if align > 0 {
@@ -622,15 +779,18 @@ fn parse_struct_declaration(
 }
 
 /// Parse a `container_field` node and return `(name, type_text, size, align, source_line)`.
+/// Fields whose size is a best guess are appended to `uncertain`.
 fn parse_container_field(
     source: &str,
     node: Node<'_>,
-    arch: &'static ArchConfig,
-    is_packed: bool,
+    ctx: &ZigCtx,
+    uncertain: &mut Vec<String>,
 ) -> Option<(String, String, usize, usize, u32)> {
+    let arch = ctx.arch;
     let mut field_name: Option<String> = None;
     let mut type_text: Option<String> = None;
-    let mut size_align: Option<(usize, usize)> = None;
+    let mut sized: Option<ZSized> = None;
+    let mut align_override: Option<usize> = None;
 
     for i in 0..node.child_count() {
         let Some(child) = node.child(i) else { continue };
@@ -639,16 +799,16 @@ fn parse_container_field(
                 field_name = Some(source[child.byte_range()].to_string());
             }
             "builtin_type" | "pointer_type" | "nullable_type" | "slice_type" | "array_type"
-            | "error_union" | "builtin_function" => {
-                let text = source[child.byte_range()].to_string();
-                size_align = Some(type_node_size_align(source, child, arch));
-                type_text = Some(text);
+            | "error_union" | "error_union_type" | "builtin_function" | "identifier" => {
+                // A second identifier is a type name (e.g. a named struct or enum).
+                type_text = Some(node_text(source, child).to_string());
+                sized = Some(type_node_size_align(source, child, ctx));
             }
-            "identifier" => {
-                // Second identifier = type name (e.g. a named struct type)
-                let text = source[child.byte_range()].trim().to_string();
-                size_align = Some(zig_type_size_align(&text, arch));
-                type_text = Some(text);
+            // `align(N)` on a field overrides its natural alignment.
+            "byte_alignment" => {
+                align_override = named_children(child)
+                    .first()
+                    .and_then(|n| node_text(source, *n).parse().ok());
             }
             _ => {}
         }
@@ -657,15 +817,27 @@ fn parse_container_field(
     // Discard fields with empty names — tree-sitter-zig emits a zero-length
     // identifier node for `union {}` (empty union body), which is not a real field.
     let name = field_name.filter(|n| !n.is_empty())?;
-    let ty = type_text.unwrap_or_else(|| "anyopaque".to_string());
-    let (mut size, align) = size_align.unwrap_or((arch.pointer_size, arch.pointer_size));
+    let mut ty = type_text.unwrap_or_else(|| "anyopaque".to_string());
+    let sized = sized.unwrap_or_else(|| ZSized::plain((arch.pointer_size, arch.pointer_size)));
+    if sized.uncertain {
+        uncertain.push(name.clone());
+    }
+    // An array of a local struct is renamed `Name[count]` so the nested-struct
+    // resolver can substitute the real element size.
+    if let Some((elem, count)) = &sized.named
+        && ty.starts_with('[')
+    {
+        ty = format!("{elem}[{count}]");
+    }
     let field_line = node.start_position().row as u32 + 1;
 
-    if is_packed && size == 0 {
-        size = 0; // void fields in packed structs stay 0
-    }
-
-    Some((name, ty, size, align, field_line))
+    Some((
+        name,
+        ty,
+        sized.size,
+        align_override.unwrap_or(sized.align),
+        field_line,
+    ))
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -714,7 +886,9 @@ mod tests {
         assert!(l.is_packed);
         assert_eq!(l.fields[0].offset, 0);
         assert_eq!(l.fields[1].offset, 1); // immediately after u8, no padding
-        assert_eq!(l.total_size, 5);
+        // 40 bits are stored as a u40, whose ABI size is 8 (verified with @sizeOf).
+        assert_eq!(l.total_size, 8);
+        assert_eq!(l.align, 8);
     }
 
     #[test]
@@ -900,14 +1074,14 @@ mod tests {
         assert_eq!(zig_type_size_align("u3", &X86_64_SYSV), (1, 1));
         // u9 → 2B (ceil(9/8)=2), aligned to 2
         assert_eq!(zig_type_size_align("u9", &X86_64_SYSV), (2, 2));
-        // u24 → 3B, aligned to 4 (next power-of-two)
-        assert_eq!(zig_type_size_align("u24", &X86_64_SYSV), (3, 4));
-        // u48 → 6B, aligned to 8
-        assert_eq!(zig_type_size_align("u48", &X86_64_SYSV), (6, 8));
+        // The ABI size is the byte count rounded up to a power of two (verified
+        // with @sizeOf/@alignOf on zig 0.15): u24 → 4B, u48 → 8B.
+        assert_eq!(zig_type_size_align("u24", &X86_64_SYSV), (4, 4));
+        assert_eq!(zig_type_size_align("u48", &X86_64_SYSV), (8, 8));
+        assert_eq!(zig_type_size_align("u65", &X86_64_SYSV), (16, 16));
+        assert_eq!(zig_type_size_align("u129", &X86_64_SYSV), (32, 16));
         // i7 → 1B, aligned to 1
         assert_eq!(zig_type_size_align("i7", &X86_64_SYSV), (1, 1));
-        // i128 is already in the table; u129 hits the arbitrary-width path
-        assert_eq!(zig_type_size_align("u129", &X86_64_SYSV), (17, 8));
     }
 
     #[test]
@@ -1032,5 +1206,90 @@ mod tests {
         assert_eq!(layouts[0].fields[0].size, 16);
         // u8 follows the vector at offset 16 (no padding needed after aligned vector)
         assert_eq!(layouts[0].fields[1].offset, 16);
+    }
+
+    // ── field shapes (verified against `zig run` @sizeOf/@offsetOf) ───────────
+
+    fn zig(src: &str, name: &str) -> StructLayout {
+        crate::parse_source_str(src, &crate::SourceLanguage::Zig, &X86_64_SYSV)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.name == name)
+            .unwrap_or_else(|| panic!("{name} not parsed"))
+    }
+
+    fn zoff(l: &StructLayout, field: &str) -> usize {
+        l.fields.iter().find(|f| f.name == field).unwrap().offset
+    }
+
+    #[test]
+    fn array_length_may_be_a_const_expression() {
+        let src =
+            "const N = 8; const S = extern struct { a: u8, b: [N * 2 + @sizeOf(u64)]u8, c: u64 };";
+        let l = zig(src, "S");
+        assert_eq!(zoff(&l, "c"), 32);
+        assert!(l.uncertain_fields.is_empty());
+    }
+
+    #[test]
+    fn unevaluable_array_length_is_uncertain() {
+        let l = zig(
+            "const S = extern struct { a: u8, b: [unknown_len]u8, c: u8 };",
+            "S",
+        );
+        assert_eq!(l.uncertain_fields, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn array_of_local_struct_is_scaled() {
+        let src = "const In = extern struct { x: u8, y: u32 }; const S = extern struct { a: u8, b: [2]In, c: u8 };";
+        let l = zig(src, "S");
+        assert_eq!(zoff(&l, "c"), 20);
+        assert_eq!(l.total_size, 24);
+    }
+
+    #[test]
+    fn enum_fields_use_their_backing_integer() {
+        let src = "const E = enum(u32) { a, b }; const F = enum { a, b, c };
+            const S = extern struct { a: u8, e: E, f: F, c: u8 };";
+        let l = zig(src, "S");
+        assert_eq!(zoff(&l, "e"), 4);
+        assert_eq!(zoff(&l, "f"), 8);
+        assert_eq!(zoff(&l, "c"), 9);
+    }
+
+    #[test]
+    fn field_align_attribute_overrides_alignment() {
+        let l = zig(
+            "const S = extern struct { a: u8, b: u32 align(16), c: u8 };",
+            "S",
+        );
+        assert_eq!(zoff(&l, "b"), 16);
+        assert_eq!(l.total_size, 32);
+        assert_eq!(l.align, 16);
+    }
+
+    #[test]
+    fn packed_struct_size_is_its_backing_integer() {
+        let l = zig(
+            "const P = packed struct { a: u3, b: u5, c: u8, d: u1 };",
+            "P",
+        );
+        assert_eq!(l.total_size, 4); // u17
+    }
+
+    #[test]
+    fn error_unions_hold_the_payload_and_a_16_bit_code() {
+        let by = |ty: &str| zig(&format!("const S = struct {{ v: {ty} }};"), "S").total_size;
+        assert_eq!(by("anyerror!u8"), 4);
+        assert_eq!(by("anyerror!u32"), 8);
+        assert_eq!(by("anyerror!u64"), 16);
+        assert_eq!(by("anyerror!void"), 2);
+    }
+
+    #[test]
+    fn optional_slice_has_no_tag() {
+        let l = zig("const S = struct { v: ?[]u8 };", "S");
+        assert_eq!(l.total_size, 16);
     }
 }

@@ -10,7 +10,7 @@ then `padlock explain` is run on the same file and the two are compared.
 Known gaps are listed in xfail.txt as `lang:Name`. A listed case that now
 passes (XPASS) fails the run so the entry gets removed.
 
-Usage: run.py [--padlock PATH] [--lang go,c,cpp,rust,zig] [--update-xfail]
+Usage: run.py [--padlock PATH] [--lang go,c,cpp,rust,zig,c23] [--update-xfail]
 Tools: gcc, g++, rustc, go, zig (override with $ZIG). Missing tools are skipped.
 """
 import argparse, os, re, shutil, subprocess, sys, tempfile
@@ -31,6 +31,10 @@ def truth(lang, src, tmp):
         r = sh(["g++", "-std=c++17", "-w", src, "-o", exe]); r = sh([exe]) if r.returncode == 0 else r
     elif lang == "rust":
         r = sh(["rustc", "-O", "--edition", "2021", src, "-o", exe]); r = sh([exe]) if r.returncode == 0 else r
+    elif lang == "c23":
+        # gcc < 14 lacks C23 `_BitInt`; zig's bundled clang has it.
+        r = sh([os.environ.get("ZIG", "zig"), "cc", "-std=c23", "-w", src, "-o", exe])
+        r = sh([exe]) if r.returncode == 0 else r
     elif lang == "zig":
         r = sh([os.environ.get("ZIG", "zig"), "run", src, "--cache-dir", os.path.join(tmp, "zc")])
         r.stdout = r.stderr if r.returncode == 0 else r.stdout  # std.debug.print -> stderr
@@ -62,13 +66,14 @@ def padlock_layouts(padlock, src):
     return got
 
 def have(lang):
-    need = {"go": "go", "c": "gcc", "cpp": "g++", "rust": "rustc", "zig": os.environ.get("ZIG", "zig")}[lang]
+    need = {"go": "go", "c": "gcc", "cpp": "g++", "rust": "rustc",
+            "zig": os.environ.get("ZIG", "zig"), "c23": os.environ.get("ZIG", "zig")}[lang]
     return shutil.which(need) is not None
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--padlock", default=os.path.join(ROOT, "target", "release", "padlock"))
-    ap.add_argument("--lang", default="go,c,cpp,rust,zig")
+    ap.add_argument("--lang", default="go,c,cpp,rust,zig,c23")
     ap.add_argument("--update-xfail", action="store_true", help="rewrite xfail.txt from current failures")
     a = ap.parse_args()
     xfile = os.path.join(HERE, "xfail.txt")
@@ -77,7 +82,7 @@ def main():
         for l in open(xfile):
             l = l.split("#")[0].strip()
             if l: xfail.add(l)
-    ext = {"go": "go", "c": "c", "cpp": "cpp", "rust": "rs", "zig": "zig"}
+    ext = {"go": "go", "c": "c", "cpp": "cpp", "rust": "rs", "zig": "zig", "c23": "c"}
     failures, newx, total_bad = [], [], 0
     for lang in a.lang.split(","):
         if not have(lang):

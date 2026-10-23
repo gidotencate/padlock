@@ -39,7 +39,7 @@ struct Flex { int n; char data[]; };
 struct Flex2 { char c; long n; char data[]; };
 struct Bits { unsigned a:3; unsigned b:5; char c; };
 struct BitsMix { char a; int b:4; short c:4; char d; };
-struct BitsL { long a:40; char b; int c:3; };
+struct BitsL { long a:40; char b; int c:3; char t; };
 struct Const { const char a; volatile int b; const char *restrict p; char c; };
 struct Unsigned { unsigned char a; unsigned long b; unsigned short c; signed char d; };
 struct Ptrs { char a; char **pp; const int *c; void *v; char b; };
@@ -50,9 +50,14 @@ struct Typedef { char a; Inner i; char c; };
 typedef uint8_t u8; typedef uint16_t u16; typedef u16 mylen;
 struct TD { u8 a; mylen b; u8 c; uint64_t d; u8 e; };
 struct Arr3 { u8 a; u8 b[3]; u16 c[2]; u8 d; };
+struct BfDiff { uint8_t a:3; uint32_t b:5; uint8_t t; };
+struct BfAnon { int :32; int a:4; char t; };
+struct BfZero { int a:3; int :0; int b:5; char t; };
+struct BfWide { char a; int b:30; char c; };
+struct BfPk { char a; int b:4; int c:6; char d; } __attribute__((packed));
 struct ZeroArr { char a; int z[0]; char c; };
 #define P(T,L) printf(#T " %zu %zu\n", sizeof(struct T), offsetof(struct T, L))
 int main(){
-P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,b);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);
-printf("AlS %zu 0\nU %zu 0\n",sizeof(struct AlS),sizeof(union U));
+P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,t);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);P(BfDiff,t);P(BfAnon,t);P(BfZero,t);P(BfWide,c);P(BfPk,d);
+printf("AlS %zu -1\nU %zu 0\n",sizeof(struct AlS),sizeof(union U));
 }

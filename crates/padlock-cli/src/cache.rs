@@ -17,6 +17,10 @@ use padlock_core::ir::StructLayout;
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct CacheStore {
+    /// padlock version that wrote the cache. Layouts depend on the parser, so a
+    /// cache written by another version is discarded rather than served stale.
+    #[serde(default)]
+    version: String,
     entries: HashMap<String, CacheEntry>,
 }
 
@@ -44,9 +48,10 @@ impl ParseCache {
     /// If the file is missing or corrupt, an empty cache is returned.
     pub fn load(root: &Path) -> Self {
         let cache_path = root.join(".padlock-cache").join("layouts.json");
-        let store = std::fs::read(&cache_path)
+        let store: CacheStore = std::fs::read(&cache_path)
             .ok()
             .and_then(|data| serde_json::from_slice(&data).ok())
+            .filter(|s: &CacheStore| s.version == env!("CARGO_PKG_VERSION"))
             .unwrap_or_default();
         ParseCache {
             store,
@@ -133,6 +138,7 @@ impl ParseCache {
         {
             return;
         }
+        self.store.version = env!("CARGO_PKG_VERSION").to_string();
         if let Ok(file) = std::fs::File::create(&self.cache_path) {
             let writer = std::io::BufWriter::new(file);
             let _ = serde_json::to_writer(writer, &self.store);
@@ -269,6 +275,32 @@ mod tests {
         };
         // File's actual mtime != 0, so this must be a miss.
         assert!(cache.get(&src).is_none());
+    }
+
+    #[test]
+    fn cache_written_by_another_version_is_discarded() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("v.rs");
+        fs::write(&src, "struct V { x: u64 }").unwrap();
+
+        let mut cache = ParseCache::load(dir.path());
+        cache.insert(&src, vec![simple_layout()], vec![]);
+        cache.flush();
+        assert!(
+            ParseCache::load(dir.path()).get(&src).is_some(),
+            "same-version cache is reused"
+        );
+
+        // Rewrite the file as if an older padlock produced it.
+        let path = dir.path().join(".padlock-cache").join("layouts.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        json["version"] = "0.0.1".into();
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(
+            ParseCache::load(dir.path()).get(&src).is_none(),
+            "layouts parsed by another padlock version must not be served"
+        );
     }
 
     #[test]

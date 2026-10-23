@@ -252,7 +252,9 @@ pub enum SourceLanguage {
 pub fn detect_language(path: &Path) -> Option<SourceLanguage> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("c") | Some("h") => Some(SourceLanguage::C),
-        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") => Some(SourceLanguage::Cpp),
+        Some("cpp") | Some("cc") | Some("cxx") | Some("c++") | Some("hpp") | Some("hh")
+        | Some("hxx") | Some("h++") | Some("ipp") | Some("tpp") | Some("inl") | Some("cppm")
+        | Some("ixx") => Some(SourceLanguage::Cpp),
         Some("rs") => Some(SourceLanguage::Rust),
         Some("go") => Some(SourceLanguage::Go),
         Some("zig") => Some(SourceLanguage::Zig),
@@ -260,11 +262,45 @@ pub fn detect_language(path: &Path) -> Option<SourceLanguage> {
     }
 }
 
+/// Like [`detect_language`], but a `.h` header whose contents are C++ (classes,
+/// templates, namespaces, access specifiers, `std::`) is reported as C++ — the
+/// C grammar cannot parse those and would silently lose the types.
+pub fn detect_language_from_source(path: &Path, source: &str) -> Option<SourceLanguage> {
+    let lang = detect_language(path)?;
+    if lang == SourceLanguage::C
+        && path.extension().and_then(|e| e.to_str()) == Some("h")
+        && looks_like_cpp(source)
+    {
+        return Some(SourceLanguage::Cpp);
+    }
+    Some(lang)
+}
+
+fn looks_like_cpp(source: &str) -> bool {
+    source.lines().any(|line| {
+        let l = line.trim_start();
+        if l.starts_with("//") || l.starts_with('*') || l.starts_with("/*") {
+            return false;
+        }
+        l.starts_with("class ")
+            || l.starts_with("namespace ")
+            || l.starts_with("template<")
+            || l.starts_with("template <")
+            || l.starts_with("public:")
+            || l.starts_with("private:")
+            || l.starts_with("protected:")
+            || l.starts_with("using namespace ")
+            || l.contains("std::")
+            || l.contains(" virtual ")
+            || l.starts_with("virtual ")
+    })
+}
+
 /// Parse a source file and return layouts plus any skipped types.
 pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<ParseOutput> {
-    let lang = detect_language(path)
-        .ok_or_else(|| anyhow::anyhow!("unsupported file type: {}", path.display()))?;
     let source = std::fs::read_to_string(path)?;
+    let lang = detect_language_from_source(path, &source)
+        .ok_or_else(|| anyhow::anyhow!("unsupported file type: {}", path.display()))?;
     // Clear any leftover thread-local state from previous direct parse_source_str calls.
     let _ = take_skipped();
     let mut layouts = parse_source_str(&source, &lang, arch)?;
@@ -1356,5 +1392,26 @@ struct P : NonDyn, Vf { char q; };");
         assert_eq!(field_off(p, "__base_Vf"), 0);
         assert_eq!(field_off(p, "__base_NonDyn"), 9);
         assert_eq!(p.total_size, 16);
+    }
+
+    #[test]
+    fn cpp_content_in_a_dot_h_header_is_parsed_as_cpp() {
+        let p = Path::new("x.h");
+        assert_eq!(
+            detect_language_from_source(p, "struct S { int a; };\n"),
+            Some(SourceLanguage::C)
+        );
+        assert_eq!(
+            detect_language_from_source(p, "class S {\npublic:\n  int a;\n};\n"),
+            Some(SourceLanguage::Cpp)
+        );
+        assert_eq!(
+            detect_language_from_source(p, "namespace n {\nstruct S { std::string s; };\n}\n"),
+            Some(SourceLanguage::Cpp)
+        );
+        assert_eq!(
+            detect_language(Path::new("x.hh")),
+            Some(SourceLanguage::Cpp)
+        );
     }
 }

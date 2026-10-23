@@ -48,7 +48,7 @@ fn fix_file(
     backup: bool,
     re: Option<&regex::Regex>,
 ) -> anyhow::Result<bool> {
-    let lang = padlock_source::detect_language(path).ok_or_else(|| {
+    padlock_source::detect_language(path).ok_or_else(|| {
         anyhow::anyhow!(
             "fix only works on source files (.c, .cpp, .rs, .go, .zig); got {}",
             path.display()
@@ -57,6 +57,7 @@ fn fix_file(
 
     let arch = padlock_dwarf::reader::detect_arch_from_host();
     let source = std::fs::read_to_string(path)?;
+    let lang = padlock_source::detect_language_from_source(path, &source).expect("checked above");
     let output = padlock_source::parse_source(path, arch)?;
     let layouts = output.layouts;
     let report = Report::from_layouts(&layouts);

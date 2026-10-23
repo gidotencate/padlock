@@ -39,13 +39,41 @@ struct Connection {
 }
 ```
 
-Both macros pass the struct definition through unchanged — they only append a hidden `const` assertion block. No runtime cost.
+## `#[padlock::assert_offsets(field = N, …)]`
+
+Fails to compile if a listed field is not at the given byte offset (uses `core::mem::offset_of!`, Rust 1.77+). Pins FFI / on-disk layouts, or the result of `padlock fix`, against silent drift:
+
+```rust
+use padlock_macros::assert_offsets;
+
+#[assert_offsets(len = 0, cap = 8, flags = 16)]
+#[repr(C)]
+struct Header {
+    len:   u64,
+    cap:   u64,
+    flags: u8,
+}
+```
+
+## `#[padlock::assert_align(N)]`
+
+Fails to compile if `align_of` is not exactly `N` (e.g. to keep a hot counter on its own cache line):
+
+```rust
+use padlock_macros::assert_align;
+
+#[assert_align(64)]
+#[repr(C, align(64))]
+struct Counter { hits: u64 }
+```
+
+All macros pass the struct definition through unchanged — they only append a hidden `const` assertion block. No runtime cost.
 
 ## Part of padlock
 
 - [`padlock-cli`](https://crates.io/crates/padlock-cli) — CLI (`padlock` + `cargo-padlock` binaries)
 - [`padlock-core`](https://crates.io/crates/padlock-core) — IR, analysis passes, findings
-- [`padlock-source`](https://crates.io/crates/padlock-source) — Source analysis (C/C++/Rust/Go)
+- [`padlock-source`](https://crates.io/crates/padlock-source) — Source analysis (C/C++/Rust/Go/Zig)
 - [`padlock-dwarf`](https://crates.io/crates/padlock-dwarf) — Binary analysis (DWARF/PDB)
 - [`padlock-output`](https://crates.io/crates/padlock-output) — Output formatters (terminal/JSON/SARIF/diff)
 - [`padlock-macros`](https://crates.io/crates/padlock-macros) — Compile-time layout assertions *(this crate)*

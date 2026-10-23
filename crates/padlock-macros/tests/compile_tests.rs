@@ -7,7 +7,7 @@
 // expand without panicking and produce correct runtime size relations.
 
 #![allow(dead_code)]
-use padlock_macros::{assert_no_padding, assert_size};
+use padlock_macros::{assert_align, assert_no_padding, assert_offsets, assert_size};
 
 // ── assert_no_padding ─────────────────────────────────────────────────────────
 
@@ -86,4 +86,26 @@ fn exactly_eight_bytes_size() {
 #[test]
 fn exactly_four_bytes_size() {
     assert_eq!(std::mem::size_of::<ExactlyFourBytes>(), 4);
+}
+
+// ── assert_offsets / assert_align ─────────────────────────────────────────────
+
+#[assert_offsets(len = 0, cap = 8, flags = 16)]
+#[repr(C)]
+struct Header {
+    len: u64,
+    cap: u64,
+    flags: u8,
+}
+
+#[assert_align(64)]
+#[repr(C, align(64))]
+struct CacheAligned {
+    hits: u64,
+}
+
+#[test]
+fn offset_and_align_assertions_compile_for_correct_layouts() {
+    assert_eq!(core::mem::offset_of!(Header, flags), 16);
+    assert_eq!(core::mem::align_of::<CacheAligned>(), 64);
 }

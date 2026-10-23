@@ -9,11 +9,58 @@ use padlock_core::ir::{AccessPattern, Field, StructLayout};
 pub struct Extractor<'a, R: Reader> {
     pub(crate) dwarf: &'a gimli::Dwarf<R>,
     pub(crate) arch: &'static ArchConfig,
+    /// DWARF 4 `.debug_types` type units (`-fdebug-types-section`) and DWARF 5
+    /// `DW_UT_type` units, with their signatures, so `DW_FORM_ref_sig8`
+    /// references can be followed.
+    pub(crate) type_units: Vec<Unit<R>>,
+    pub(crate) signatures: HashMap<u64, (usize, UnitOffset<R::Offset>)>,
+    /// Every unit in `.debug_info`, with its start offset, so `DW_FORM_ref_addr`
+    /// references into another compile unit (Go and Zig emit them) can be followed.
+    pub(crate) info_units: Vec<(usize, Unit<R>)>,
 }
 
 impl<'a, R: Reader> Extractor<'a, R> {
     pub fn new(dwarf: &'a gimli::Dwarf<R>, arch: &'static ArchConfig) -> Self {
-        Self { dwarf, arch }
+        let mut type_units = Vec::new();
+        let mut signatures = HashMap::new();
+        let mut add = |header: gimli::UnitHeader<R>| {
+            if let gimli::UnitType::Type {
+                type_signature,
+                type_offset,
+            }
+            | gimli::UnitType::SplitType {
+                type_signature,
+                type_offset,
+            } = header.type_()
+                && let Ok(unit) = dwarf.unit(header)
+            {
+                signatures.insert(type_signature.0, (type_units.len(), type_offset));
+                type_units.push(unit);
+            }
+        };
+        let mut v4 = dwarf.type_units();
+        while let Ok(Some(h)) = v4.next() {
+            add(h);
+        }
+        let mut v5 = dwarf.units();
+        while let Ok(Some(h)) = v5.next() {
+            add(h);
+        }
+        let mut info_units = Vec::new();
+        let mut all = dwarf.units();
+        while let Ok(Some(h)) = all.next() {
+            let start = gimli::ReaderOffset::into_u64(h.offset().0) as usize;
+            if let Ok(unit) = dwarf.unit(h) {
+                info_units.push((start, unit));
+            }
+        }
+        Self {
+            dwarf,
+            arch,
+            type_units,
+            signatures,
+            info_units,
+        }
     }
 
     pub fn extract_all(&self) -> anyhow::Result<Vec<StructLayout>> {
@@ -21,25 +68,101 @@ impl<'a, R: Reader> Extractor<'a, R> {
 
         let mut iter = self.dwarf.units();
         while let Some(header) = iter.next()? {
+            // Type units are walked below (DWARF 5 lists them among the units).
+            if matches!(
+                header.type_(),
+                gimli::UnitType::Type { .. } | gimli::UnitType::SplitType { .. }
+            ) {
+                continue;
+            }
             let unit = self.dwarf.unit(header)?;
-            self.extract_from_unit(&unit, &mut layouts)?;
+            self.extract_from_unit(&unit, &mut layouts, &HashMap::new())?;
+        }
+        // `typedef struct { … } Name;` with the struct in a type unit: the typedef
+        // (in a compile unit) refers to it by signature.
+        let mut sig_typedefs: HashMap<u64, String> = HashMap::new();
+        let mut iter = self.dwarf.units();
+        while let Some(header) = iter.next()? {
+            let unit = self.dwarf.unit(header)?;
+            let mut entries = unit.entries();
+            while let Some(entry) = entries.next_dfs()? {
+                if entry.tag() == gimli::DW_TAG_typedef
+                    && let Some(gimli::AttributeValue::DebugTypesRef(sig)) =
+                        entry.attr_value(gimli::DW_AT_type)
+                    && let Some(name) = self.attr_string(&unit, entry, gimli::DW_AT_name)?
+                {
+                    sig_typedefs.entry(sig.0).or_insert(name);
+                }
+            }
+        }
+        for (i, unit) in self.type_units.iter().enumerate() {
+            let names: HashMap<UnitOffset<R::Offset>, String> = self
+                .signatures
+                .iter()
+                .filter(|(_, (u, _))| *u == i)
+                .filter_map(|(sig, (_, off))| Some((*off, sig_typedefs.get(sig)?.clone())))
+                .collect();
+            self.extract_from_unit(unit, &mut layouts, &names)?;
         }
 
         Ok(layouts)
     }
 
-    fn extract_from_unit(&self, unit: &Unit<R>, out: &mut Vec<StructLayout>) -> anyhow::Result<()> {
+    /// Size the type an entry's `DW_AT_type` refers to, following references into
+    /// type units (`DW_FORM_ref_sig8`). `None` when the entry has no usable type.
+    pub(crate) fn resolve_type_attr(
+        &self,
+        unit: &Unit<R>,
+        entry: &DebuggingInformationEntry<R>,
+    ) -> anyhow::Result<Option<(usize, usize, padlock_core::ir::TypeInfo)>> {
+        match entry.attr_value(gimli::DW_AT_type) {
+            Some(gimli::AttributeValue::UnitRef(off)) => self.resolve_type(unit, off).map(Some),
+            Some(gimli::AttributeValue::DebugTypesRef(sig)) => match self.signatures.get(&sig.0) {
+                Some((i, off)) => self.resolve_type(&self.type_units[*i], *off).map(Some),
+                None => Ok(None),
+            },
+            Some(gimli::AttributeValue::DebugInfoRef(off)) => {
+                let target = gimli::ReaderOffset::into_u64(off.0) as usize;
+                // The unit with the greatest start offset not past the target.
+                let idx = self
+                    .info_units
+                    .partition_point(|(start, _)| *start <= target);
+                let Some((_, owner)) = idx.checked_sub(1).and_then(|i| self.info_units.get(i))
+                else {
+                    return Ok(None);
+                };
+                match gimli::DebugInfoOffset(off.0).to_unit_offset(&owner.header) {
+                    Some(uoff) => self.resolve_type(owner, uoff).map(Some),
+                    None => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn extract_from_unit(
+        &self,
+        unit: &Unit<R>,
+        out: &mut Vec<StructLayout>,
+        extra_typedef_names: &HashMap<UnitOffset<R::Offset>, String>,
+    ) -> anyhow::Result<()> {
         // First pass: build a map from struct offset → typedef name.
         // Handles `typedef struct { ... } Foo` where the struct has no tag name.
-        let typedef_names = self.collect_typedef_names(unit)?;
+        let mut typedef_names = self.collect_typedef_names(unit)?;
+        for (k, v) in extra_typedef_names {
+            typedef_names.entry(*k).or_insert_with(|| v.clone());
+        }
 
         let mut entries = unit.entries();
         while let Some(entry) = entries.next_dfs()? {
             // DW_TAG_class_type is the DWARF tag for C++ `class` declarations;
             // it has the same layout rules as DW_TAG_structure_type.
+            let is_union = entry.tag() == gimli::DW_TAG_union_type;
             let is_struct_like = entry.tag() == gimli::DW_TAG_structure_type
-                || entry.tag() == gimli::DW_TAG_class_type;
+                || entry.tag() == gimli::DW_TAG_class_type
+                || is_union;
             if is_struct_like && let Some(mut layout) = self.extract_struct(unit, entry)? {
+                layout.is_union = is_union;
                 if layout.name == "<anonymous>"
                     && let Some(name) = typedef_names.get(&entry.offset())
                 {
@@ -92,10 +215,23 @@ impl<'a, R: Reader> Extractor<'a, R> {
         // DW_AT_byte_size is normally normalized to Udata by gimli, but
         // DW_FORM_implicit_const (used when the size is the same for every
         // abbreviation entry, e.g. a pointer-sized struct) arrives as Sdata.
+        // Zig describes a `packed struct` as a structure whose `DW_AT_type` is its
+        // backing integer (no `DW_AT_byte_size`), with bit-offset members.
+        let backing = if entry.attr(gimli::DW_AT_byte_size).is_none() {
+            self.resolve_type_attr(unit, entry)?
+        } else {
+            None
+        };
         let total_size = match entry.attr_value(gimli::DW_AT_byte_size) {
-            Some(gimli::AttributeValue::Udata(s)) => s as usize,
             Some(gimli::AttributeValue::Sdata(s)) if s >= 0 => s as usize,
-            _ => return Ok(None),
+            Some(v) => match v.udata_value() {
+                Some(s) => s as usize,
+                None => return Ok(None),
+            },
+            None => match &backing {
+                Some((size, _, _)) => *size,
+                None => return Ok(None),
+            },
         };
 
         let source_file = self.attr_string(unit, entry, gimli::DW_AT_decl_file)?;
@@ -181,18 +317,16 @@ impl<'a, R: Reader> Extractor<'a, R> {
                     flush_bf(g, &mut fields, &mut uncertain_fields);
                 }
 
-                let base_offset = match child_entry.attr_value(gimli::DW_AT_data_member_location) {
-                    Some(gimli::AttributeValue::Udata(n)) => n as usize,
-                    Some(gimli::AttributeValue::Sdata(n)) => n as usize,
-                    _ => 0, // single-inheritance default: base always at offset 0
-                };
+                // single-inheritance default: base always at offset 0
+                let base_offset =
+                    member_location(child_entry.attr_value(gimli::DW_AT_data_member_location))
+                        .unwrap_or(0);
 
-                let type_offset = match child_entry.attr_value(gimli::DW_AT_type) {
-                    Some(gimli::AttributeValue::UnitRef(off)) => off,
-                    _ => continue,
+                let Some((base_size, base_align, base_ty)) =
+                    self.resolve_type_attr(unit, child_entry)?
+                else {
+                    continue;
                 };
-
-                let (base_size, base_align, base_ty) = self.resolve_type(unit, type_offset)?;
                 // Extract the name from the resolved type for the synthetic field label.
                 let base_name = match &base_ty {
                     padlock_core::ir::TypeInfo::Struct(l) => l.name.clone(),
@@ -229,33 +363,33 @@ impl<'a, R: Reader> Extractor<'a, R> {
                 // DWARF4 uses DW_AT_data_member_location (byte offset).
                 // DWARF5 uses DW_AT_data_bit_offset (absolute bit offset from struct start).
                 // Returns (byte_offset, abs_bit_offset_if_known).
-                let (byte_offset, abs_bit_offset) =
-                    match child_entry.attr_value(gimli::DW_AT_data_member_location) {
-                        Some(gimli::AttributeValue::Udata(n)) => (n as usize, None),
-                        Some(gimli::AttributeValue::Sdata(n)) => (n as usize, None),
-                        _ => {
-                            let raw: Option<u64> =
-                                match child_entry.attr_value(gimli::DW_AT_data_bit_offset) {
-                                    Some(gimli::AttributeValue::Udata(v)) => Some(v),
-                                    Some(gimli::AttributeValue::Sdata(v)) => Some(v as u64),
-                                    Some(gimli::AttributeValue::Data1(v)) => Some(v as u64),
-                                    Some(gimli::AttributeValue::Data2(v)) => Some(v as u64),
-                                    Some(gimli::AttributeValue::Data4(v)) => Some(v as u64),
-                                    Some(gimli::AttributeValue::Data8(v)) => Some(v),
-                                    _ => None,
-                                };
-                            match raw {
-                                Some(bit_off) => ((bit_off / 8) as usize, Some(bit_off as usize)),
-                                None => {
-                                    // No byte offset — flush pending group and skip.
-                                    if let Some(g) = pending_bf.take() {
-                                        flush_bf(g, &mut fields, &mut uncertain_fields);
-                                    }
-                                    continue;
+                let (byte_offset, abs_bit_offset) = match member_location(
+                    child_entry.attr_value(gimli::DW_AT_data_member_location),
+                ) {
+                    Some(n) => (n, None),
+                    None => {
+                        let raw: Option<u64> =
+                            match child_entry.attr_value(gimli::DW_AT_data_bit_offset) {
+                                Some(gimli::AttributeValue::Udata(v)) => Some(v),
+                                Some(gimli::AttributeValue::Sdata(v)) => Some(v as u64),
+                                Some(gimli::AttributeValue::Data1(v)) => Some(v as u64),
+                                Some(gimli::AttributeValue::Data2(v)) => Some(v as u64),
+                                Some(gimli::AttributeValue::Data4(v)) => Some(v as u64),
+                                Some(gimli::AttributeValue::Data8(v)) => Some(v),
+                                _ => None,
+                            };
+                        match raw {
+                            Some(bit_off) => ((bit_off / 8) as usize, Some(bit_off as usize)),
+                            None => {
+                                // No byte offset — flush pending group and skip.
+                                if let Some(g) = pending_bf.take() {
+                                    flush_bf(g, &mut fields, &mut uncertain_fields);
                                 }
+                                continue;
                             }
                         }
-                    };
+                    }
+                };
 
                 let bit_size = match child_entry.attr_value(gimli::DW_AT_bit_size) {
                     Some(gimli::AttributeValue::Udata(n)) => n as usize,
@@ -329,7 +463,16 @@ impl<'a, R: Reader> Extractor<'a, R> {
         // it overrides the alignment derived from the maximum field alignment.
         let field_align = fields.iter().map(|f| f.align).max().unwrap_or(1);
         let explicit_align = self.attr_usize(entry, gimli::DW_AT_alignment)?.unwrap_or(0);
-        let align = explicit_align.max(field_align);
+        let align = match &backing {
+            // Packed: the struct is aligned like its backing integer; fields are not.
+            Some((_, backing_align, _)) => *backing_align,
+            None => explicit_align.max(field_align),
+        };
+        if backing.is_some() {
+            for f in fields.iter_mut() {
+                f.align = 1;
+            }
+        }
 
         Ok(Some(StructLayout {
             name,
@@ -339,7 +482,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
             source_file,
             source_line,
             arch: self.arch,
-            is_packed: false,
+            is_packed: backing.is_some(),
             is_union: false,
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
@@ -359,18 +502,19 @@ impl<'a, R: Reader> Extractor<'a, R> {
             .attr_string(unit, entry, gimli::DW_AT_name)?
             .unwrap_or_else(|| "<unnamed>".to_string());
 
-        let offset = match entry.attr_value(gimli::DW_AT_data_member_location) {
-            Some(gimli::AttributeValue::Udata(n)) => n as usize,
-            Some(gimli::AttributeValue::Sdata(n)) => n as usize,
-            _ => return Ok(None),
+        // A union member may omit the location entirely: it is at offset 0. A
+        // member of a Zig packed struct has only a bit offset.
+        let offset = match member_location(entry.attr_value(gimli::DW_AT_data_member_location)) {
+            Some(n) => n,
+            None if entry.attr(gimli::DW_AT_data_member_location).is_none() => {
+                member_location(entry.attr_value(gimli::DW_AT_data_bit_offset)).unwrap_or(0) / 8
+            }
+            None => return Ok(None),
         };
 
-        let type_offset = match entry.attr_value(gimli::DW_AT_type) {
-            Some(gimli::AttributeValue::UnitRef(off)) => off,
-            _ => return Ok(None),
+        let Some((size, type_align, ty)) = self.resolve_type_attr(unit, entry)? else {
+            return Ok(None);
         };
-
-        let (size, type_align, ty) = self.resolve_type(unit, type_offset)?;
 
         // DW_AT_alignment on a member DIE captures an explicit alignment
         // override on the field declaration (e.g. __attribute__((aligned(N)))).
@@ -448,5 +592,15 @@ impl<'a, R: Reader> Extractor<'a, R> {
         }
 
         Ok(0)
+    }
+}
+
+/// A constant `DW_AT_data_member_location` in any data form (`DW_FORM_data1`…`data8`,
+/// `udata`, `sdata`, `implicit_const`) — Go, for one, emits `data1`. `None` for a
+/// location expression or a missing attribute.
+fn member_location<R: Reader>(value: Option<gimli::AttributeValue<R>>) -> Option<usize> {
+    match value? {
+        gimli::AttributeValue::Sdata(n) if n >= 0 => Some(n as usize),
+        v => v.udata_value().map(|n| n as usize),
     }
 }

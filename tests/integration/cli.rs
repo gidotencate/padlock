@@ -617,3 +617,67 @@ fn rust_go_zig_generics_are_instantiated_from_uses() {
         assert!(text.contains(name), "{name} must be instantiated: {text}");
     }
 }
+
+// ── DWARF input variants (need gcc; skipped when it is missing) ──────────────
+
+fn gcc_build(dir: &Path, flags: &[&str]) -> Option<std::path::PathBuf> {
+    let src = dir.join("t.c");
+    std::fs::write(
+        &src,
+        "struct Inner { char c; long l; };\nstruct Outer { char a; struct Inner in; union { char x[13]; long y; } u; };\nstruct Outer g;\nint main(void) { return 0; }\n",
+    )
+    .unwrap();
+    let out = dir.join("t");
+    let ok = std::process::Command::new("gcc")
+        .args(flags)
+        .arg(&src)
+        .arg("-o")
+        .arg(&out)
+        .current_dir(dir)
+        .status()
+        .ok()?
+        .success();
+    ok.then_some(out)
+}
+
+fn struct_size(json: &[u8], name: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+    v["structs"]
+        .as_array()?
+        .iter()
+        .find(|s| s["struct_name"] == name)
+        .and_then(|s| s["total_size"].as_u64())
+}
+
+#[test]
+fn dwarf_type_units_split_dwarf_and_compression_are_read() {
+    for flags in [
+        &["-g"][..],
+        &["-gdwarf-4", "-fdebug-types-section"],
+        &["-gdwarf-5", "-fdebug-types-section"],
+        &["-g", "-gsplit-dwarf"],
+        &["-g", "-gz"],
+    ] {
+        let dir = tempfile::TempDir::new().unwrap();
+        let Some(bin) = gcc_build(dir.path(), flags) else {
+            eprintln!("gcc not available; skipping");
+            return;
+        };
+        let out = padlock()
+            .args(["analyze", "--json", "--no-cache"])
+            .arg(&bin)
+            .output()
+            .unwrap();
+        // gcc: sizeof(struct Outer) == 40 (a, Inner at 8, union at 24 aligned to 8).
+        assert_eq!(
+            struct_size(&out.stdout, "Outer"),
+            Some(40),
+            "flags {flags:?}"
+        );
+        assert_eq!(
+            struct_size(&out.stdout, "Inner"),
+            Some(16),
+            "flags {flags:?}"
+        );
+    }
+}

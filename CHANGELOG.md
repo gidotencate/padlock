@@ -2,6 +2,21 @@
 
 All notable changes to padlock are documented here.
 
+## [0.39.0] — 2026-10-23
+
+The conformance harness now also checks **binary analysis**: each probe is built with debug info and padlock's DWARF reader is compared against the compiler (`dwarf-<lang>` rows, on by default). Before the fixes below: Go 0/36, Rust 0/60, C++ 39/48, Zig 30/53. Now: Go 36/36, C 50/50, C++ 45/48, Rust 59/60, Zig 53/53, C23 3/3 (the four remaining rows are template names spelled with their default arguments in DWARF; sizes agree).
+
+### Fixed
+- **Go binaries: every struct had zero fields.** Go emits `DW_AT_data_member_location` as `DW_FORM_data1` and member types as `DW_FORM_ref_addr` (references into another compile unit); padlock only accepted `udata`/`sdata` locations and unit-local references. Both are handled now (also Zig's cross-unit references).
+- **DWARF 4/5 type units (`-fdebug-types-section`) produced no structs**, and `DW_FORM_ref_sig8` references were not followed. Type units are now read, and typedef names attached to type-unit structs are applied.
+- **Split DWARF (`-gsplit-dwarf`) produced no structs.** The `.dwo` files named by the skeleton units are now located (via `DW_AT_comp_dir`, the binary's directory, or as given) and read.
+- **Unions in binaries were not reported**, and a union member type was given alignment = size (`union { char c[13]; long l; }` aligned to 16 instead of 8), mis-placing every field after it.
+- **C++ pointer-to-member fields were sized 0 bytes** from DWARF; they are one word (data member) or two (member function).
+- **Zig packed structs** (described as a structure over a backing integer, with bit-offset members) were not reported.
+
+### Added
+- `tests/conformance/run.py --backend source|dwarf|both`.
+
 ## [0.38.0] — 2026-10-23
 
 ### Fixed

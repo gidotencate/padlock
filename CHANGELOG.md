@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.55.0] — 2026-10-23
+
+### Changed
+- `padlock init` documents the new `.padlock.toml` keys (`defines`, `declared_order`, `[instantiate]`, all `arch.override` values).
+
 ## [0.54.0] — 2026-10-23
 
 ### Changed

@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.54.0] — 2026-10-23
+
+### Changed
+- README: new "How exact is it?" section (conformance and fuzzing, what is reported as uncertain, the exact modes, `-fno-eliminate-unused-debug-types` for binary analysis), `verify` and `ffi` commands, and the new `.padlock.toml` keys (`defines`, `declared_order`, `[instantiate]`, more `arch.override` values).
+
 ## [0.53.0] — 2026-10-23
 
 ### Fixed

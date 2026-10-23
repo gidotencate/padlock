@@ -2,6 +2,15 @@
 
 All notable changes to padlock are documented here.
 
+## [0.36.0] — 2026-10-23
+
+### Fixed
+- **C++ in `.h` headers was parsed with the C grammar**, so classes, templates, namespaced types, access specifiers and `std::` members in `.h` files were lost or mis-sized — common in C++ code bases, which mostly use `.h`. A `.h` file whose contents are C++ (`class`, `template<`, `namespace`, `public:`, `std::`, `virtual`) is now parsed as C++ by `analyze`, `fix`, `diff`, cross-file template discovery and `padlock-lsp`.
+- More C++ extensions are recognised: `.hh`, `.hxx`, `.h++`, `.c++`, `.ipp`, `.tpp`, `.inl`, `.cppm`, `.ixx`.
+
+### Added
+- `padlock_source::detect_language_from_source(path, text)`.
+
 ## [0.35.0] — 2026-10-23
 
 Generic types are analyzed **per concrete instantiation** instead of being skipped. Conformance: C++ 48/48, Rust 60/60, Go 36/36, Zig 53/53 (templates/generics included).

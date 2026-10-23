@@ -277,8 +277,8 @@ fn instantiate_across_files(
         .par_iter()
         .filter_map(|f| {
             let path = Path::new(f);
-            let lang = padlock_source::detect_language(path)?;
             let text = std::fs::read_to_string(path).ok()?;
+            let lang = padlock_source::detect_language_from_source(path, &text)?;
             Some(padlock_source::generic_uses(&text, &lang))
         })
         .flatten()

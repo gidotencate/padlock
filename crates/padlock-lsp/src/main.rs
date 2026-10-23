@@ -323,7 +323,7 @@ fn analyze_and_publish(
     let Some(path) = uri_to_path(uri) else {
         return Ok(());
     };
-    let Some(lang) = padlock_source::detect_language(&path) else {
+    let Some(lang) = padlock_source::detect_language_from_source(&path, text) else {
         return Ok(());
     };
 

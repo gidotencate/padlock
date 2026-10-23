@@ -533,170 +533,6 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
 /// `constexpr int N = 8;`) live in the same map as the typedef aliases.
 const CONST_KEY: &str = "$const:";
 
-#[derive(Debug, Clone, PartialEq)]
-enum ConstTok {
-    Num(i64),
-    Ident(String),
-    /// Raw text of a `sizeof(...)` operand.
-    SizeofType(String),
-    Op(&'static str),
-}
-
-fn tokenize_const(expr: &str) -> Option<Vec<ConstTok>> {
-    const OPS: [&str; 13] = [
-        "<<", ">>", "+", "-", "*", "/", "%", "&", "|", "^", "~", "(", ")",
-    ];
-    let b = expr.as_bytes();
-    let mut toks = Vec::new();
-    let mut i = 0;
-    'outer: while i < b.len() {
-        let c = b[i];
-        if c.is_ascii_whitespace() {
-            i += 1;
-        } else if c.is_ascii_digit() {
-            let start = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
-                i += 1;
-            }
-            let lit = expr[start..i].trim_end_matches(['u', 'U', 'l', 'L']);
-            let n = if let Some(h) = lit.strip_prefix("0x").or_else(|| lit.strip_prefix("0X")) {
-                i64::from_str_radix(h, 16).ok()?
-            } else if let Some(bin) = lit.strip_prefix("0b").or_else(|| lit.strip_prefix("0B")) {
-                i64::from_str_radix(bin, 2).ok()?
-            } else if lit.len() > 1 && lit.starts_with('0') {
-                i64::from_str_radix(&lit[1..], 8).ok()?
-            } else {
-                lit.parse().ok()?
-            };
-            toks.push(ConstTok::Num(n));
-        } else if c.is_ascii_alphabetic() || c == b'_' {
-            let start = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
-                i += 1;
-            }
-            let id = &expr[start..i];
-            if id == "sizeof" {
-                let rest = expr[i..].trim_start();
-                let open = expr.len() - rest.len();
-                if !rest.starts_with('(') {
-                    return None;
-                }
-                let mut depth = 0;
-                for (k, ch) in expr[open..].char_indices() {
-                    match ch {
-                        '(' => depth += 1,
-                        ')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                toks.push(ConstTok::SizeofType(
-                                    expr[open + 1..open + k].trim().to_string(),
-                                ));
-                                i = open + k + 1;
-                                continue 'outer;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                return None;
-            }
-            toks.push(ConstTok::Ident(id.to_string()));
-        } else {
-            let op = OPS.iter().find(|op| expr[i..].starts_with(**op))?;
-            toks.push(ConstTok::Op(op));
-            i += op.len();
-        }
-    }
-    Some(toks)
-}
-
-struct ConstEval<'a> {
-    toks: Vec<ConstTok>,
-    pos: usize,
-    aliases: &'a HashMap<String, String>,
-    arch: &'static ArchConfig,
-    depth: u8,
-}
-
-impl ConstEval<'_> {
-    fn peek_op(&self) -> Option<&'static str> {
-        match self.toks.get(self.pos) {
-            Some(ConstTok::Op(op)) => Some(op),
-            _ => None,
-        }
-    }
-
-    fn prec(op: &str) -> Option<u8> {
-        Some(match op {
-            "|" => 1,
-            "^" => 2,
-            "&" => 3,
-            "<<" | ">>" => 4,
-            "+" | "-" => 5,
-            "*" | "/" | "%" => 6,
-            _ => return None,
-        })
-    }
-
-    fn binary(&mut self, min_prec: u8) -> Option<i64> {
-        let mut lhs = self.unary()?;
-        while let Some(op) = self.peek_op() {
-            let Some(p) = Self::prec(op) else { break };
-            if p < min_prec {
-                break;
-            }
-            self.pos += 1;
-            let rhs = self.binary(p + 1)?;
-            lhs = match op {
-                "|" => lhs | rhs,
-                "^" => lhs ^ rhs,
-                "&" => lhs & rhs,
-                "<<" => lhs.checked_shl(u32::try_from(rhs).ok()?)?,
-                ">>" => lhs.checked_shr(u32::try_from(rhs).ok()?)?,
-                "+" => lhs.checked_add(rhs)?,
-                "-" => lhs.checked_sub(rhs)?,
-                "*" => lhs.checked_mul(rhs)?,
-                "/" => lhs.checked_div(rhs)?,
-                "%" => lhs.checked_rem(rhs)?,
-                _ => return None,
-            };
-        }
-        Some(lhs)
-    }
-
-    fn unary(&mut self) -> Option<i64> {
-        let tok = self.toks.get(self.pos)?.clone();
-        self.pos += 1;
-        match tok {
-            ConstTok::Num(n) => Some(n),
-            ConstTok::Op("-") => self.unary().map(|v| -v),
-            ConstTok::Op("+") => self.unary(),
-            ConstTok::Op("~") => self.unary().map(|v| !v),
-            ConstTok::Op("(") => {
-                let v = self.binary(1)?;
-                (self.peek_op() == Some(")")).then(|| self.pos += 1)?;
-                Some(v)
-            }
-            ConstTok::SizeofType(t) => {
-                let t = self.aliases.get(&t).map(String::as_str).unwrap_or(&t);
-                // `sizeof(struct X)` and friends cannot be sized from here.
-                if t.starts_with("struct ") || t.starts_with("union ") || t.starts_with("class ") {
-                    return None;
-                }
-                i64::try_from(c_type_size_align(t, self.arch).0).ok()
-            }
-            ConstTok::Ident(id) => {
-                if self.depth > 8 {
-                    return None;
-                }
-                let text = self.aliases.get(&format!("{CONST_KEY}{id}"))?;
-                eval_const_expr(text, self.aliases, self.arch, self.depth + 1)
-            }
-            ConstTok::Op(_) => None,
-        }
-    }
-}
-
 /// Evaluate an integer constant expression such as `N * 2 + 1` or
 /// `sizeof(long) * 3`, resolving identifiers through the `$const:` entries of
 /// `aliases`. Returns `None` for anything it cannot fully evaluate.
@@ -706,15 +542,23 @@ fn eval_const_expr(
     arch: &'static ArchConfig,
     depth: u8,
 ) -> Option<i64> {
-    let mut ev = ConstEval {
-        toks: tokenize_const(expr)?,
-        pos: 0,
-        aliases,
-        arch,
-        depth,
+    let lookup = |id: &str| aliases.get(&format!("{CONST_KEY}{id}")).cloned();
+    let sizeof = |t: &str| {
+        let t = aliases.get(t).map(String::as_str).unwrap_or(t);
+        // `sizeof(struct X)` and friends cannot be sized from here.
+        if t.starts_with("struct ") || t.starts_with("union ") || t.starts_with("class ") {
+            return None;
+        }
+        i64::try_from(c_type_size_align(t, arch).0).ok()
     };
-    let v = ev.binary(1)?;
-    (ev.pos == ev.toks.len()).then_some(v)
+    super::consteval::eval(
+        expr,
+        &super::consteval::Env {
+            lookup: &lookup,
+            sizeof: &sizeof,
+        },
+        depth,
+    )
 }
 
 /// Record integer constants visible to array-length expressions: object-like

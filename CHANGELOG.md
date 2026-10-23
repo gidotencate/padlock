@@ -2,6 +2,21 @@
 
 All notable changes to padlock are documented here.
 
+## [0.26.0] — 2026-10-23
+
+Conformance harness (`tests/conformance/run.py`) against `go run` + `unsafe.Sizeof/Offsetof`: Go 9/26 → 33/33.
+
+### Fixed
+- **Go array fields were sized as 8 bytes** (`_ [48]byte` took 8, so every field after it was misplaced). The classic cache-line padding idiom therefore produced a wrong layout. Array lengths are now evaluated: literals, `const` (including `iota` groups and implicit repetition), arithmetic, and `unsafe.Sizeof(T{})` — so `_ [64 - unsafe.Sizeof(atomic.Int64{}) - unsafe.Sizeof(atomic.Uint64{})]byte` works. Arrays of local structs are scaled by the nested-struct resolver; an unevaluable length keeps the field and lists it in `uncertain_fields`.
+- **Named non-struct types were sized as pointers**: `type Alias int16`, `type Vec [4]int32`, `type X = Y` now resolve to their underlying type.
+- **Fields silently dropped**: inline `struct{…}` members, `func(...)` fields (the struct collapsed to 2 bytes), `atomic.Pointer[T]`, and parenthesised types. An embedded `*Base` was treated as the full `Base` instead of a pointer.
+- **Grouped declarations** (`type ( A struct{…}; B struct{…} )`) analysed only the first struct.
+- **Wrong stdlib sizes/alignments**: `complex64` align 4 (was 8), `sync.RWMutex` align 4 (was 8), `sync.WaitGroup` 16B (was 12), plus `sync.Pool`, `sync.Cond`, `atomic.Pointer`, `time.Duration`. Common stdlib interfaces (`io.Reader`, `context.Context`, `database/sql/driver.Connector`, …) are 16B and no longer reported as uncertain.
+- A struct ending in a zero-size field gets Go's trailing padding byte.
+
+### Changed
+- The integer constant-expression evaluator moved from the C/C++ frontend into a shared `frontends/consteval` module (now also understands `unsafe.Sizeof`, `@sizeOf`, `size_of::<T>()`, qualified names, `_` digit separators).
+
 ## [0.25.0] — 2026-10-23
 
 Found by the new layout conformance harness (`tests/conformance/run.py`), which compiles probe programs with the real compiler and diffs `sizeof`/`offsetof` against padlock's source-level layout. C went from 19/43 to 48/48 matching `gcc`, C++ from 12/25 to 24/25.

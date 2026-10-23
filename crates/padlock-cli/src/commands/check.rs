@@ -77,6 +77,8 @@ pub fn run(
     let mut filter = filter.clone();
     filter.apply_config_defaults(&cfg);
 
+    // Parse sources for the requested target, not just relabel them afterwards.
+    crate::paths::set_source_arch(target.as_deref().or(cfg.arch_override.as_deref()), None);
     let (mut layouts, analyzed, skipped) =
         collect_layouts(paths, filter.include_generated, filter.no_cache)?;
 

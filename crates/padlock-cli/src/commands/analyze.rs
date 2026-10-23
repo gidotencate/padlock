@@ -56,6 +56,11 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
     filter.apply_config_defaults(&cfg);
 
     // Collect layouts from all paths (dirs expanded, binaries via DWARF).
+    // Parse sources for the requested target, not just relabel them afterwards.
+    crate::paths::set_source_arch(
+        target.as_deref().or(cfg.arch_override.as_deref()),
+        word_size,
+    );
     let (mut layouts, analyzed, skipped) =
         collect_layouts(paths, filter.include_generated, filter.no_cache)?;
 

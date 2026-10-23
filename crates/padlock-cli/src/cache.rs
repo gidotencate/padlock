@@ -38,12 +38,14 @@ struct CacheEntry {
 fn cache_fingerprint() -> String {
     let defines: Vec<String> = padlock_source::preprocessor_defines_fingerprint();
     format!(
-        "{}|{}|{:?}|{}|{}",
+        "{}|{}|{:?}|{}|{}|{}/{}",
         env!("CARGO_PKG_VERSION"),
         defines.join(","),
         padlock_source::cpp_stdlib(),
         padlock_source::declared_order(),
-        padlock_source::configured_instantiations_fingerprint().join(";")
+        padlock_source::configured_instantiations_fingerprint().join(";"),
+        crate::paths::source_arch().name,
+        crate::paths::source_arch().pointer_size
     )
 }
 

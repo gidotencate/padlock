@@ -100,7 +100,12 @@ pub fn render_explain(layout: &StructLayout) -> String {
         },
     }
 
-    let cache_line = layout.arch.cache_line_size;
+    // No cache (`cache_line_size == 0`, e.g. Cortex-M0, AVR): everything is on
+    // "line 0" rather than dividing by zero.
+    let cache_line = match layout.arch.cache_line_size {
+        0 => usize::MAX,
+        n => n,
+    };
     let mut rows: Vec<Row> = Vec::new();
     let gaps = find_padding(layout);
 

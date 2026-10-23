@@ -881,3 +881,28 @@ fn rust_exact_uses_rustc_field_order() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn ffi_flags_rust_repr_c_that_disagrees_with_the_c_header() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("hdr.h"),
+        "struct Packet { unsigned char kind; unsigned int len; long ts; };\n\
+         struct Ok { int a; int b; };\n",
+    )
+    .unwrap();
+    // Rust uses u64 where C has a 4-byte `unsigned int`.
+    std::fs::write(
+        dir.path().join("ffi.rs"),
+        "#[repr(C)] pub struct Packet { pub kind: u8, pub len: u64, pub ts: i64 }\n\
+         #[repr(C)] pub struct Ok { pub a: i32, pub b: i32 }\n",
+    )
+    .unwrap();
+    padlock()
+        .args(["ffi"])
+        .arg(dir.path())
+        .assert()
+        .failure()
+        .stdout(contains("Packet"))
+        .stdout(contains("1/2 repr(C) structs match"));
+}

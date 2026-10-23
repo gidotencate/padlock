@@ -247,7 +247,11 @@ fn fix_rewrites_c_struct_in_place() {
 fn fix_rewrites_rust_struct_in_place() {
     let mut f = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
     // a:u8, b:u64, c:u8 → optimal b,a,c saves 8 bytes (24→16)
-    write!(f, "struct S {{\n    a: u8,\n    b: u64,\n    c: u8,\n}}\n").unwrap();
+    write!(
+        f,
+        "#[repr(C)]\nstruct S {{\n    a: u8,\n    b: u64,\n    c: u8,\n}}\n"
+    )
+    .unwrap();
     let path = f.path().to_str().unwrap().to_string();
 
     padlock().args(["fix", &path]).assert().success();
@@ -271,7 +275,7 @@ fn fix_rewrites_zig_struct_in_place() {
     // a:u8, b:f64, c:u8 → optimal b,a,c saves 8 bytes (24→16)
     write!(
         f,
-        "const S = struct {{\n    a: u8,\n    b: f64,\n    c: u8,\n}};\n"
+        "const S = extern struct {{\n    a: u8,\n    b: f64,\n    c: u8,\n}};\n"
     )
     .unwrap();
     let path = f.path().to_str().unwrap().to_string();
@@ -340,13 +344,17 @@ fn diff_against_fixture() -> tempfile::TempDir {
     git(&["config", "user.email", "test@example.com"]);
     git(&["config", "user.name", "Test"]);
 
-    std::fs::write(dir.path().join("s.rs"), "struct Foo { a: u8, b: u64 }\n").unwrap();
+    std::fs::write(
+        dir.path().join("s.rs"),
+        "#[repr(C)] struct Foo { a: u8, b: u64 }\n",
+    )
+    .unwrap();
     git(&["add", "s.rs"]);
     git(&["commit", "-q", "-m", "initial"]);
 
     std::fs::write(
         dir.path().join("s.rs"),
-        "struct Foo { a: u8, b: u64, c: u8 }\nstruct Bar { x: u32 }\n",
+        "#[repr(C)] struct Foo { a: u8, b: u64, c: u8 }\nstruct Bar { x: u32 }\n",
     )
     .unwrap();
     git(&["add", "s.rs"]);
@@ -504,4 +512,24 @@ fn define_flag_selects_ifdef_branch() {
         .output()
         .unwrap();
     assert_eq!(total_sizes(&out.stdout), vec![16]);
+}
+
+#[test]
+fn repr_rust_struct_is_shown_in_compiler_order_unless_declared_order() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("s.rs");
+    std::fs::write(&file, "struct S { a: u8, b: u64, c: u8 }\n").unwrap();
+    let out = padlock()
+        .args(["analyze", "--json"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(total_sizes(&out.stdout), vec![16]);
+    let out = padlock()
+        .args(["analyze", "--json", "--declared-order"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(total_sizes(&out.stdout), vec![24]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("ReorderSuggestion"));
 }

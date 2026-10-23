@@ -47,7 +47,7 @@ pub fn render_explain(layout: &StructLayout) -> String {
         layout.fields.len(),
         if layout.is_packed { "  [packed]" } else { "" },
         if layout.is_repr_rust {
-            "  [repr(Rust) — compiler may reorder]"
+            "  [compiler-chosen field order — estimate]"
         } else {
             ""
         },

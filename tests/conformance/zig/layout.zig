@@ -36,6 +36,13 @@ const Atom = struct { a: u8, x: std.atomic.Value(u32), y: std.atomic.Value(u64),
 
 const E3 = enum { a, b, c };
 const E1 = enum { a };
+const ZA = struct { a: u8, b: u64, c: u8 };
+const ZB = struct { a: u8, b: u16, c: u8, d: u32, e: u8 };
+const ZC = struct { a: bool, b: u64, c: ?u32, d: u8 };
+const ZD = struct { a: [3]u8, b: u32, c: u16 };
+const ZE = struct { a: u8, b: u24, c: u16 };
+const ZF = struct { a: u8, inner: ZA, z: u8 };
+const ZG = extern struct { a: u8, inner: In, z: u8 };
 const PkInner = packed struct { a: u3, b: u2 };
 const PkNest = packed struct { x: PkInner, y: u8, z: PkInner };
 const PkA = packed struct { a: u8, b: u32 };
@@ -89,6 +96,12 @@ pub fn main() void {
     p(WithU, "c");
     p(PkOuter, "c");
     p(Al, "c");
+    w(ZA);
+    w(ZB);
+    w(ZC);
+    w(ZD);
+    w(ZE);
+    w(ZF);
     w(PkNest);
     w(PkA);
     w(PkOdd);

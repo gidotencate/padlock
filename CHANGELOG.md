@@ -2,6 +2,14 @@
 
 All notable changes to padlock are documented here.
 
+## [0.34.0] — 2026-10-23
+
+Conformance now also compares the **size** of `repr(Rust)` and plain Zig structs (previously not probed at all): Rust 55/55, Zig 50/50.
+
+### Changed
+- **BREAKING (output)**: Rust `repr(Rust)` structs and plain (non-`extern`/`packed`) Zig structs are laid out in the order the compiler actually uses — largest alignment first, ties in declaration order — instead of source order. Their reported size now matches the compiled program (`struct S { a: u8, b: u64, c: u8 }` is 16 bytes, as rustc makes it, not 24), so a `repr(C)` struct that embeds one is sized correctly too, and padding the compiler already removes is no longer reported as waste or offered as a reorder. Findings on these structs remain downgraded one severity level, since the order is not guaranteed (rustc may move a large-niche field to the front, so individual offsets are an estimate).
+- `--declared-order` (or `declared_order = true` in `.padlock.toml`) restores the previous source-order view, e.g. to see the waste the declared order would have. It is part of the parse-cache fingerprint.
+
 ## [0.33.0] — 2026-10-23
 
 Conformance: Rust 45/46 → 46/46.

@@ -50,8 +50,8 @@ pub fn extract_guard_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
 
 // ── file-level context ────────────────────────────────────────────────────────
 
-/// A local struct's fields, `repr(packed(N))` and `repr(align(N))`.
-type LocalStruct = (Vec<(String, Type)>, Option<usize>, Option<usize>);
+/// A local struct's fields, `repr(packed(N))`, `repr(align(N))` and whether it is `repr(Rust)`.
+type LocalStruct = (Vec<(String, Type)>, Option<usize>, Option<usize>, bool);
 
 /// What a pre-pass over the file learns about its own items, so field types can be
 /// sized without a type checker.
@@ -138,7 +138,12 @@ impl<'ast> Visit<'ast> for ItemCollector<'_> {
             };
             self.ctx.local_structs.insert(
                 node.ident.to_string(),
-                (fields, packed_limit(&node.attrs), repr_align(&node.attrs)),
+                (
+                    fields,
+                    packed_limit(&node.attrs),
+                    repr_align(&node.attrs),
+                    is_repr_rust(&node.attrs),
+                ),
             );
         }
         syn::visit::visit_item_struct(self, node);
@@ -163,10 +168,12 @@ fn local_struct_size(name: &str, ctx: &RustCtx) -> Option<(usize, usize)> {
     if let Some(known) = ctx.struct_sizes.borrow().get(name) {
         return *known;
     }
-    let (fields, pack, align) = ctx.local_structs.get(name)?;
+    let (fields, pack, align, repr_rust) = ctx.local_structs.get(name)?;
     ctx.struct_sizes.borrow_mut().insert(name.to_string(), None);
     let outer_uncertain = ctx.uncertain.get();
-    let layout = simulate_rust_layout(name.to_string(), fields, *pack, *align, ctx);
+    let mut layout = simulate_rust_layout(name.to_string(), fields, *pack, *align, ctx);
+    layout.is_repr_rust = *repr_rust;
+    crate::apply_compiler_order(&mut layout);
     ctx.uncertain
         .set(outer_uncertain || !layout.uncertain_fields.is_empty());
     let sa = Some((layout.total_size, layout.align));
@@ -979,6 +986,7 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
             }
         }
 
+        crate::apply_compiler_order(&mut layout);
         self.layouts.push(layout);
     }
 
@@ -1197,7 +1205,7 @@ mod tests {
 
     #[test]
     fn parse_simple_struct() {
-        let src = "struct Foo { a: u8, b: u64, c: u32 }";
+        let src = "#[repr(C)] struct Foo { a: u8, b: u64, c: u32 }";
         let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
         assert_eq!(layouts.len(), 1);
         let l = &layouts[0];
@@ -1835,7 +1843,7 @@ struct Conn { port: u16, status: u32 }
     #[test]
     fn transparent_wrapper_affects_total_size() {
         // bool(1) + pad(1) + Cell<u16>(2) = 4B
-        let src = "struct S { a: bool, b: Cell<u16> }";
+        let src = "#[repr(C)] struct S { a: bool, b: Cell<u16> }";
         let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
         let l = &layouts[0];
         assert_eq!(l.fields[0].size, 1); // bool
@@ -1846,7 +1854,7 @@ struct Conn { port: u16, status: u32 }
     #[test]
     fn struct_with_box_dyn_has_correct_layout() {
         // bool(1) + 7-pad + Box<dyn Error>(16) = 24B
-        let src = "struct Handler { active: bool, err: Box<dyn std::error::Error> }";
+        let src = "#[repr(C)] struct Handler { active: bool, err: Box<dyn std::error::Error> }";
         let layouts = parse_rust(src, &X86_64_SYSV).unwrap();
         let l = &layouts[0];
         assert_eq!(l.fields[0].size, 1); // bool
@@ -2142,5 +2150,18 @@ struct Conn { port: u16, status: u32 }
         // (In, u8): In is 8 bytes / align 4 → tuple 12 bytes at offset 4 (rustc).
         assert_eq!(off(&l, "c"), 16);
         assert!(l.uncertain_fields.is_empty());
+    }
+
+    #[test]
+    fn repr_rust_structs_use_the_compiler_field_order() {
+        // rustc puts the u64 first: { b, a, c } = 16 bytes, not 24.
+        let l = rs("struct S { a: u8, b: u64, c: u8 }", "S");
+        assert_eq!(l.total_size, 16);
+        assert_eq!(l.fields[0].name, "b");
+        assert_eq!(off(&l, "a"), 8);
+        assert_eq!(off(&l, "c"), 9);
+        // repr(C) keeps declaration order.
+        let l = rs("#[repr(C)] struct S { a: u8, b: u64, c: u8 }", "S");
+        assert_eq!(l.total_size, 24);
     }
 }

@@ -1414,4 +1414,30 @@ struct P : NonDyn, Vf { char q; };");
             Some(SourceLanguage::Cpp)
         );
     }
+
+    #[test]
+    fn cpp_namespaces_keep_same_named_types_apart() {
+        let ls = cpp("namespace na { struct Same { char a; long b; }; }
+namespace nb { struct Same { char a; char b; }; struct UseB { char x; Same s; char z; }; }
+struct UseA { char x; na::Same s; char z; };
+struct Outer { struct Inner { char c; int i; }; char a; Inner in; char z; };");
+        assert_eq!(find(&ls, "na::Same").total_size, 16);
+        assert_eq!(find(&ls, "nb::Same").total_size, 2);
+        // `Same` inside nb means nb::Same (g++: sizeof(nb::UseB) == 4).
+        assert_eq!(find(&ls, "nb::UseB").total_size, 4);
+        assert_eq!(find(&ls, "UseA").total_size, 32);
+        assert_eq!(find(&ls, "Outer::Inner").total_size, 8);
+        assert_eq!(find(&ls, "Outer").total_size, 16);
+    }
+
+    #[test]
+    fn typedef_names_the_right_anonymous_struct() {
+        let ls = parse_source_str(
+            "struct A { struct { int x; } n; };\ntypedef struct { char c; long l; } T;",
+            &SourceLanguage::C,
+            &padlock_core::arch::X86_64_SYSV,
+        )
+        .unwrap();
+        assert_eq!(find(&ls, "T").total_size, 16);
+    }
 }

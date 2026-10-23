@@ -76,9 +76,13 @@ template struct TBuf<long>;
 using TB2 = TBuf<short, 2>;
 using u32_alias = unsigned int;
 struct TUser { char a; TBuf<char, 8> b; TNode<double> n; TB2 t2; u32_alias u; TNode<char> nc; char z; };
+namespace na { struct Same { char a; long b; }; }
+namespace nb { struct Same { char a; char b; }; struct UseB { char x; Same s; char z; }; }
+struct Outer { struct Inner { char c; int i; }; char a; Inner in; char z; };
+struct UseA { char x; na::Same s; char z; };
 #define P(T,L) printf(#T " %zu %zu " #L "\n", sizeof(T), offsetof(T, L))
 int main(){
-P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);P(AlNest,c);P(PkNest,l);P(BfNest,t);P(TP1,c);P(TP2,c);P(TP3,c);P(TP4,c);P(TP5,c);P(TP6,c);P(EB1,x);P(EB3,t);P(Nua,x);P(VDd,d);P(PrimLater,q);P(OnlyVirtualBase,k);P(TUser,z);
+P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);P(AlNest,c);P(PkNest,l);P(BfNest,t);P(TP1,c);P(TP2,c);P(TP3,c);P(TP4,c);P(TP5,c);P(TP6,c);P(EB1,x);P(EB3,t);P(Nua,x);P(VDd,d);P(PrimLater,q);P(OnlyVirtualBase,k);P(TUser,z);P(UseA,z);P(nb::UseB,z);P(Outer,z);
 printf("TBuf<long> %zu -1\nTBuf<char, 8> %zu -1\nTNode<double> %zu -1\nTNode<char> %zu -1\nTBuf<short, 2> %zu -1\n", sizeof(TBuf<long>), sizeof(TBuf<char, 8>), sizeof(TNode<double>), sizeof(TNode<char>), sizeof(TBuf<short, 2>));
 printf("EB2 %zu -1\nVBb %zu -1\n", sizeof(EB2), sizeof(VBb));
 }

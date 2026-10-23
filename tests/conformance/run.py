@@ -44,7 +44,7 @@ def truth(lang, src, tmp):
     return out
 
 def padlock_layouts(padlock, src):
-    out = sh([padlock, "explain", src]).stdout
+    out = sh([padlock, "explain", "--no-cache", src]).stdout
     cur, got = None, {}
     for l in out.splitlines():
         m = re.match(r"^(\S+)\s+\(.*:\d+\)$", l)

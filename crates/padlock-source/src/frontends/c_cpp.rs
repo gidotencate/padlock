@@ -66,11 +66,79 @@ pub(crate) fn split_template_args(s: &str) -> Vec<&str> {
     args
 }
 
+/// Size/alignment of a type spelled only with integer keywords, e.g. `unsigned`,
+/// `long unsigned int`, `signed char`, `short`. Returns `None` for anything else.
+fn c_integer_size_align(ty: &str, arch: &'static ArchConfig) -> Option<(usize, usize)> {
+    let (mut longs, mut short, mut ch, mut any) = (0, false, false, false);
+    for tok in ty.split_whitespace() {
+        match tok {
+            "unsigned" | "signed" | "int" => {}
+            "long" => longs += 1,
+            "short" => short = true,
+            "char" => ch = true,
+            _ => return None,
+        }
+        any = true;
+    }
+    if !any {
+        return None;
+    }
+    let ps = arch.pointer_size;
+    Some(if ch {
+        (1, 1)
+    } else if short {
+        (2, 2)
+    } else if longs >= 2 {
+        (8, 8)
+    } else if longs == 1 {
+        (ps, ps)
+    } else {
+        (4, 4)
+    })
+}
+
 /// Map a C/C++ type name to (size, align) using the target arch.
 fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     let ty = ty.trim();
-    // Anonymous nested union encoded as "__anon_union<size,align>" by parse_anonymous_nested.
-    if let Some(rest) = ty.strip_prefix("__anon_union<")
+    // Fixed-size array `T[N]` / `T[N][M]` (`[]` flexible, `[?]` unevaluated → 1 element).
+    if ty.ends_with(']')
+        && let Some(open) = ty.rfind('[')
+    {
+        let count = match ty[open + 1..ty.len() - 1].trim() {
+            "" => 0,
+            n => n.parse::<usize>().unwrap_or(1),
+        };
+        let (elem_size, elem_align) = c_type_size_align(&ty[..open], arch);
+        return (elem_size.saturating_mul(count), elem_align);
+    }
+    // `float _Complex` / `double _Complex`: two consecutive components.
+    if ty.contains("_Complex") || ty.contains("__complex__") {
+        let base = ty.replace("__complex__", "").replace("_Complex", "");
+        let base = base.trim();
+        let (size, align) = c_type_size_align(if base.is_empty() { "double" } else { base }, arch);
+        return (size * 2, align);
+    }
+    // Plain integer type words (`unsigned`, `long unsigned int`, `signed char`, …).
+    if let Some(sa) = c_integer_size_align(ty, arch) {
+        return sa;
+    }
+    // Synthetic bit-field run spanning N bytes (see `resolve_bitfield_groups`).
+    if let Some(n) = ty
+        .strip_prefix("__bits<")
+        .and_then(|r| r.strip_suffix('>'))
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        return (n, 1);
+    }
+    // C++ pointer-to-member-function: two words (function pointer + `this` adjustment).
+    if ty == "__memfn_ptr" {
+        return (arch.pointer_size * 2, arch.pointer_size);
+    }
+    // Anonymous nested struct/union encoded as "__anon_struct<size,align>" /
+    // "__anon_union<size,align>" by the field parser.
+    if let Some(rest) = ty
+        .strip_prefix("__anon_union<")
+        .or_else(|| ty.strip_prefix("__anon_struct<"))
         && let Some(inner) = rest.strip_suffix('>')
     {
         let mut parts = inner.splitn(2, ',');
@@ -459,6 +527,400 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     }
 }
 
+// ── integer constant expressions (array lengths) ──────────────────────────────
+
+/// Key prefix under which integer constants (`#define N 8`, `enum { K = 5 }`,
+/// `constexpr int N = 8;`) live in the same map as the typedef aliases.
+const CONST_KEY: &str = "$const:";
+
+#[derive(Debug, Clone, PartialEq)]
+enum ConstTok {
+    Num(i64),
+    Ident(String),
+    /// Raw text of a `sizeof(...)` operand.
+    SizeofType(String),
+    Op(&'static str),
+}
+
+fn tokenize_const(expr: &str) -> Option<Vec<ConstTok>> {
+    const OPS: [&str; 13] = [
+        "<<", ">>", "+", "-", "*", "/", "%", "&", "|", "^", "~", "(", ")",
+    ];
+    let b = expr.as_bytes();
+    let mut toks = Vec::new();
+    let mut i = 0;
+    'outer: while i < b.len() {
+        let c = b[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+        } else if c.is_ascii_digit() {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let lit = expr[start..i].trim_end_matches(['u', 'U', 'l', 'L']);
+            let n = if let Some(h) = lit.strip_prefix("0x").or_else(|| lit.strip_prefix("0X")) {
+                i64::from_str_radix(h, 16).ok()?
+            } else if let Some(bin) = lit.strip_prefix("0b").or_else(|| lit.strip_prefix("0B")) {
+                i64::from_str_radix(bin, 2).ok()?
+            } else if lit.len() > 1 && lit.starts_with('0') {
+                i64::from_str_radix(&lit[1..], 8).ok()?
+            } else {
+                lit.parse().ok()?
+            };
+            toks.push(ConstTok::Num(n));
+        } else if c.is_ascii_alphabetic() || c == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let id = &expr[start..i];
+            if id == "sizeof" {
+                let rest = expr[i..].trim_start();
+                let open = expr.len() - rest.len();
+                if !rest.starts_with('(') {
+                    return None;
+                }
+                let mut depth = 0;
+                for (k, ch) in expr[open..].char_indices() {
+                    match ch {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                toks.push(ConstTok::SizeofType(
+                                    expr[open + 1..open + k].trim().to_string(),
+                                ));
+                                i = open + k + 1;
+                                continue 'outer;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return None;
+            }
+            toks.push(ConstTok::Ident(id.to_string()));
+        } else {
+            let op = OPS.iter().find(|op| expr[i..].starts_with(**op))?;
+            toks.push(ConstTok::Op(op));
+            i += op.len();
+        }
+    }
+    Some(toks)
+}
+
+struct ConstEval<'a> {
+    toks: Vec<ConstTok>,
+    pos: usize,
+    aliases: &'a HashMap<String, String>,
+    arch: &'static ArchConfig,
+    depth: u8,
+}
+
+impl ConstEval<'_> {
+    fn peek_op(&self) -> Option<&'static str> {
+        match self.toks.get(self.pos) {
+            Some(ConstTok::Op(op)) => Some(op),
+            _ => None,
+        }
+    }
+
+    fn prec(op: &str) -> Option<u8> {
+        Some(match op {
+            "|" => 1,
+            "^" => 2,
+            "&" => 3,
+            "<<" | ">>" => 4,
+            "+" | "-" => 5,
+            "*" | "/" | "%" => 6,
+            _ => return None,
+        })
+    }
+
+    fn binary(&mut self, min_prec: u8) -> Option<i64> {
+        let mut lhs = self.unary()?;
+        while let Some(op) = self.peek_op() {
+            let Some(p) = Self::prec(op) else { break };
+            if p < min_prec {
+                break;
+            }
+            self.pos += 1;
+            let rhs = self.binary(p + 1)?;
+            lhs = match op {
+                "|" => lhs | rhs,
+                "^" => lhs ^ rhs,
+                "&" => lhs & rhs,
+                "<<" => lhs.checked_shl(u32::try_from(rhs).ok()?)?,
+                ">>" => lhs.checked_shr(u32::try_from(rhs).ok()?)?,
+                "+" => lhs.checked_add(rhs)?,
+                "-" => lhs.checked_sub(rhs)?,
+                "*" => lhs.checked_mul(rhs)?,
+                "/" => lhs.checked_div(rhs)?,
+                "%" => lhs.checked_rem(rhs)?,
+                _ => return None,
+            };
+        }
+        Some(lhs)
+    }
+
+    fn unary(&mut self) -> Option<i64> {
+        let tok = self.toks.get(self.pos)?.clone();
+        self.pos += 1;
+        match tok {
+            ConstTok::Num(n) => Some(n),
+            ConstTok::Op("-") => self.unary().map(|v| -v),
+            ConstTok::Op("+") => self.unary(),
+            ConstTok::Op("~") => self.unary().map(|v| !v),
+            ConstTok::Op("(") => {
+                let v = self.binary(1)?;
+                (self.peek_op() == Some(")")).then(|| self.pos += 1)?;
+                Some(v)
+            }
+            ConstTok::SizeofType(t) => {
+                let t = self.aliases.get(&t).map(String::as_str).unwrap_or(&t);
+                // `sizeof(struct X)` and friends cannot be sized from here.
+                if t.starts_with("struct ") || t.starts_with("union ") || t.starts_with("class ") {
+                    return None;
+                }
+                i64::try_from(c_type_size_align(t, self.arch).0).ok()
+            }
+            ConstTok::Ident(id) => {
+                if self.depth > 8 {
+                    return None;
+                }
+                let text = self.aliases.get(&format!("{CONST_KEY}{id}"))?;
+                eval_const_expr(text, self.aliases, self.arch, self.depth + 1)
+            }
+            ConstTok::Op(_) => None,
+        }
+    }
+}
+
+/// Evaluate an integer constant expression such as `N * 2 + 1` or
+/// `sizeof(long) * 3`, resolving identifiers through the `$const:` entries of
+/// `aliases`. Returns `None` for anything it cannot fully evaluate.
+fn eval_const_expr(
+    expr: &str,
+    aliases: &HashMap<String, String>,
+    arch: &'static ArchConfig,
+    depth: u8,
+) -> Option<i64> {
+    let mut ev = ConstEval {
+        toks: tokenize_const(expr)?,
+        pos: 0,
+        aliases,
+        arch,
+        depth,
+    };
+    let v = ev.binary(1)?;
+    (ev.pos == ev.toks.len()).then_some(v)
+}
+
+/// Record integer constants visible to array-length expressions: object-like
+/// `#define`s, enumerators (explicit or implicit values) and `const`/`constexpr`
+/// integer variables with an initializer.
+fn collect_int_constants(
+    source: &str,
+    root: Node<'_>,
+    arch: &'static ArchConfig,
+    aliases: &mut HashMap<String, String>,
+) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        for i in (0..node.child_count()).rev() {
+            if let Some(child) = node.child(i) {
+                stack.push(child);
+            }
+        }
+        match node.kind() {
+            "preproc_def" => {
+                let (Some(name), Some(value)) = (
+                    node.child_by_field_name("name"),
+                    node.child_by_field_name("value"),
+                ) else {
+                    continue;
+                };
+                let mut text = source[value.byte_range()].trim();
+                if let Some(c) = text.find("//") {
+                    text = text[..c].trim_end();
+                }
+                if let (Some(a), Some(b)) = (text.find("/*"), text.find("*/"))
+                    && a < b
+                {
+                    // Comments inside the value: not worth modelling.
+                    continue;
+                }
+                aliases.insert(
+                    format!("{CONST_KEY}{}", &source[name.byte_range()]),
+                    text.to_string(),
+                );
+            }
+            // `enum E { … }` / `enum class E : uint8_t { … }` / `typedef enum { … } E;`:
+            // later uses of the bare name `E` are sized as the underlying integer type.
+            "enum_specifier" => {
+                let base = node
+                    .child_by_field_name("base")
+                    .map(|b| source[b.byte_range()].trim().to_string())
+                    .unwrap_or_else(|| "int".to_string());
+                if let Some(name) = node.child_by_field_name("name") {
+                    aliases
+                        .entry(source[name.byte_range()].trim().to_string())
+                        .or_insert_with(|| base.clone());
+                }
+                if let Some(td) = node.parent().filter(|p| p.kind() == "type_definition") {
+                    for i in 0..td.child_count() {
+                        if let Some(c) = td.child(i)
+                            && c.kind() == "type_identifier"
+                        {
+                            aliases
+                                .entry(source[c.byte_range()].trim().to_string())
+                                .or_insert_with(|| base.clone());
+                        }
+                    }
+                }
+            }
+            "enumerator_list" => {
+                let mut next: i64 = 0;
+                for i in 0..node.named_child_count() {
+                    let Some(en) = node.named_child(i as u32) else {
+                        continue;
+                    };
+                    if en.kind() != "enumerator" {
+                        continue;
+                    }
+                    let Some(name) = en.child_by_field_name("name") else {
+                        continue;
+                    };
+                    if let Some(v) = en.child_by_field_name("value") {
+                        match eval_const_expr(&source[v.byte_range()], aliases, arch, 0) {
+                            Some(n) => next = n,
+                            None => break,
+                        }
+                    }
+                    aliases.insert(
+                        format!("{CONST_KEY}{}", &source[name.byte_range()]),
+                        next.to_string(),
+                    );
+                    next += 1;
+                }
+            }
+            "init_declarator" => {
+                let is_const = node.parent().is_some_and(|p| {
+                    p.kind() == "declaration"
+                        && (0..p.child_count()).filter_map(|i| p.child(i)).any(|c| {
+                            c.kind() == "type_qualifier"
+                                && matches!(source[c.byte_range()].trim(), "const" | "constexpr")
+                        })
+                });
+                let (Some(decl), Some(value)) = (
+                    node.child_by_field_name("declarator"),
+                    node.child_by_field_name("value"),
+                ) else {
+                    continue;
+                };
+                if is_const && decl.kind() == "identifier" {
+                    aliases.insert(
+                        format!("{CONST_KEY}{}", &source[decl.byte_range()]),
+                        source[value.byte_range()].trim().to_string(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Split a trailing run of `[..]` array suffixes off a type string.
+fn split_array_dims(ty: &str) -> (&str, &str) {
+    match ty.find('[') {
+        Some(i) => (ty[..i].trim_end(), &ty[i..]),
+        None => (ty, ""),
+    }
+}
+
+/// Resolve a raw field type string for sizing: apply the scalar typedef alias to
+/// the element type and evaluate array-length expressions.
+///
+/// Returns `(sizing_type, display_type)`. Both have every `[expr]` replaced by
+/// `[n]` (or `[?]` when the length cannot be evaluated — sized as one element
+/// and reported through `uncertain_fields`); `display_type` keeps the source
+/// spelling of the element type.
+fn resolve_field_type(
+    ty: &str,
+    aliases: &HashMap<String, String>,
+    arch: &'static ArchConfig,
+) -> (String, String) {
+    let (base, mut rest) = split_array_dims(ty);
+    let resolved_base = aliases.get(base).map(String::as_str).unwrap_or(base);
+    let mut dims = String::new();
+    while let Some(s) = rest.strip_prefix('[') {
+        let mut depth = 1;
+        let mut end = None;
+        for (k, ch) in s.char_indices() {
+            match ch {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(k);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { break };
+        let expr = s[..end].trim();
+        if expr.is_empty() {
+            dims.push_str("[]");
+        } else {
+            match eval_const_expr(expr, aliases, arch, 0).filter(|n| *n >= 0) {
+                Some(n) => dims.push_str(&format!("[{n}]")),
+                None => dims.push_str("[?]"),
+            }
+        }
+        rest = s[end + 1..].trim_start();
+    }
+    (format!("{resolved_base}{dims}"), format!("{base}{dims}"))
+}
+
+/// Build a laid-out-later `Field` from a parsed field declaration.
+fn make_field(
+    raw: RawField,
+    aliases: &HashMap<String, String>,
+    arch: &'static ArchConfig,
+) -> Field {
+    let (fname, ty_name, guard, alignas, field_line) = raw;
+    let (sizing_ty, display_ty) = resolve_field_type(&ty_name, aliases, arch);
+    let (size, natural_align) = c_type_size_align(&sizing_ty, arch);
+    // alignas(N) on a field overrides its alignment requirement.
+    let align = alignas.unwrap_or(natural_align);
+    let access = if let Some(g) = guard {
+        AccessPattern::Concurrent {
+            guard: Some(g),
+            is_atomic: false,
+            is_annotated: true,
+        }
+    } else {
+        AccessPattern::Unknown
+    };
+    Field {
+        name: fname,
+        ty: TypeInfo::Primitive {
+            name: display_ty,
+            size,
+            align,
+        },
+        offset: 0,
+        size,
+        align,
+        source_file: None,
+        source_line: Some(field_line),
+        access,
+    }
+}
+
 // ── struct / union simulation ─────────────────────────────────────────────────
 
 /// Strip a bit-field width annotation (`:N`) from a type name for size lookup.
@@ -478,108 +940,151 @@ fn is_bitfield_type(ty: &str) -> bool {
     strip_bitfield_suffix(ty) != ty
 }
 
-/// Collapse consecutive bit-field `RawField` entries into storage-unit-sized
-/// synthetic fields, following the standard GCC/Clang ABI rules:
+/// Lay out bit-field runs the way GCC/Clang do on the System V ABIs and replace
+/// each contiguous run of bits with one synthetic byte-range field.
 ///
-/// - Consecutive bitfields that share the same storage-unit size are packed
-///   together until the unit fills up.
-/// - A change in storage-unit size (e.g. `uint8_t` followed by `uint32_t`)
-///   or a full unit forces a new storage unit.
-/// - A zero-width bitfield (`T : 0`) flushes the current group and forces
-///   alignment to the next storage-unit boundary (represented by dropping the
-///   zero-width field).
-/// - Non-bitfield fields are passed through unchanged.
+/// - Bit-fields are packed bit by bit, regardless of their declared type, so a
+///   `char`, a `short` and an `int` bit-field can share bytes.
+/// - A bit-field that would straddle a boundary of its declared type's storage
+///   unit moves to the next unit boundary (not when `pack_n == 1`).
+/// - A zero-width bit-field (`T : 0`) forces the next bit-field to the next
+///   boundary of `T`'s unit.
+/// - The run is followed by the next ordinary field at the next byte boundary.
+/// - Anonymous padding bit-fields consume bits but add no name and no alignment.
+/// - In a union every bit-field starts at bit 0 and is laid out on its own.
 ///
-/// Each resulting synthetic field has:
-/// - **name**: `[a:3|b:5]` — shows what is packed inside the storage unit.
-/// - **type**: the base type of the first field in the group (e.g. `"unsigned int"`).
-/// - **size / align**: determined by `c_type_size_align` on that base type.
-#[allow(unused_assignments)] // final flush!() resets state vars that aren't read again
+/// Each synthetic field is named `[a:3|b:5]` (`[__pad]` when every member is
+/// anonymous) and typed `__bits<N>` for the `N` bytes it spans. Returns the
+/// fields plus the strictest alignment demanded by a named bit-field's type,
+/// which the caller applies to the struct as a whole.
 fn resolve_bitfield_groups(
     raw_fields: Vec<RawField>,
     aliases: &HashMap<String, String>,
     arch: &'static ArchConfig,
-) -> Vec<RawField> {
-    let mut result: Vec<RawField> = Vec::new();
-
-    // Accumulator for the current storage unit.
-    let mut in_unit = false; // true while we have an open storage unit
-    let mut unit_base_ty = String::new(); // base type of the current unit (for size/align)
-    let mut unit_size: usize = 0; // byte size of the storage unit
-    let mut bits_used: u32 = 0; // bits consumed so far in this unit
-    let mut parts: Vec<String> = Vec::new(); // "name:N" pairs for named fields only
-    let mut first_line: u32 = 0;
-
-    // Flush the current unit. Named members produce a labelled synthetic field;
-    // anonymous-only units produce a `[__pad]` placeholder so that
-    // `simulate_layout` accounts for the storage-unit bytes in the total size.
-    macro_rules! flush {
-        () => {
-            if in_unit {
-                let name = if parts.is_empty() {
-                    "[__pad]".to_string()
-                } else {
-                    format!("[{}]", parts.join("|"))
-                };
-                result.push((name, unit_base_ty.clone(), None, None, first_line));
-                parts.clear();
-                unit_base_ty.clear();
-                unit_size = 0;
-                bits_used = 0;
-                in_unit = false;
-            }
-        };
+    pack_n: usize,
+    is_union: bool,
+) -> (Vec<RawField>, usize) {
+    struct Seg {
+        start_bit: u64,
+        parts: Vec<String>,
+        first_line: u32,
+        unit_align: usize,
     }
+
+    let mut result: Vec<RawField> = Vec::new();
+    let mut struct_align = 1usize;
+    // End of the last emitted field, in bytes.
+    let mut byte_off = 0usize;
+    // Bit position inside the current bit-field run (None outside a run).
+    let mut cursor: Option<u64> = None;
+    let mut seg: Option<Seg> = None;
+
+    // Close the open segment at `end_bit`, emitting its synthetic field.
+    let flush =
+        |seg: &mut Option<Seg>, end_bit: u64, byte_off: &mut usize, result: &mut Vec<RawField>| {
+            let Some(sg) = seg.take() else { return };
+            let start_byte = (sg.start_bit / 8) as usize;
+            let end_byte = end_bit.div_ceil(8) as usize;
+            let named = !sg.parts.is_empty();
+            let name = if named {
+                format!("[{}]", sg.parts.join("|"))
+            } else {
+                "[__pad]".to_string()
+            };
+            // A segment that begins on a unit boundary keeps that alignment so that
+            // the padding before it is reported; one that continues mid-unit packs
+            // tight against the previous field.
+            let aligned_start =
+                sg.start_bit % 8 == 0 && start_byte.is_multiple_of(sg.unit_align.max(1));
+            let align = (named && aligned_start && pack_n != 1).then_some(sg.unit_align);
+            let align = align.or(Some(1));
+            result.push((
+                name,
+                format!("__bits<{}>", end_byte - start_byte),
+                None,
+                align,
+                sg.first_line,
+            ));
+            *byte_off = end_byte;
+        };
 
     for (fname, ty, guard, alignas, line) in raw_fields {
         if !is_bitfield_type(&ty) {
-            flush!();
+            if let Some(c) = cursor.take() {
+                flush(&mut seg, c, &mut byte_off, &mut result);
+            }
+            let (sizing, _) = resolve_field_type(&ty, aliases, arch);
+            let (size, natural) = c_type_size_align(&sizing, arch);
+            let mut align = alignas.unwrap_or(natural);
+            if pack_n > 0 {
+                align = align.min(pack_n);
+            }
+            if align > 0 {
+                byte_off = byte_off.next_multiple_of(align);
+            }
+            byte_off += size;
             result.push((fname, ty, guard, alignas, line));
             continue;
         }
 
-        // Parse the bit-width from the "type:N" annotation.
         let base_raw = strip_bitfield_suffix(&ty).to_string();
-        let bit_width: u32 = ty[ty.rfind(':').unwrap() + 1..].trim().parse().unwrap_or(0);
+        let width: u64 = ty[ty.rfind(':').unwrap() + 1..].trim().parse().unwrap_or(0);
+        let (sizing, _) = resolve_field_type(&base_raw, aliases, arch);
+        let (unit_size, unit_align) = c_type_size_align(&sizing, arch);
+        let unit_bits = (unit_size as u64 * 8).max(8);
 
-        // Zero-width bitfield: flush and force alignment to next storage-unit boundary.
-        if bit_width == 0 {
-            flush!();
+        if is_union {
+            // Overlapping members: each bit-field is its own storage unit.
+            if width > 0 {
+                result.push((
+                    if fname.is_empty() {
+                        "[__pad]".to_string()
+                    } else {
+                        format!("[{fname}:{width}]")
+                    },
+                    base_raw,
+                    None,
+                    None,
+                    line,
+                ));
+                if !fname.is_empty() {
+                    struct_align = struct_align.max(unit_align);
+                }
+            }
             continue;
         }
 
-        // Resolve the storage-unit size for this field.
-        let resolved = aliases
-            .get(&base_raw)
-            .map(String::as_str)
-            .unwrap_or(&base_raw);
-        let (new_unit_size, _) = c_type_size_align(resolved, arch);
-
-        // Start a new unit when: no current unit, unit-size changes, or current unit is full.
-        let needs_new_unit =
-            !in_unit || new_unit_size != unit_size || bits_used + bit_width > unit_size as u32 * 8;
-
-        if needs_new_unit {
-            flush!();
-            unit_base_ty = base_raw;
-            unit_size = new_unit_size;
-            bits_used = 0;
-            first_line = line;
-            in_unit = true;
+        let mut pos = cursor.unwrap_or(byte_off as u64 * 8);
+        if width == 0 {
+            flush(&mut seg, pos, &mut byte_off, &mut result);
+            cursor = Some(pos.next_multiple_of(unit_bits));
+            continue;
         }
-
-        bits_used += bit_width;
-        // Anonymous padding bitfields (`int : 3;` with no name) still consume
-        // bits in the current unit but are omitted from the display label.
+        if pack_n != 1 && width <= unit_bits && pos / unit_bits != (pos + width - 1) / unit_bits {
+            flush(&mut seg, pos, &mut byte_off, &mut result);
+            pos = pos.next_multiple_of(unit_bits);
+        }
+        let sg = seg.get_or_insert_with(|| Seg {
+            start_bit: pos,
+            parts: Vec::new(),
+            first_line: line,
+            unit_align,
+        });
         if !fname.is_empty() {
-            parts.push(format!("{fname}:{bit_width}"));
+            sg.parts.push(format!("{fname}:{width}"));
+            if pack_n != 1 {
+                struct_align = struct_align.max(unit_align);
+            }
         }
+        sg.unit_align = sg
+            .unit_align
+            .max(if fname.is_empty() { 1 } else { unit_align });
+        cursor = Some(pos + width);
     }
-
-    // Flush any remaining group.
-    flush!();
-
-    result
+    if let Some(c) = cursor.take() {
+        flush(&mut seg, c, &mut byte_off, &mut result);
+    }
+    (result, struct_align)
 }
 
 /// Simulate C/C++ struct layout given ordered fields.
@@ -684,7 +1189,7 @@ fn parse_class_specifier(
     pragma_pack: usize,
 ) -> Option<StructLayout> {
     let mut class_name = "<anonymous>".to_string();
-    let mut base_names: Vec<String> = Vec::new();
+    let base_names = collect_base_class_names(source, node);
     let mut body_node: Option<Node> = None;
     let mut is_packed = false;
     let mut struct_alignas: Option<usize> = None;
@@ -693,20 +1198,15 @@ fn parse_class_specifier(
         let Some(child) = node.child(i) else { continue };
         match child.kind() {
             "type_identifier" => class_name = source[child.byte_range()].to_string(),
-            "base_class_clause" => {
-                // tree-sitter-cpp structure: ':' [access_specifier] type_identifier
-                // type_identifier nodes are direct children of base_class_clause.
-                for j in 0..child.child_count() {
-                    if let Some(base) = child.child(j)
-                        && base.kind() == "type_identifier"
-                    {
-                        base_names.push(source[base.byte_range()].to_string());
-                    }
-                }
-            }
             "field_declaration_list" => body_node = Some(child),
-            "attribute_specifier" if source[child.byte_range()].contains("packed") => {
-                is_packed = true;
+            "attribute_specifier" => {
+                let text = &source[child.byte_range()];
+                if text.contains("packed") {
+                    is_packed = true;
+                }
+                if struct_alignas.is_none() {
+                    struct_alignas = extract_aligned_from_c_field_text(text);
+                }
             }
             // C++11 class-level alignas: `class alignas(64) Name { ... };`
             "alignas_qualifier" | "alignas_specifier" if struct_alignas.is_none() => {
@@ -745,11 +1245,10 @@ fn parse_class_specifier(
             continue;
         };
         if child.kind() == "field_declaration" {
-            if let Some(anon_fields) = parse_anonymous_nested(source, child, arch, false) {
+            if let Some(anon_fields) = parse_anonymous_nested(source, child, arch, false, aliases) {
                 raw_fields.extend(anon_fields);
-            } else if let Some((ty, fname, guard, al, ln)) = parse_field_declaration(source, child)
-            {
-                raw_fields.push((fname, ty, guard, al, ln));
+            } else {
+                raw_fields.extend(parse_field_declarations(source, child, arch, aliases));
             }
         }
     }
@@ -757,8 +1256,10 @@ fn parse_class_specifier(
     // Build fields: vtable pointer, then base-class slots, then declared fields
     let mut fields: Vec<Field> = Vec::new();
 
-    // Virtual dispatch pointer (hidden, at offset 0 for the first virtual class)
-    if has_virtual {
+    // Virtual dispatch pointer (hidden, at offset 0 for the first virtual class).
+    // With a base class the vptr usually lives in the (polymorphic) primary base,
+    // which is already counted by the base-class slot, so it is not added twice.
+    if has_virtual && base_names.is_empty() {
         let ps = arch.pointer_size;
         fields.push(Field {
             name: "__vptr".to_string(),
@@ -776,89 +1277,38 @@ fn parse_class_specifier(
     }
 
     // Base class storage (opaque until nested-struct resolver fills in sizes)
-    for base in &base_names {
-        let ps = arch.pointer_size;
-        fields.push(Field {
-            name: format!("__base_{base}"),
-            ty: TypeInfo::Opaque {
-                name: base.clone(),
-                size: ps,
-                align: ps,
-            },
-            offset: 0,
-            size: ps,
-            align: ps,
-            source_file: None,
-            source_line: None,
-            access: AccessPattern::Unknown,
-        });
-    }
+    fields.extend(base_class_fields(&base_names, arch));
 
     // Pack consecutive bit-field members into their storage units.
-    let raw_fields = if raw_fields
+    let pack_n = if is_packed { 1 } else { pragma_pack };
+    let is_union = false;
+    let (raw_fields, bf_align) = if raw_fields
         .iter()
         .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
     {
-        resolve_bitfield_groups(raw_fields, aliases, arch)
+        resolve_bitfield_groups(raw_fields, aliases, arch, pack_n, is_union)
     } else {
-        raw_fields
+        (raw_fields, 1)
     };
 
     // Declared member fields
-    for (fname, ty_name, guard, alignas, field_line) in raw_fields {
-        let resolved = aliases
-            .get(&ty_name)
-            .map(String::as_str)
-            .unwrap_or(&ty_name);
-        let (size, natural_align) = c_type_size_align(resolved, arch);
-        let align = alignas.unwrap_or(natural_align);
-        let access = if let Some(g) = guard {
-            AccessPattern::Concurrent {
-                guard: Some(g),
-                is_atomic: false,
-                is_annotated: true,
-            }
-        } else {
-            AccessPattern::Unknown
-        };
-        fields.push(Field {
-            name: fname,
-            ty: TypeInfo::Primitive {
-                name: ty_name,
-                size,
-                align,
-            },
-            offset: 0,
-            size,
-            align,
-            source_file: None,
-            source_line: Some(field_line),
-            access,
-        });
-    }
+    fields.extend(
+        raw_fields
+            .into_iter()
+            .map(|raw| make_field(raw, aliases, arch)),
+    );
 
     if fields.is_empty() {
         return None;
     }
 
     let line = node.start_position().row as u32 + 1;
-    let pack_n = if is_packed {
-        1
-    } else if pragma_pack > 0 {
-        pragma_pack
-    } else {
-        0
-    };
     let mut layout = simulate_layout(&mut fields, class_name, arch, Some(line), pack_n);
 
-    if let Some(al) = struct_alignas
-        && al > layout.align
-    {
-        layout.align = al;
-        if pack_n == 0 {
-            layout.total_size = layout.total_size.next_multiple_of(al);
-        }
-    }
+    apply_min_align(&mut layout, bf_align, pack_n);
+    apply_min_align(&mut layout, struct_alignas.unwrap_or(1), pack_n);
+
+    mark_uncertain_arrays(&mut layout);
 
     layout.suppressed_findings =
         super::suppress::suppressed_from_preceding_source(source, node.start_byte());
@@ -1020,7 +1470,9 @@ fn extract_structs_from_tree(
     layouts: &mut Vec<StructLayout>,
 ) {
     // Phase 0: collect within-file typedef scalar aliases for field type resolution.
-    let aliases = collect_typedef_aliases(source, root);
+    let mut aliases = collect_typedef_aliases(source, root);
+    // …and integer constants used in array-length expressions.
+    collect_int_constants(source, root, arch, &mut aliases);
 
     // Phase 1: extract struct/union/class layouts.
     // We do a single linear pass ordered by byte offset so that `#pragma pack`
@@ -1265,6 +1717,10 @@ fn parse_struct_or_union_specifier(
                 if text.contains("packed") {
                     is_packed = true;
                 }
+                // `struct __attribute__((aligned(N))) S {…}` / `struct S {…} __attribute__((aligned(N)));`
+                if struct_alignas.is_none() {
+                    struct_alignas = extract_aligned_from_c_field_text(text);
+                }
             }
             // C++11 struct-level alignas: `struct alignas(64) Name { ... };`
             // tree-sitter-cpp: `alignas_qualifier` as direct child of struct_specifier
@@ -1307,69 +1763,47 @@ fn parse_struct_or_union_specifier(
             // Check for anonymous nested struct/union: a field_declaration whose
             // only non-field-identifier child is a struct_specifier/union_specifier
             // with no type_identifier (i.e. `struct { int x; int y; };`).
-            if let Some(anon_fields) = parse_anonymous_nested(source, child, arch, is_union) {
-                raw_fields.extend(anon_fields);
-            } else if let Some((ty, fname, guard, al, ln)) = parse_field_declaration(source, child)
+            if let Some(anon_fields) =
+                parse_anonymous_nested(source, child, arch, is_union, aliases)
             {
-                raw_fields.push((fname, ty, guard, al, ln));
+                raw_fields.extend(anon_fields);
+            } else {
+                raw_fields.extend(parse_field_declarations(source, child, arch, aliases));
             }
         }
     }
+    let base_names = collect_base_class_names(source, node);
 
     // A struct with only virtual methods and no data members still needs a
     // layout if it has virtual dispatch (the __vptr field will be inserted below).
-    if raw_fields.is_empty() && !has_virtual {
+    if raw_fields.is_empty() && !has_virtual && base_names.is_empty() {
         return None;
     }
 
+    // `__attribute__((packed))` forces pack_n=1; `#pragma pack(N)` caps at N.
+    // When both apply, the more restrictive (smaller) wins.
+    let pack_n = if is_packed { 1 } else { pragma_pack };
+
     // Pack consecutive bit-field members into their storage units.
-    let raw_fields = if raw_fields
+    let (raw_fields, bf_align) = if raw_fields
         .iter()
         .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
     {
-        resolve_bitfield_groups(raw_fields, aliases, arch)
+        resolve_bitfield_groups(raw_fields, aliases, arch, pack_n, is_union)
     } else {
-        raw_fields
+        (raw_fields, 1)
     };
 
     let mut fields: Vec<Field> = raw_fields
         .into_iter()
-        .map(|(fname, ty_name, guard, alignas, field_line)| {
-            let resolved = aliases
-                .get(&ty_name)
-                .map(String::as_str)
-                .unwrap_or(&ty_name);
-            let (size, natural_align) = c_type_size_align(resolved, arch);
-            // alignas(N) on a field overrides its alignment requirement.
-            let align = alignas.unwrap_or(natural_align);
-            let access = if let Some(g) = guard {
-                AccessPattern::Concurrent {
-                    guard: Some(g),
-                    is_atomic: false,
-                    is_annotated: true,
-                }
-            } else {
-                AccessPattern::Unknown
-            };
-            Field {
-                name: fname,
-                ty: TypeInfo::Primitive {
-                    name: ty_name,
-                    size,
-                    align,
-                },
-                offset: 0,
-                size,
-                align,
-                source_file: None,
-                source_line: Some(field_line),
-                access,
-            }
-        })
+        .map(|raw| make_field(raw, aliases, arch))
         .collect();
+    fields.splice(0..0, base_class_fields(&base_names, arch));
 
-    // Virtual dispatch pointer (hidden, at offset 0 for the first virtual struct)
-    if has_virtual {
+    // Virtual dispatch pointer (hidden, at offset 0 for the first virtual struct).
+    // With a base class the vptr usually lives in the (polymorphic) primary base,
+    // which is already counted by the base-class slot, so it is not added twice.
+    if has_virtual && base_names.is_empty() {
         let ps = arch.pointer_size;
         fields.insert(
             0,
@@ -1390,36 +1824,100 @@ fn parse_struct_or_union_specifier(
     }
 
     let line = node.start_position().row as u32 + 1;
-    // `__attribute__((packed))` forces pack_n=1; `#pragma pack(N)` caps at N.
-    // When both apply, the more restrictive (smaller) wins.
-    let pack_n = if is_packed {
-        1
-    } else if pragma_pack > 0 {
-        pragma_pack
-    } else {
-        0
-    };
     let mut layout = if is_union {
         simulate_union_layout(&mut fields, name, arch, Some(line))
     } else {
         simulate_layout(&mut fields, name, arch, Some(line), pack_n)
     };
 
+    apply_min_align(&mut layout, bf_align, pack_n);
     // Apply struct-level alignas: the struct's alignment requirement is at
     // least N; trailing padding may grow to satisfy the new alignment.
-    if let Some(al) = struct_alignas
-        && al > layout.align
-    {
-        layout.align = al;
-        if pack_n == 0 {
-            layout.total_size = layout.total_size.next_multiple_of(al);
-        }
-    }
+    apply_min_align(&mut layout, struct_alignas.unwrap_or(1), pack_n);
 
+    mark_uncertain_arrays(&mut layout);
     layout.suppressed_findings =
         super::suppress::suppressed_from_preceding_source(source, node.start_byte());
 
     Some(layout)
+}
+
+/// Raise the struct's alignment to at least `align` (from `alignas` or a
+/// bit-field's declared type) and grow trailing padding to match.
+fn apply_min_align(layout: &mut StructLayout, align: usize, pack_n: usize) {
+    if align > layout.align {
+        layout.align = align;
+        if pack_n == 0 || pack_n >= align {
+            layout.total_size = layout.total_size.next_multiple_of(align);
+        }
+    }
+}
+
+/// Flag fields whose array length could not be evaluated (`[?]`): they are
+/// sized as a single element, so the output layer should warn about them.
+fn mark_uncertain_arrays(layout: &mut StructLayout) {
+    for f in &layout.fields {
+        if let TypeInfo::Primitive { name, .. } = &f.ty
+            && name.contains("[?]")
+            && !layout.uncertain_fields.contains(&f.name)
+        {
+            layout.uncertain_fields.push(f.name.clone());
+        }
+    }
+}
+
+/// Names of the non-virtual base classes of a `struct_specifier` /
+/// `class_specifier` (`struct D : A, protected B`). Virtual bases are skipped:
+/// their placement depends on the most-derived type.
+fn collect_base_class_names(source: &str, node: Node<'_>) -> Vec<String> {
+    let mut names = Vec::new();
+    for i in 0..node.child_count() {
+        let Some(clause) = node.child(i) else {
+            continue;
+        };
+        if clause.kind() != "base_class_clause" {
+            continue;
+        }
+        let mut is_virtual = false;
+        for j in 0..clause.child_count() {
+            let Some(c) = clause.child(j) else { continue };
+            match c.kind() {
+                "virtual" => is_virtual = true,
+                "," => is_virtual = false,
+                "type_identifier" | "qualified_identifier" | "template_type" => {
+                    if !is_virtual {
+                        names.push(source[c.byte_range()].trim().to_string());
+                    }
+                    is_virtual = false;
+                }
+                _ => {}
+            }
+        }
+    }
+    names
+}
+
+/// Opaque placeholder fields for base-class subobjects; their sizes are filled
+/// in by the nested-struct resolution pass in `lib.rs`.
+fn base_class_fields(base_names: &[String], arch: &'static ArchConfig) -> Vec<Field> {
+    let ps = arch.pointer_size;
+    base_names
+        .iter()
+        .map(|base| Field {
+            name: format!("__base_{base}"),
+            ty: TypeInfo::Opaque {
+                name: base.clone(),
+                size: ps,
+                align: ps,
+            },
+            offset: 0,
+            size: ps,
+            align: ps,
+            source_file: None,
+            source_line: None,
+            access: AccessPattern::Unknown,
+        })
+        .collect()
 }
 
 /// Parse a `typedef struct/union { ... } Name;` type_definition node.
@@ -1626,7 +2124,13 @@ fn parse_anonymous_nested(
     node: Node<'_>,
     arch: &'static ArchConfig,
     _parent_is_union: bool,
+    aliases: &HashMap<String, String>,
 ) -> Option<Vec<RawField>> {
+    // `struct { ... } name;` / `union { ... } name[3];` declares a named member, not
+    // an anonymous one: its fields stay inside it (handled by `parse_field_declarations`).
+    if (0..node.child_count()).any(|i| node.field_name_for_child(i) == Some("declarator")) {
+        return None;
+    }
     // Find a struct_specifier or union_specifier child.
     for i in 0..node.child_count() {
         let Some(child) = node.child(i) else { continue };
@@ -1659,12 +2163,12 @@ fn parse_anonymous_nested(
             let inner = body.child(j)?;
             if inner.kind() == "field_declaration" {
                 // Recurse to handle doubly-nested anonymous structs.
-                if let Some(deeper) = parse_anonymous_nested(source, inner, arch, nested_is_union) {
-                    nested_raw.extend(deeper);
-                } else if let Some((ty, fname, guard, al, ln)) =
-                    parse_field_declaration(source, inner)
+                if let Some(deeper) =
+                    parse_anonymous_nested(source, inner, arch, nested_is_union, aliases)
                 {
-                    nested_raw.push((fname, ty, guard, al, ln));
+                    nested_raw.extend(deeper);
+                } else {
+                    nested_raw.extend(parse_field_declarations(source, inner, arch, aliases));
                 }
             }
         }
@@ -1680,8 +2184,8 @@ fn parse_anonymous_nested(
                 let mut max_size = 0usize;
                 let mut max_align = 1usize;
                 for (_, ty, _, alignas, _) in &nested_raw {
-                    let resolved = ty.trim();
-                    let (sz, al) = c_type_size_align(resolved, arch);
+                    let (resolved, _) = resolve_field_type(ty.trim(), aliases, arch);
+                    let (sz, al) = c_type_size_align(&resolved, arch);
                     let eff_align = alignas.unwrap_or(al);
                     max_size = max_size.max(sz);
                     max_align = max_align.max(eff_align);
@@ -1707,9 +2211,109 @@ fn parse_anonymous_nested(
     None
 }
 
-fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
+/// A declarator with its pointer / array / function wrappers peeled off.
+struct DeclInfo {
+    name: String,
+    /// The member (or, with `dims`, each array element) is a pointer or reference.
+    pointer: bool,
+    /// C++ pointer-to-member-function (`void (T::*f)()`): two words wide.
+    member_fn_ptr: bool,
+    /// Array length expressions in declaration order (`a[2][3]` → `["2", "3"]`).
+    dims: Vec<String>,
+}
+
+fn is_declarator_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "field_identifier"
+            | "identifier"
+            | "pointer_declarator"
+            | "reference_declarator"
+            | "array_declarator"
+            | "function_declarator"
+            | "parenthesized_declarator"
+            | "attributed_declarator"
+    )
+}
+
+fn inner_declarator(node: Node<'_>) -> Option<Node<'_>> {
+    node.child_by_field_name("declarator").or_else(|| {
+        (0..node.named_child_count())
+            .filter_map(|i| node.named_child(i as u32))
+            .find(|c| is_declarator_kind(c.kind()))
+    })
+}
+
+/// Peel a declarator down to the member name. Reading outward from the name, the
+/// first pointer makes the whole member a pointer (`char (*p)[3]`), while arrays
+/// seen before any pointer are dimensions (`char *a[3]` is three pointers).
+/// A function declarator directly around the name is a method, not a member.
+fn decl_info(source: &str, node: Node<'_>, attrs: &mut String) -> Option<DeclInfo> {
+    enum Wrap {
+        Ptr,
+        Array(String),
+        Func,
+    }
+    let mut wraps = Vec::new();
+    let mut cur = node;
+    let name = loop {
+        match cur.kind() {
+            "field_identifier" | "identifier" => break source[cur.byte_range()].trim().to_string(),
+            "pointer_declarator" | "reference_declarator" => wraps.push(Wrap::Ptr),
+            "array_declarator" => wraps.push(Wrap::Array(
+                cur.child_by_field_name("size")
+                    .map(|s| source[s.byte_range()].trim().to_string())
+                    .unwrap_or_default(),
+            )),
+            "function_declarator" => wraps.push(Wrap::Func),
+            "attributed_declarator" => {
+                for j in 0..cur.child_count() {
+                    if let Some(c) = cur.child(j)
+                        && matches!(c.kind(), "attribute_specifier" | "attribute")
+                    {
+                        attrs.push_str(source[c.byte_range()].trim());
+                        attrs.push(' ');
+                    }
+                }
+            }
+            "parenthesized_declarator" => {}
+            _ => return None,
+        }
+        cur = inner_declarator(cur)?;
+    };
+
+    let has_func = wraps.iter().any(|w| matches!(w, Wrap::Func));
+    let member_fn_ptr = has_func && source[node.byte_range()].contains("::*");
+    let mut dims = Vec::new();
+    let mut pointer = false;
+    for w in wraps.iter().rev() {
+        match w {
+            Wrap::Array(size) => dims.push(size.clone()),
+            Wrap::Ptr => {
+                pointer = true;
+                break;
+            }
+            Wrap::Func => return None,
+        }
+    }
+    Some(DeclInfo {
+        name,
+        pointer,
+        member_fn_ptr,
+        dims,
+    })
+}
+
+/// Parse one `field_declaration` into its members. `int a, *b, c[4];` yields
+/// three; a `static` member or a method declaration yields none.
+fn parse_field_declarations(
+    source: &str,
+    node: Node<'_>,
+    arch: &'static ArchConfig,
+    aliases: &HashMap<String, String>,
+) -> Vec<RawField> {
     let mut ty_parts: Vec<String> = Vec::new();
-    let mut field_name: Option<String> = None;
+    let mut declarators: Vec<Node<'_>> = Vec::new();
     // Bit-field width, e.g. `int flags : 3;` → Some("3")
     let mut bit_width: Option<String> = None;
     // Collect attribute text for guard extraction
@@ -1719,7 +2323,15 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
 
     for i in 0..node.child_count() {
         let Some(child) = node.child(i) else { continue };
+        if node.field_name_for_child(i) == Some("declarator") {
+            declarators.push(child);
+            continue;
+        }
         match child.kind() {
+            // Static data members live outside the object.
+            "storage_class_specifier" if source[child.byte_range()].trim() == "static" => {
+                return Vec::new();
+            }
             "type_specifier" | "primitive_type" | "type_identifier" | "sized_type_specifier" => {
                 ty_parts.push(source[child.byte_range()].trim().to_string());
             }
@@ -1747,48 +2359,56 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
                     }
                 }
             }
-            // Nested struct/union used as a field type: `struct Vec2 tl;`
-            // Extract just the type_identifier name (e.g. "Vec2") so the
-            // nested-struct resolution pass can match it by name.
-            "struct_specifier" | "union_specifier" => {
-                for j in 0..child.child_count() {
-                    if let Some(sub) = child.child(j)
-                        && sub.kind() == "type_identifier"
-                    {
-                        ty_parts.push(source[sub.byte_range()].trim().to_string());
-                        break;
-                    }
+            // `_Atomic(long)` after a qualifier is parsed as a macro-style type
+            // specifier with a MISSING name; the real type is its descriptor.
+            "macro_type_specifier"
+                if child
+                    .child_by_field_name("name")
+                    .is_none_or(|n| n.is_missing() || source[n.byte_range()] == *"_Atomic") =>
+            {
+                if let Some(t) = child.child_by_field_name("type") {
+                    ty_parts.push(source[t.byte_range()].trim().to_string());
                 }
             }
-            "field_identifier" => {
-                field_name = Some(source[child.byte_range()].trim().to_string());
+            // `enum E e;` / `enum class E : uint8_t e;` — an enum is its underlying
+            // integer type (`int` unless a fixed base is spelled out).
+            "enum_specifier" => {
+                ty_parts.push(
+                    child
+                        .child_by_field_name("base")
+                        .map(|b| source[b.byte_range()].trim().to_string())
+                        .unwrap_or_else(|| "int".to_string()),
+                );
             }
-            "pointer_declarator" => {
-                field_name = extract_identifier(source, child);
-                ty_parts.push("*".to_string());
-            }
-            // `char a __attribute__((aligned(64)));` — tree-sitter-c wraps the
-            // field identifier and any trailing attributes into a single
-            // `attributed_declarator` node.  Extract both the name and the
-            // attribute text so guard/aligned extraction works correctly.
-            "attributed_declarator" => {
+            // Nested struct/union used as a field type: `struct Vec2 tl;`
+            // Extract just the type_identifier name (e.g. "Vec2") so the
+            // nested-struct resolution pass can match it by name. A tagless
+            // body (`struct { ... } member;`) is laid out here and encoded as an
+            // opaque `__anon_struct<size,align>` type.
+            "struct_specifier" | "union_specifier" => {
+                let mut tag = None;
+                let mut has_body = false;
                 for j in 0..child.child_count() {
                     if let Some(sub) = child.child(j) {
                         match sub.kind() {
-                            "field_identifier" => {
-                                field_name = Some(source[sub.byte_range()].trim().to_string());
+                            "type_identifier" if tag.is_none() => {
+                                tag = Some(source[sub.byte_range()].trim().to_string());
                             }
-                            "pointer_declarator" => {
-                                field_name = extract_identifier(source, sub);
-                                ty_parts.push("*".to_string());
-                            }
-                            "attribute_specifier" | "attribute" => {
-                                attr_text.push_str(source[sub.byte_range()].trim());
-                                attr_text.push(' ');
-                            }
+                            "field_declaration_list" => has_body = true,
                             _ => {}
                         }
                     }
+                }
+                if let Some(tag) = tag {
+                    ty_parts.push(tag);
+                } else if has_body {
+                    let is_union = child.kind() == "union_specifier";
+                    let (size, align) =
+                        parse_struct_or_union_specifier(source, child, arch, is_union, aliases, 0)
+                            .map(|l| (l.total_size, l.align))
+                            .unwrap_or((0, 1));
+                    let kind = if is_union { "union" } else { "struct" };
+                    ty_parts.push(format!("__anon_{kind}<{size},{align}>"));
                 }
             }
             // Bit-field clause: `: N`  (tree-sitter-c/cpp node)
@@ -1823,55 +2443,80 @@ fn parse_field_declaration(source: &str, node: Node<'_>) -> Option<RawField> {
         }
     }
 
-    let base_ty = ty_parts.join(" ");
+    let mut base_ty = ty_parts.join(" ");
     if base_ty.is_empty() {
-        return None;
+        return Vec::new();
     }
-    // Annotate bit-field types as "type:N" so callers can detect and report them;
-    // `strip_bitfield_suffix` recovers the base type for size/align lookup.
-    let ty = if let Some(w) = bit_width {
-        format!("{base_ty}:{w}")
-    } else {
-        base_ty
-    };
-    // Anonymous bitfields (`int : 3;` with no declarator) are padding bits that
-    // still consume storage-unit bits. Return them with an empty name so
-    // `resolve_bitfield_groups` can account for them without displaying a name.
-    let fname = match field_name {
-        Some(n) => n,
-        None if is_bitfield_type(&ty) => String::new(),
-        None => return None,
-    };
+    // `double _Complex z;` — tree-sitter drops the `_Complex` specifier.
+    let field_src = source[node.byte_range()].to_string();
+    if (field_src.contains("_Complex") || field_src.contains("__complex__"))
+        && !base_ty.contains("_Complex")
+    {
+        base_ty.push_str(" _Complex");
+    }
 
     // Also check the full field source text (attribute_specifier may not always
     // be a direct child depending on tree-sitter grammar version).
-    let field_src = source[node.byte_range()].to_string();
-    let guard = extract_guard_from_c_field_text(&attr_text)
-        .or_else(|| extract_guard_from_c_field_text(&field_src));
-
-    // __attribute__((aligned(N))) — GCC/Clang extension, separate from C++11 alignas.
-    // Only applies when no alignas_qualifier was already found.
-    let effective_alignas = alignas_override.or_else(|| {
-        extract_aligned_from_c_field_text(&attr_text)
-            .or_else(|| extract_aligned_from_c_field_text(&field_src))
-    });
-
     let line = node.start_position().row as u32 + 1;
-    Some((ty, fname, guard, effective_alignas, line))
-}
 
-fn extract_identifier(source: &str, node: Node<'_>) -> Option<String> {
-    if node.kind() == "field_identifier" || node.kind() == "identifier" {
-        return Some(source[node.byte_range()].to_string());
+    // Anonymous bitfields (`int : 3;` with no declarator) are padding bits that
+    // still consume storage-unit bits. Return them with an empty name so
+    // `resolve_bitfield_groups` can account for them without displaying a name.
+    if declarators.is_empty() {
+        return match bit_width {
+            Some(w) => vec![(String::new(), format!("{base_ty}:{w}"), None, None, line)],
+            None => Vec::new(),
+        };
     }
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i)
-            && let Some(name) = extract_identifier(source, child)
+
+    let mut out = Vec::new();
+    for decl in declarators {
+        let mut attrs = attr_text.clone();
+        let Some(mut info) = decl_info(source, decl, &mut attrs) else {
+            continue;
+        };
+        // tree-sitter reads `double _Complex z;` as a field named `_Complex` followed
+        // by an ERROR node holding the real name.
+        if matches!(info.name.as_str(), "_Complex" | "__complex__")
+            && let Some(real) = (0..node.child_count())
+                .filter_map(|i| node.child(i))
+                .filter(|c| c.kind() == "ERROR")
+                .find_map(|e| {
+                    (0..e.child_count())
+                        .filter_map(|i| e.child(i))
+                        .find(|c| c.kind() == "identifier")
+                })
         {
-            return Some(name);
+            info.name = source[real.byte_range()].trim().to_string();
         }
+        let mut ty = if info.member_fn_ptr {
+            "__memfn_ptr".to_string()
+        } else if info.pointer {
+            format!("{base_ty} *")
+        } else {
+            base_ty.clone()
+        };
+        for dim in &info.dims {
+            ty.push('[');
+            ty.push_str(dim.trim());
+            ty.push(']');
+        }
+        // Annotate bit-field types as "type:N" so callers can detect and report them;
+        // `strip_bitfield_suffix` recovers the base type for size/align lookup.
+        if let Some(w) = &bit_width {
+            ty = format!("{ty}:{w}");
+        }
+        let guard = extract_guard_from_c_field_text(&attrs)
+            .or_else(|| extract_guard_from_c_field_text(&field_src));
+        // __attribute__((aligned(N))) — GCC/Clang extension, separate from C++11 alignas.
+        // Only applies when no alignas_qualifier was already found.
+        let effective_alignas = alignas_override.or_else(|| {
+            extract_aligned_from_c_field_text(&attrs)
+                .or_else(|| extract_aligned_from_c_field_text(&field_src))
+        });
+        out.push((info.name, ty, guard, effective_alignas, line));
     }
-    None
+    out
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -2320,15 +2965,16 @@ struct Flags {
     }
 
     #[test]
-    fn bitfield_different_unit_size_starts_new_group() {
-        // uint8_t and uint32_t have different storage-unit sizes → separate groups.
+    fn bitfield_different_unit_size_shares_bytes() {
+        // Bit-fields pack bit by bit regardless of declared type: b (uint32_t:5)
+        // continues right after a (uint8_t:3) in the same byte, and the struct
+        // takes uint32_t's alignment. Verified against gcc: sizeof == 4.
         let src = "struct S { uint8_t a : 3; uint32_t b : 5; };";
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
         let l = layouts.iter().find(|l| l.name == "S").unwrap();
-        // Two separate groups
-        assert_eq!(l.fields.len(), 2, "different unit sizes → 2 groups");
-        // b (uint32_t) aligns to 4 → offset 4; total = 8
-        assert_eq!(l.total_size, 8);
+        assert_eq!(l.fields.len(), 1, "one contiguous bit run");
+        assert_eq!(l.total_size, 4);
+        assert_eq!(l.align, 4);
     }
 
     #[test]
@@ -2375,20 +3021,20 @@ struct Flags {
 
     #[test]
     fn anonymous_only_bitfield_unit_emits_pad_placeholder() {
-        // `int : 32` fills an entire 4-byte int unit with anonymous padding.
-        // The next field `a : 4` overflows and starts a new unit.
-        // The all-anonymous first unit emits a `[__pad]` placeholder so that
-        // `simulate_layout` counts its bytes in the total size.
+        // `int : 32` fills an entire 4-byte int unit with anonymous padding and
+        // the next field `a : 4` starts in the following unit. The bits are one
+        // contiguous run (5 bytes), padded out to int alignment: 8 bytes (gcc).
         let src = "struct S { int : 32; int a : 4; };";
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
         let l = layouts.iter().find(|l| l.name == "S").unwrap();
-        // Two synthetic fields: [__pad] (4 bytes) + [a:4] (4 bytes) = 8 bytes total.
-        assert_eq!(l.fields.len(), 2, "[__pad] + [a:4] → 2 synthetic fields");
-        assert!(
-            l.fields[0].name.contains("__pad"),
-            "first field is the pad placeholder"
-        );
-        assert_eq!(l.total_size, 8, "two int units → 8 bytes");
+        assert_eq!(l.fields.len(), 1, "one contiguous bit run");
+        assert_eq!(l.total_size, 8, "5 bytes of bits padded to int alignment");
+        // A struct made only of anonymous padding bits keeps its `[__pad]` placeholder.
+        let src = "struct P { int : 32; };";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "P").unwrap();
+        assert!(l.fields[0].name.contains("__pad"));
+        assert_eq!(l.total_size, 4);
     }
 
     #[test]
@@ -3483,5 +4129,228 @@ struct CacheAligned {
         let layouts = parse_cpp(&src, &X86_64_SYSV).expect("must not panic on non-ASCII comment");
         assert_eq!(layouts.len(), 1);
         assert_eq!(layouts[0].name, "Foo");
+    }
+
+    // ── field-declaration shapes (verified against gcc/g++ offsetof) ──────────
+
+    fn layout_of(src: &str, name: &str, cpp: bool) -> StructLayout {
+        let lang = if cpp {
+            crate::SourceLanguage::Cpp
+        } else {
+            crate::SourceLanguage::C
+        };
+        crate::parse_source_str(src, &lang, &X86_64_SYSV)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.name == name)
+            .unwrap_or_else(|| panic!("{name} not parsed"))
+    }
+
+    fn offset(l: &StructLayout, field: &str) -> usize {
+        l.fields
+            .iter()
+            .find(|f| f.name == field)
+            .unwrap_or_else(|| panic!("no field {field}"))
+            .offset
+    }
+
+    #[test]
+    fn array_fields_are_sized_not_dropped() {
+        let l = layout_of(
+            "struct S { char a; char b[48]; long c; short m[2][3]; };",
+            "S",
+            false,
+        );
+        assert_eq!(offset(&l, "b"), 1);
+        assert_eq!(offset(&l, "c"), 56);
+        assert_eq!(offset(&l, "m"), 64);
+        assert_eq!(l.total_size, 80);
+    }
+
+    #[test]
+    fn array_length_constants_are_evaluated() {
+        let src = r#"
+#define N 8
+#define M (N * 2 + 1)
+enum { K = 5, L };
+static const int Z = 3;
+struct S {
+    char a;
+    char b[N];
+    char c[M];
+    char d[K + L];
+    char e[sizeof(long) * 3];
+    char f[Z];
+    long g;
+};
+"#;
+        let l = layout_of(src, "S", false);
+        // 1 + 8 + 17 + 11 + 24 + 3 = 64
+        assert_eq!(offset(&l, "g"), 64);
+        assert!(l.uncertain_fields.is_empty());
+    }
+
+    #[test]
+    fn unevaluable_array_length_is_flagged_uncertain() {
+        let l = layout_of(
+            "struct S { char a; char b[UNKNOWN_MACRO]; long c; };",
+            "S",
+            false,
+        );
+        assert!(l.fields.iter().any(|f| f.name == "b"), "field must be kept");
+        assert_eq!(l.uncertain_fields, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn flexible_and_zero_length_arrays_take_no_space() {
+        let l = layout_of("struct S { char c; long n; char data[]; };", "S", false);
+        assert_eq!(offset(&l, "data"), 16);
+        assert_eq!(l.total_size, 16);
+        let l = layout_of("struct Z { char a; int z[0]; char c; };", "Z", false);
+        assert_eq!(offset(&l, "c"), 4);
+    }
+
+    #[test]
+    fn array_of_named_structs_is_resolved() {
+        let src = "struct In { char x; int y; }; struct S { char a; struct In b[2]; char c; };";
+        let l = layout_of(src, "S", false);
+        assert_eq!(offset(&l, "c"), 20);
+        assert_eq!(l.total_size, 24);
+    }
+
+    #[test]
+    fn enum_and_function_pointer_fields_are_kept() {
+        let src = r#"
+enum E { A, B };
+enum class F : unsigned char { X };
+struct S {
+    char a;
+    enum E e;
+    void (*cb)(int);
+    int (*table[2])(void);
+    char c;
+};
+"#;
+        let l = layout_of(src, "S", true);
+        assert_eq!(offset(&l, "e"), 4);
+        assert_eq!(offset(&l, "cb"), 8);
+        assert_eq!(offset(&l, "table"), 16);
+        assert_eq!(offset(&l, "c"), 32);
+        // A bare enum name used as a type resolves to its underlying type.
+        let l = layout_of(
+            "enum class F : unsigned char { X }; struct T { F f; char c; int i; };",
+            "T",
+            true,
+        );
+        assert_eq!(offset(&l, "i"), 4);
+    }
+
+    #[test]
+    fn references_and_static_members() {
+        let l = layout_of(
+            "struct S { char a; int& r; static int s; int&& rr; void method(); char c; };",
+            "S",
+            true,
+        );
+        assert!(l.fields.iter().all(|f| f.name != "s" && f.name != "method"));
+        assert_eq!(offset(&l, "r"), 8);
+        assert_eq!(offset(&l, "rr"), 16);
+        assert_eq!(offset(&l, "c"), 24);
+    }
+
+    #[test]
+    fn multiple_declarators_in_one_declaration() {
+        let l = layout_of(
+            "struct S { char a, b; int *p, q; long arr[2], z; };",
+            "S",
+            false,
+        );
+        assert_eq!(offset(&l, "b"), 1);
+        assert_eq!(offset(&l, "p"), 8);
+        assert_eq!(offset(&l, "q"), 16);
+        assert_eq!(offset(&l, "arr"), 24);
+        assert_eq!(offset(&l, "z"), 40);
+    }
+
+    #[test]
+    fn named_anonymous_struct_member_keeps_its_own_layout() {
+        let src =
+            "struct S { char a; struct { char x; long y; } n; struct { char x; } m[3]; char c; };";
+        let l = layout_of(src, "S", false);
+        assert_eq!(offset(&l, "n"), 8);
+        assert_eq!(offset(&l, "m"), 24);
+        assert_eq!(offset(&l, "c"), 27);
+    }
+
+    #[test]
+    fn unnamed_anonymous_struct_is_still_flattened() {
+        let l = layout_of(
+            "struct S { char a; struct { char x; long y; }; char c; };",
+            "S",
+            false,
+        );
+        assert!(l.fields.iter().any(|f| f.name == "y"));
+    }
+
+    #[test]
+    fn bare_unsigned_and_complex_types() {
+        let l = layout_of(
+            "struct S { char a; unsigned u; signed s; long unsigned lu; double _Complex z; char c; };",
+            "S",
+            false,
+        );
+        assert_eq!(offset(&l, "u"), 4);
+        assert_eq!(offset(&l, "lu"), 16);
+        assert_eq!(offset(&l, "z"), 24);
+        assert_eq!(offset(&l, "c"), 40);
+    }
+
+    #[test]
+    fn atomic_specifier_with_macro_style_parse() {
+        let l = layout_of("struct S { char a; _Atomic(long) y; char c; };", "S", false);
+        assert_eq!(offset(&l, "y"), 8);
+    }
+
+    #[test]
+    fn struct_base_classes_are_laid_out() {
+        let src = "struct Base { int x; }; struct In { char c; }; struct D : Base, In { char d; };";
+        let l = layout_of(src, "D", true);
+        assert_eq!(offset(&l, "d"), 5);
+        assert_eq!(l.total_size, 8);
+    }
+
+    #[test]
+    fn trailing_aligned_attribute_on_struct() {
+        let l = layout_of(
+            "struct S { char a; char b; } __attribute__((aligned(32)));",
+            "S",
+            false,
+        );
+        assert_eq!(l.total_size, 32);
+        assert_eq!(l.align, 32);
+    }
+
+    #[test]
+    fn bitfields_pack_across_types_and_align_the_struct() {
+        // gcc: sizeof 4, c at 1, alignment of `unsigned`.
+        let l = layout_of(
+            "struct S { unsigned a:3; unsigned b:5; char c; };",
+            "S",
+            false,
+        );
+        assert_eq!(l.total_size, 4);
+        assert_eq!(l.align, 4);
+        assert_eq!(offset(&l, "c"), 1);
+        // gcc: sizeof 4, d at 2.
+        let l = layout_of(
+            "struct M { char a; int b:4; short c:4; char d; };",
+            "M",
+            false,
+        );
+        assert_eq!(l.total_size, 4);
+        assert_eq!(offset(&l, "d"), 2);
+        // A bit-field never straddles its declared type's unit: moves to offset 4.
+        let l = layout_of("struct W { char a[3]; int b:20; char c; };", "W", false);
+        assert_eq!(offset(&l, "c"), 7);
     }
 }

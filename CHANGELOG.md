@@ -2,6 +2,26 @@
 
 All notable changes to padlock are documented here.
 
+## [0.25.0] — 2026-10-23
+
+Found by the new layout conformance harness (`tests/conformance/run.py`), which compiles probe programs with the real compiler and diffs `sizeof`/`offsetof` against padlock's source-level layout. C went from 19/43 to 48/48 matching `gcc`, C++ from 12/25 to 24/25.
+
+### Fixed
+- **C/C++ silently dropped whole classes of fields**, so the reported struct was smaller and tidier than reality. Dropped before: fixed-size and flexible arrays (`char b[48]`, `char data[]`), enum-typed fields (`enum E e`, `enum class E : uint8_t`, and a bare `E` naming an enum declared elsewhere), function-pointer fields (including arrays of them), C++ references (`T&`, `T&&`), and `_Atomic(long)`. A `char a; char b[48]; long c;` struct was reported as 16 bytes instead of 64. All are now laid out; pointer-to-member-function is two words.
+- **Array lengths are evaluated**, not guessed: integer literals, `#define`d and `enum` constants, `const`/`constexpr` integers, `sizeof(type)`, and arithmetic over them (`char buf[N * 2 + 1]`). A length that cannot be evaluated keeps the field (sized as one element) and lists it in `uncertain_fields`. Arrays of named structs (`struct In b[2]`) are scaled by the nested-struct resolver.
+- **Bit-fields followed by smaller fields were over-sized.** The old model gave each bit-field run a whole storage unit, so `unsigned a:3, b:5; char c;` came out at 8 bytes with `c` at offset 4; `gcc` gives 4 and 1. Bit-fields are now packed bit by bit across declared types, never straddle their type's unit boundary, honour `T : 0`, and raise the struct's alignment to the largest named bit-field type (verified against `gcc`).
+- **`int a, b;` declared only the last name**, `static` data members were counted as fields, and a named anonymous-struct member (`struct { … } n;`) was flattened into its parent instead of being laid out as one member.
+- **Bare `unsigned` / `signed` (and `long unsigned`) were sized as pointers (8B)** instead of 4B, and `double _Complex` lost its name and was sized as a single `double`.
+- **Struct-level `__attribute__((aligned(N)))` written after the closing brace** was ignored.
+- **C++ `struct D : Base`** (not just `class`) now includes its base-class subobjects.
+- **The on-disk parse cache (`.padlock-cache/`) was keyed only on path + mtime, so upgrading padlock kept serving layouts parsed by the old version** until each file was edited — any parser fix was invisible on a project that had been analyzed before. The cache now records the padlock version that wrote it and is discarded on mismatch.
+
+### Added
+- `tests/conformance/` — layout conformance harness for C, C++, Rust, Go and Zig (`python3 tests/conformance/run.py`, needs the relevant toolchains; missing ones are skipped). Known gaps are tracked in `xfail.txt`; a gap that gets fixed must be removed from it.
+
+### Known limitations
+- C++: Itanium-ABI reuse of a non-POD base's tail padding is not modelled (`struct D : B { char c; }` where `B` has trailing padding).
+
 ## [0.24.0] — 2026-10-21
 
 ### Fixed

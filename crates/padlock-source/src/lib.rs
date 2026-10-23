@@ -172,6 +172,23 @@ fn is_known_primitive(name: &str) -> bool {
 ///
 /// Runs in a loop until stable to handle transitive nesting (struct A contains
 /// B which contains C). In practice, 2–3 iterations suffice for typical code.
+/// Split `Name[2][3]` into (`Name`, 6). `[]` counts as 0 elements and an
+/// unevaluated `[?]` as 1; a name without a suffix is (`Name`, 1).
+fn split_c_array_suffix(ty: &str) -> (&str, usize) {
+    let Some(open) = ty.find('[') else {
+        return (ty, 1);
+    };
+    let mut count = 1usize;
+    for dim in ty[open..].split('[').skip(1) {
+        let n = dim.trim_end_matches(']').trim();
+        count = count.saturating_mul(match n {
+            "" => 0,
+            n => n.parse().unwrap_or(1),
+        });
+    }
+    (ty[..open].trim_end(), count)
+}
+
 fn resolve_nested_structs(layouts: &mut [StructLayout]) {
     // Bound iterations to guard against size oscillation from parse-error trees.
     // Real transitive nesting resolves in ≤ depth iterations; depth is bounded by
@@ -204,17 +221,22 @@ fn resolve_nested_structs(layouts: &mut [StructLayout]) {
                     _ => continue,
                 };
 
+                // `Inner[2][3]` is an array of a named struct: resolve the element
+                // type and scale by the element count.
+                let (elem_name, elem_count) = split_c_array_suffix(&type_name);
+
                 // Never shadow built-in primitives.
-                if is_known_primitive(&type_name) {
+                if is_known_primitive(elem_name) {
                     continue;
                 }
 
                 // Don't resolve a struct to itself (circular).
-                if type_name == layout.name {
+                if elem_name == layout.name {
                     continue;
                 }
 
-                if let Some(&(struct_size, struct_align)) = known.get(&type_name) {
+                if let Some(&(elem_size, struct_align)) = known.get(elem_name) {
+                    let struct_size = elem_size.saturating_mul(elem_count);
                     // Only update if the size would change — avoids infinite loops
                     // for pointer-sized structs that already have the right size.
                     if field.size == struct_size && field.align == struct_align {
@@ -255,9 +277,10 @@ fn resolve_nested_structs(layouts: &mut [StructLayout]) {
                 name: type_name, ..
             } = &field.ty
             {
-                if is_known_primitive(type_name)
-                    || type_name == &layout.name
-                    || known_names.contains(type_name.as_str() as &str)
+                let elem_name = split_c_array_suffix(type_name).0;
+                if is_known_primitive(elem_name)
+                    || elem_name == layout.name
+                    || known_names.contains(elem_name)
                 {
                     continue;
                 }

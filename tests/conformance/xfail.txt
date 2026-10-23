@@ -1,41 +1,4 @@
 # Known layout gaps vs. the real compiler (see run.py). Remove entries as they are fixed.
-c:AlS
-c:AlSO
-c:Arr
-c:Arr2D
-c:Arr3
-c:ArrExpr
-c:ArrMac
-c:ArrSizeof
-c:ArrStruct
-c:Atom
-c:Bits
-c:BitsL
-c:BitsMix
-c:Cx
-c:CxF
-c:Enum
-c:FP
-c:Flex
-c:Flex2
-c:NestInl
-c:NestInlArr
-c:U
-c:WithU
-c:ZeroArr
-cpp:Arr
-cpp:ArrC
-cpp:Bf
-cpp:Der
-cpp:Der2
-cpp:En
-cpp:Fp
-cpp:Mem
-cpp:Nst
-cpp:RRef
-cpp:Ref
-cpp:St
-cpp:VD
 go:Anon
 go:Arr
 go:Arr2
@@ -70,3 +33,4 @@ zig:ArrS
 zig:Enums
 zig:Pk
 zig:PkBits
+cpp:VD  # Itanium ABI reuses a non-POD base's tail padding; needs POD analysis of the base

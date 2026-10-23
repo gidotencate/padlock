@@ -56,8 +56,15 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Locality** | Flags hot/cold field interleaving that hurts cache utilisation |
 | **Scoring** | Each struct gets a 0–100 score (100 = no issues) |
 | **Multi-language** | C, C++, Rust, Go, Zig source; compiled binaries via DWARF/BTF |
-| **Multi-arch** | x86-64, AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64, Cortex-M, AVR; `--target <triple>` for cross-arch analysis |
-| **repr(Rust) awareness** | Severity downgraded for repr(Rust) structs (compiler may already reorder); `--hide-repr-rust` excludes them entirely |
+| **Multi-arch** | x86-64 (SysV and Windows/MSVC), x86 (i386), AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64, Cortex-M, AVR; `--target <triple>` lays sources out for that target (data model, `long double`, alignment caps, MSVC bit-fields) |
+| **Compiler-order layout** | `repr(Rust)` and plain Zig structs are laid out the way rustc/zig order them (largest alignment first), so their sizes match the compiled program; `--declared-order` shows source order instead; `--hide-repr-rust` excludes them |
+| **Generics & templates** | C++ class templates, Rust/Go generic structs and Zig `fn(comptime T) type` are analyzed once per concrete instantiation used anywhere in the analyzed files (or listed under `[instantiate]` in `.padlock.toml`) |
+| **Preprocessor** | `#if`/`#ifdef`/`#elif` branches are resolved like a compiler would; `-D NAME[=VALUE]` / `defines = [...]` choose them; members that depend on undefined macros, unknown typedefs or macro invocations are reported as uncertain instead of guessed |
+| **C++ ABI** | Itanium inheritance: tail-padding reuse, empty-base optimisation, `[[no_unique_address]]`, virtual bases, primary base; namespaces and nested classes keep same-named types apart |
+| **Exact modes** | `--compile-commands compile_commands.json` (C/C++ via the real compiler), `--go-exact` (Go toolchain via a virtual probe test), `--rust-exact` (rustc `-Zprint-type-sizes`) replace estimates with the compiler's own layout |
+| **Verify against a binary** | `padlock verify --binary app src/` checks every source-level layout against the debug info of a build and fails CI on drift |
+| **FFI check** | `padlock ffi src/` checks Rust `#[repr(C)]` structs against the C structs of the same name |
+| **Measured hotness** | `--perf-types` reads perf's data-type profile so locality and false-sharing use measured accesses |
 | **C++ stdlib variants** | `--stdlib libstdc++\|libc++\|msvc` selects the stdlib for type sizing; `libc++` `std::string` is 24B vs libstdc++ 32B |
 | **Custom sync types** | `custom_sync_types = ["MyMutex", "ProtectedData"]` in `.padlock.toml` — project-specific lock types trigger false-sharing detection |
 | **Rust niche optimization** | `Option<NonZeroXxx>`, `Option<&T>`, `Option<Box<T>>` sized as inner type (no discriminant overhead) |
@@ -68,7 +75,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **ABI safety** | `padlock fix` warns before reordering fixed-layout structs (`repr(C)` Rust, C, Go, `extern`/`packed` Zig) that may break FFI or serialization — a plain (non-`extern`, non-`packed`) Zig struct is field-order-unstable like Rust's default `repr(Rust)` and does **not** get this warning, since the compiler may already reorder it |
 | **CI-ready** | SARIF output, `action.yml`, exit-code gating on high-severity findings |
 | **`cargo padlock`** | Cargo subcommand — builds your project then analyses the binary |
-| **Compile-time assertions** | `#[padlock::assert_no_padding]` / `#[padlock::assert_size(N)]` proc macros |
+| **Compile-time assertions** | `#[padlock::assert_no_padding]`, `#[padlock::assert_size(N)]`, `#[padlock::assert_align(N)]`, `#[padlock::assert_offsets(field = N, …)]` proc macros |
 | **Watch mode** | `padlock watch <path>` re-analyses on every file change |
 | **Source-preserving fixes** | `padlock fix` reorders field chunks verbatim, keeping `pub`, `#[serde(...)]`, `/// doc-comments`, and guard annotations intact |
 | **Project health summary** | `padlock summary` shows aggregate score, severity bar chart, worst files, and worst structs in one terminal screen |
@@ -78,6 +85,23 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Cache-line visualization** | `padlock explain` adds a `CL` column (zero-indexed cache-line number per field/padding row) and inserts a separator row each time a field crosses into a new 64-byte (or 128-byte) cache line |
 | **VS Code extension** | Findings in the Problems panel on save, status bar health score, hover popups, quick-fix lightbulb, and diff-preview fix-all |
 | **`padlock-lsp`** | Standalone language server — diagnostics, hover, inlay hints, document symbols, and reorder quick-fixes for any LSP-capable editor (Neovim, Helix, Zed, JetBrains, Sublime); honours `.padlock.toml` |
+
+---
+
+## How exact is it?
+
+Source analysis computes layouts the way the compiler would, and is checked against the real compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) on every change: a conformance suite of several hundred probe structs for each language and seven targets, plus differential fuzzing of random C/C++ structs (`tests/conformance/`). What source alone cannot know, padlock reports as `uncertain` rather than guessing silently — a typedef from a header that was not analyzed, a member written as a macro, a branch that depends on an undefined macro, a type from another Go package.
+
+When you need the compiler's own answer:
+
+| Language | Exact mode | How |
+|---|---|---|
+| C / C++ | `--compile-commands build/compile_commands.json` | Recompiles each translation unit with its own flags plus debug info and reads the layouts the compiler produced — macros, `#if` configuration, templates and platform ABI included |
+| Go | `--go-exact` | Adds a probe test to each package *virtually* (`go test -overlay`; nothing is written) and uses `reflect`'s sizes and offsets — exact even for types from other packages |
+| Rust | `--rust-exact` | Builds the crate once with `-Zprint-type-sizes` (via `RUSTC_BOOTSTRAP=1`, into `target/padlock-rust-exact`) and uses rustc's field order and sizes |
+| Any | `padlock analyze <binary>` | Reads DWARF (including split DWARF, type units, compressed sections), BTF or PDB from a debug build. Build with `-fno-eliminate-unused-debug-types` (gcc/clang) so unused types are described too |
+
+`padlock verify --binary <debug build> <sources>` turns the comparison into a CI check.
 
 ---
 
@@ -384,6 +408,29 @@ The impact line uses SI scaling: `savings × 1 000 ≈ KB`, `savings × 1 000 00
 
 ---
 
+### `padlock verify --binary <BIN> <source>…`
+
+Checks padlock's source-level layouts against the compiler's, read from a binary (or object file) built from those sources with debug info. Lists every struct whose size or field offsets differ and exits 1 when any does — use it in CI to prove the source analysis can be trusted for your code base. Names are matched across namespaces/modules (`ns::Conn`, `main.Conn`); Go types only match their own package.
+
+```bash
+gcc -g -fno-eliminate-unused-debug-types -c conn.c -o conn.o
+padlock verify --binary conn.o conn.c
+# 12/12 structs match the binary's debug info
+```
+
+---
+
+### `padlock ffi <path>…`
+
+For every Rust `#[repr(C)]` struct that has a C/C++ struct of the same name among the analyzed files, checks that both describe the same memory — size, alignment, field count, and each field's offset and size by position. Exits 1 on any mismatch.
+
+```bash
+padlock ffi src/ include/
+# 1/2 repr(C) structs match their C definition   (Packet: `len` at 8 (8B) vs `len` at 4 (4B))
+```
+
+---
+
 ### `padlock init [--force]`
 
 Generates a `.padlock.toml` configuration file in the current directory with every supported option commented out and annotated. Use this when adopting padlock in an existing project to see all available settings at a glance.
@@ -428,10 +475,25 @@ fail_on_severity = "high"
 custom_sync_types = []
 # Example: custom_sync_types = ["MyMutex", "ProtectedData", "RwLock"]
 
+# C/C++ macros treated as defined when choosing #if/#ifdef branches (like -D).
+defines = []
+# Example: defines = ["CONFIG_SMP", "WORD_BITS=64"]
+
+# Show repr(Rust) and plain Zig structs in source order instead of the order
+# the compiler uses (same as --declared-order).
+declared_order = false
+
+[instantiate]
+# Generic types to analyze with these arguments, besides the instantiations
+# found in the code (C++ templates, Rust/Go generics, Zig comptime functions).
+# Buf  = ["char, 8", "int"]
+# Pair = ["u32, String"]
+
 [arch]
-# Override the target architecture for source analysis.
-# Accepted values: "x86_64", "aarch64", "aarch64_apple", "wasm32", "riscv64",
-# or a full Rust target triple (e.g. "aarch64-apple-darwin").
+# Lay out source files for this target instead of the host.
+# Accepted values: "x86_64", "x86_64-msvc", "x86", "aarch64", "aarch64_apple",
+# "wasm32", "riscv64", "cortex_m", "cortex_m4", "avr", or a Rust target triple
+# (e.g. "aarch64-apple-darwin", "x86_64-pc-windows-msvc").
 # Takes effect when no --target flag is passed on the CLI.
 override = ""
 ```

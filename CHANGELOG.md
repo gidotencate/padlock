@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.49.0] — 2026-10-23
+
+### Changed
+- Rust `Mutex<T>` / `RwLock<T>` / `OnceLock<T>` / `Condvar` / `Once` / `Barrier` are sized with std's futex layout, which is the one Linux, Android and the BSDs use. On Apple and Windows (MSVC) targets std uses other primitives, so those fields are now listed in `uncertain_fields` instead of being presented as exact (use `--rust-exact` there).
+
 ## [0.48.0] — 2026-10-23
 
 New: `tests/conformance/fuzz.py`, differential fuzzing of C/C++ layouts against gcc/g++ (random scalars, constant-expression arrays, bit-fields incl. `T : 0`, nested/anonymous aggregates, unions, enums, `packed`/`aligned`/`#pragma pack`, C++ inheritance). Before the fixes below: 483 mismatching fields in the first 30 C rounds. Now: **0 mismatches in 260 C rounds (~6,500 structs)**; C++ is down to a handful of mismatches per 60 rounds, all combining `packed` with inheritance.

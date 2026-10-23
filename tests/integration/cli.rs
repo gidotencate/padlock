@@ -906,3 +906,40 @@ fn ffi_flags_rust_repr_c_that_disagrees_with_the_c_header() {
         .stdout(contains("Packet"))
         .stdout(contains("1/2 repr(C) structs match"));
 }
+
+#[test]
+fn perf_data_types_mark_measured_hot_fields() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("c.c");
+    std::fs::write(
+        &file,
+        "struct conn { long hits; char name[120]; long misses; };\n",
+    )
+    .unwrap();
+    let perf = dir.path().join("types.txt");
+    std::fs::write(
+        &perf,
+        "# Overhead  Data Type  Data Type Offset\n\
+         \x20   40.00%  struct conn  struct conn +0 (hits)\n\
+         \x20   35.00%  struct conn  struct conn +128 (misses)\n",
+    )
+    .unwrap();
+    let plain = padlock()
+        .args(["analyze", "--json", "--no-cache"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&plain.stdout).contains("LocalityIssue"));
+    let measured = padlock()
+        .args(["analyze", "--json", "--no-cache", "--perf-types"])
+        .arg(&perf)
+        .arg(&file)
+        .output()
+        .unwrap();
+    // hits and misses are hot, the name between them is not: interleaving.
+    assert!(
+        String::from_utf8_lossy(&measured.stdout).contains("LocalityIssue"),
+        "{}",
+        String::from_utf8_lossy(&measured.stdout)
+    );
+}

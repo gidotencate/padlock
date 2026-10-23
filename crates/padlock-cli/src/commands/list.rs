@@ -91,6 +91,7 @@ mod tests {
             compile_commands: None,
             go_exact: false,
             rust_exact: false,
+            perf_types: None,
             filter: None,
             exclude: None,
             min_holes: None,

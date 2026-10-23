@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.51.0] — 2026-10-23
+
+### Added
+- **`--perf-types <file>`** (`analyze`, `summary`, `check`, `list`): measured hot fields from Linux perf's data-type profiling (`perf mem record …` then `perf report --stdio -s type,typeoff`, perf ≥ 6.8). Fields that receive memory-access samples are treated as hot, so locality (hot/cold interleaving) and false-sharing analysis use what the program actually touches instead of guessing from type names.
+
 ## [0.50.0] — 2026-10-23
 
 ### Added

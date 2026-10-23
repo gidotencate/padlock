@@ -30,6 +30,77 @@ pub fn load(binary_data: &[u8]) -> anyhow::Result<DwarfRc> {
     gimli::Dwarf::load(load_section)
 }
 
+/// Split DWARF (`-gsplit-dwarf`): the binary holds only skeleton units; the type
+/// information lives in one `.dwo` file per compile unit. Find and load each,
+/// resolving its name against the unit's `DW_AT_comp_dir` and the binary's own
+/// directory. Missing `.dwo` files are skipped (a note is printed).
+pub fn load_split_dwarf(parent: &DwarfRc, binary_path: &std::path::Path) -> Vec<DwarfRc> {
+    let mut out = Vec::new();
+    let mut units = parent.units();
+    while let Ok(Some(header)) = units.next() {
+        let Ok(unit) = parent.unit(header) else {
+            continue;
+        };
+        let Ok(Some(name_attr)) = unit.dwo_name() else {
+            continue;
+        };
+        let Ok(name) = parent.attr_string(&unit, name_attr) else {
+            continue;
+        };
+        let Ok(name) = gimli::Reader::to_string_lossy(&name).map(|n| n.into_owned()) else {
+            continue;
+        };
+        let comp_dir = unit.comp_dir.as_ref().and_then(|d| {
+            gimli::Reader::to_string_lossy(d)
+                .ok()
+                .map(|d| d.into_owned())
+        });
+        let mut candidates = Vec::new();
+        if let Some(dir) = &comp_dir {
+            candidates.push(std::path::Path::new(dir).join(&name));
+        }
+        if let Some(dir) = binary_path.parent() {
+            candidates.push(dir.join(&name));
+            if let Some(file) = std::path::Path::new(&name).file_name() {
+                candidates.push(dir.join(file));
+            }
+        }
+        candidates.push(std::path::PathBuf::from(&name));
+        let Some(data) = candidates.iter().find_map(|c| std::fs::read(c).ok()) else {
+            eprintln!(
+                "padlock: note: split DWARF object '{name}' not found; its types are skipped"
+            );
+            continue;
+        };
+        match load_dwo(&data, parent) {
+            Ok(dwo) => out.push(dwo),
+            Err(e) => eprintln!("padlock: note: cannot read split DWARF object '{name}': {e}"),
+        }
+    }
+    out
+}
+
+/// Parse a `.dwo` file's `.debug_*.dwo` sections as the split part of `parent`.
+fn load_dwo(data: &[u8], parent: &DwarfRc) -> anyhow::Result<DwarfRc> {
+    let file = object::File::parse(data)?;
+    let endian = if file.is_little_endian() {
+        gimli::RunTimeEndian::Little
+    } else {
+        gimli::RunTimeEndian::Big
+    };
+    let load_section =
+        |id: gimli::SectionId| -> anyhow::Result<EndianRcSlice<gimli::RunTimeEndian>> {
+            let data: Vec<u8> = match id.dwo_name().and_then(|n| file.section_by_name(n)) {
+                Some(s) => s.uncompressed_data()?.into_owned(),
+                None => Vec::new(),
+            };
+            Ok(EndianRcSlice::new(Rc::from(data.as_slice()), endian))
+        };
+    let mut dwo = gimli::Dwarf::load(load_section)?;
+    dwo.make_dwo(parent);
+    Ok(dwo)
+}
+
 /// Load a section's bytes and apply any ELF RELA relocations targeting it.
 ///
 /// In unlinked `.o` files, DWARF cross-section references (e.g. `DW_FORM_strp`

@@ -213,7 +213,15 @@ pub fn collect_layouts(
                 let arch = padlock_dwarf::reader::detect_arch(&data)
                     .unwrap_or_else(|_| padlock_dwarf::reader::detect_arch_from_host());
                 let dwarf = padlock_dwarf::reader::load(&data)?;
-                padlock_dwarf::extractor::Extractor::new(&dwarf, arch).extract_all()?
+                let mut layouts =
+                    padlock_dwarf::extractor::Extractor::new(&dwarf, arch).extract_all()?;
+                // `-gsplit-dwarf`: the types are in the `.dwo` files.
+                for dwo in padlock_dwarf::reader::load_split_dwarf(&dwarf, path) {
+                    layouts.extend(
+                        padlock_dwarf::extractor::Extractor::new(&dwo, arch).extract_all()?,
+                    );
+                }
+                layouts
             };
             analyzed.push(path.display().to_string());
             all_layouts.extend(layouts);

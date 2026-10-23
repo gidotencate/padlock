@@ -37,13 +37,9 @@ impl<'a, R: Reader> Extractor<'a, R> {
                 Ok((size, size, TypeInfo::Pointer { size, align: size }))
             }
 
-            gimli::DW_TAG_typedef => {
-                let inner_offset = match entry.attr_value(gimli::DW_AT_type) {
-                    Some(gimli::AttributeValue::UnitRef(off)) => off,
-                    _ => return Err(anyhow::anyhow!("typedef with no type")),
-                };
-                self.resolve_type(unit, inner_offset)
-            }
+            gimli::DW_TAG_typedef => self
+                .resolve_type_attr(unit, entry)?
+                .ok_or_else(|| anyhow::anyhow!("typedef with no type")),
 
             gimli::DW_TAG_const_type
             | gimli::DW_TAG_volatile_type
@@ -54,19 +50,14 @@ impl<'a, R: Reader> Extractor<'a, R> {
                 // reads DW_AT_byte_size on the atomic wrapper itself — that attribute is
                 // absent on qualifier tags, so the field was sized as 0 bytes and the
                 // gap after it appeared 4–8 bytes too large.
-                let inner_offset = match entry.attr_value(gimli::DW_AT_type) {
-                    Some(gimli::AttributeValue::UnitRef(off)) => off,
-                    _ => return Err(anyhow::anyhow!("qualifier with no type")),
-                };
-                self.resolve_type(unit, inner_offset)
+                self.resolve_type_attr(unit, entry)?
+                    .ok_or_else(|| anyhow::anyhow!("qualifier with no type"))
             }
 
             gimli::DW_TAG_array_type => {
-                let elem_offset = match entry.attr_value(gimli::DW_AT_type) {
-                    Some(gimli::AttributeValue::UnitRef(off)) => off,
-                    _ => return Err(anyhow::anyhow!("array with no element type")),
-                };
-                let (elem_size, elem_align, elem_ty) = self.resolve_type(unit, elem_offset)?;
+                let (elem_size, elem_align, elem_ty) = self
+                    .resolve_type_attr(unit, entry)?
+                    .ok_or_else(|| anyhow::anyhow!("array with no element type"))?;
 
                 let count = self.extract_array_count(unit, entry)?;
                 let total = elem_size * count;
@@ -102,6 +93,46 @@ impl<'a, R: Reader> Extractor<'a, R> {
                         },
                     ))
                 }
+            }
+
+            // A union's alignment is its strictest member's, not its size
+            // (`union { char c[13]; long l; }` is 16 bytes, aligned to 8).
+            gimli::DW_TAG_union_type => {
+                let size = self.attr_usize(entry, gimli::DW_AT_byte_size)?.unwrap_or(0);
+                let mut align = self.attr_usize(entry, gimli::DW_AT_alignment)?.unwrap_or(0);
+                if align == 0 {
+                    let mut tree = unit.entries_tree(Some(entry.offset()))?;
+                    let root = tree.root()?;
+                    let mut children = root.children();
+                    while let Some(child) = children.next()? {
+                        let e = child.entry();
+                        if e.tag() == gimli::DW_TAG_member
+                            && let Some((_, a, _)) = self.resolve_type_attr(unit, e)?
+                        {
+                            align = align.max(a);
+                        }
+                    }
+                }
+                let name = self
+                    .attr_string(unit, entry, gimli::DW_AT_name)?
+                    .unwrap_or_default();
+                let align = align.max(1);
+                Ok((size, align, TypeInfo::Opaque { name, size, align }))
+            }
+
+            // C++ pointer to member: a data-member pointer is one word, a
+            // member-function pointer two (function pointer + `this` adjustment).
+            gimli::DW_TAG_ptr_to_member_type => {
+                let ps = self.arch.pointer_size;
+                let to_function = match entry.attr_value(gimli::DW_AT_type) {
+                    Some(gimli::AttributeValue::UnitRef(off)) => unit
+                        .entries_at_offset(off)?
+                        .next_dfs()?
+                        .is_some_and(|e| e.tag() == gimli::DW_TAG_subroutine_type),
+                    _ => false,
+                };
+                let size = if to_function { ps * 2 } else { ps };
+                Ok((size, ps, TypeInfo::Pointer { size, align: ps }))
             }
 
             gimli::DW_TAG_enumeration_type => {

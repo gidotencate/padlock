@@ -95,6 +95,13 @@ pub struct FilterArgs {
     #[arg(long)]
     pub rust_exact: bool,
 
+    /// Measured hot fields: the output of Linux perf's data-type profiling
+    /// (`perf mem record …` then `perf report --stdio -s type,typeoff`, perf ≥ 6.8).
+    /// Fields that receive samples are treated as hot by locality and
+    /// false-sharing analysis.
+    #[arg(long, value_name = "FILE")]
+    pub perf_types: Option<PathBuf>,
+
     /// Lay out Rust `repr(Rust)` and plain Zig structs in source declaration order.
     ///
     /// By default padlock shows them in the order the compiler actually uses
@@ -285,6 +292,7 @@ mod tests {
             compile_commands: None,
             go_exact: false,
             rust_exact: false,
+            perf_types: None,
             filter: filter.map(str::to_owned),
             exclude: exclude.map(str::to_owned),
             min_holes,

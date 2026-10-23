@@ -316,6 +316,15 @@ pub fn collect_layouts_with(
     if filter.rust_exact {
         crate::rust_exact::refine(&mut layouts);
     }
+    if let Some(perf) = &filter.perf_types {
+        let n = crate::perf_types::apply(perf, &mut layouts)?;
+        if n == 0 {
+            eprintln!(
+                "padlock: note: no field of the analyzed structs appears in {}",
+                perf.display()
+            );
+        }
+    }
     Ok((layouts, analyzed, skipped))
 }
 

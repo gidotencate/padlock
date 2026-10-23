@@ -439,3 +439,69 @@ fn diff_against_resolves_repo_root_from_target_path_not_process_cwd() {
         .stdout(contains("16B -> 24B"))
         .stdout(contains("+ Foo").not());
 }
+
+// ── settings reach the parallel parser ────────────────────────────────────────
+
+fn total_sizes(stdout: &[u8]) -> Vec<u64> {
+    let v: serde_json::Value = serde_json::from_slice(stdout).unwrap();
+    let mut sizes: Vec<u64> = v["structs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["total_size"].as_u64().unwrap())
+        .collect();
+    sizes.sort_unstable();
+    sizes.dedup();
+    sizes
+}
+
+#[test]
+fn stdlib_flag_applies_to_every_file_of_a_directory_scan() {
+    // Parsing runs on rayon worker threads; a thread-local setting made on the
+    // main thread was silently ignored for them.
+    let dir = tempfile::TempDir::new().unwrap();
+    for i in 0..8 {
+        std::fs::write(
+            dir.path().join(format!("f{i}.cpp")),
+            format!("struct S{i} {{ std::string s; char c; }};"),
+        )
+        .unwrap();
+    }
+    let out = padlock()
+        .args(["analyze", "--json", "--stdlib", "libc++"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    // libc++ std::string is 24 bytes → 24 + 1 → 32.
+    assert_eq!(total_sizes(&out.stdout), vec![32]);
+    // Switching the setting must not be answered from the parse cache.
+    let out = padlock()
+        .args(["analyze", "--json", "--stdlib", "libstdc++"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(total_sizes(&out.stdout), vec![40]);
+}
+
+#[test]
+fn define_flag_selects_ifdef_branch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("d.c");
+    std::fs::write(
+        &file,
+        "struct S {\n char a;\n#ifdef WIDE\n long w;\n#endif\n};\n",
+    )
+    .unwrap();
+    let out = padlock()
+        .args(["analyze", "--json"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(total_sizes(&out.stdout), vec![1]);
+    let out = padlock()
+        .args(["analyze", "--json", "-D", "WIDE"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(total_sizes(&out.stdout), vec![16]);
+}

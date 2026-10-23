@@ -33,11 +33,16 @@ struct CacheEntry {
 }
 
 /// Everything besides the file itself that changes what the parser produces:
-/// the padlock version and the preprocessor defines. A cache written under a
-/// different fingerprint is discarded.
+/// the padlock version, the preprocessor defines and the C++ stdlib variant.
+/// A cache written under a different fingerprint is discarded.
 fn cache_fingerprint() -> String {
     let defines: Vec<String> = padlock_source::preprocessor_defines_fingerprint();
-    format!("{}|{}", env!("CARGO_PKG_VERSION"), defines.join(","))
+    format!(
+        "{}|{}|{:?}",
+        env!("CARGO_PKG_VERSION"),
+        defines.join(","),
+        padlock_source::cpp_stdlib()
+    )
 }
 
 /// In-process parse cache backed by `.padlock-cache/layouts.json`.

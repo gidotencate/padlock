@@ -28,11 +28,16 @@ pub enum CppStdlib {
 
 /// Set the C++ stdlib variant used for type-size lookups during source analysis.
 ///
-/// This is a thread-local setting; it takes effect for all subsequent calls to
-/// `parse_source` / `parse_source_str` on the current thread.  The default is
-/// `CppStdlib::LibStdCpp`.  Call this from the CLI before invoking analysis.
+/// Process-global: it takes effect for all subsequent calls to `parse_source` /
+/// `parse_source_str` on every thread (including rayon workers). The default is
+/// `CppStdlib::LibStdCpp`. Call this from the CLI before invoking analysis.
 pub fn set_cpp_stdlib(stdlib: CppStdlib) {
     frontends::c_cpp::set_stdlib(stdlib);
+}
+
+/// The C++ stdlib variant currently in effect.
+pub fn cpp_stdlib() -> CppStdlib {
+    frontends::c_cpp::active_stdlib()
 }
 
 // ── preprocessor defines ──────────────────────────────────────────────────────

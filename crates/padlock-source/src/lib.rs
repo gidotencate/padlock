@@ -67,6 +67,108 @@ pub(crate) fn apply_compiler_order(layout: &mut StructLayout) {
     }
 }
 
+// ── generic / template instantiation ──────────────────────────────────────────
+
+static CONFIG_INSTANTIATIONS: std::sync::RwLock<Vec<(String, Vec<String>)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// Split a comma-separated argument list at depth 0 (`"Map<K, V>, int"` →
+/// `["Map<K, V>", "int"]`).
+pub fn split_type_args(text: &str) -> Vec<String> {
+    let (mut depth, mut start, mut out) = (0i32, 0usize, Vec::new());
+    for (i, c) in text.char_indices() {
+        match c {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' | ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(text[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = text[start..].trim();
+    if !last.is_empty() {
+        out.push(last.to_string());
+    }
+    out
+}
+
+/// Instantiations to analyze for generic types (C++ class templates, Rust and
+/// Go generic structs, Zig type-returning functions) besides the ones found in
+/// the source itself, as `(TypeName, [arg, …])`. Typically from `[instantiate]`
+/// in `.padlock.toml`. Process-global; replaces the previous list.
+pub fn set_configured_instantiations(list: Vec<(String, Vec<String>)>) {
+    *CONFIG_INSTANTIATIONS
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = list;
+    publish_instantiations(Vec::new());
+}
+
+/// Additionally analyze these instantiations (e.g. uses found in other files of
+/// the same run), on top of the configured ones.
+pub fn set_discovered_instantiations(list: Vec<(String, Vec<String>)>) {
+    publish_instantiations(list);
+}
+
+static EXTRA_INSTANTIATIONS: std::sync::RwLock<Vec<(String, Vec<String>)>> =
+    std::sync::RwLock::new(Vec::new());
+
+fn publish_instantiations(mut discovered: Vec<(String, Vec<String>)>) {
+    let mut all = CONFIG_INSTANTIATIONS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    all.append(&mut discovered);
+    *EXTRA_INSTANTIATIONS
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = all;
+}
+
+/// Configured and cross-file instantiations of the generic type `name`.
+pub(crate) fn extra_instantiations(name: &str) -> Vec<Vec<String>> {
+    EXTRA_INSTANTIATIONS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(n, _)| n == name)
+        .map(|(_, a)| a.clone())
+        .collect()
+}
+
+/// The configured instantiations as `Name<args>` strings (for cache fingerprints).
+pub fn configured_instantiations_fingerprint() -> Vec<String> {
+    CONFIG_INSTANTIATIONS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(n, a)| format!("{n}<{}>", a.join(",")))
+        .collect()
+}
+
+/// Concrete uses of generic types in `source` (`Buf<char, 8>`, `Pair[int, string]`,
+/// `Foo<u32>`, `List(u32)`), as `(TypeName, [arg, …])`. Used to instantiate generic
+/// types defined in *other* files of the same run.
+pub fn generic_uses(source: &str, lang: &SourceLanguage) -> Vec<(String, Vec<String>)> {
+    match lang {
+        SourceLanguage::Cpp => frontends::c_cpp::template_uses(source),
+        SourceLanguage::Rust => frontends::rust::generic_uses(source),
+        SourceLanguage::Go => frontends::go::generic_uses(source),
+        SourceLanguage::Zig => frontends::zig::generic_uses(source),
+        _ => Vec::new(),
+    }
+}
+
+/// True for a skipped type that analysis could pick up once concrete type
+/// arguments are known (a template / generic without a found instantiation).
+pub fn skipped_for_lack_of_instantiation(s: &SkippedStruct) -> bool {
+    s.reason.contains(INSTANTIATION_HINT)
+}
+
+/// Marker included in the skip reason of every generic type that was skipped only
+/// because no instantiation was found.
+pub(crate) const INSTANTIATION_HINT: &str = "no instantiation found";
+
 // ── preprocessor defines ──────────────────────────────────────────────────────
 
 static DEFINES: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::new(Vec::new());
@@ -465,6 +567,11 @@ fn split_c_array_suffix(ty: &str) -> (&str, usize) {
     let Some(open) = ty.find('[') else {
         return (ty, 1);
     };
+    // `Pair[int, string]` (a Go instantiation) is a name, not an array.
+    let first = ty[open + 1..].split(']').next().unwrap_or("").trim();
+    if !(first.is_empty() || first == "?" || first.bytes().all(|b| b.is_ascii_digit())) {
+        return (ty, 1);
+    }
     let mut count = 1usize;
     for dim in ty[open..].split('[').skip(1) {
         let n = dim.trim_end_matches(']').trim();

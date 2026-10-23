@@ -48,6 +48,8 @@ type Inner struct { x bool; y int32 }
 type StArr struct { a bool; b [2]Inner; c bool }
 type ZeroTrail struct { a int64; z struct{} }
 type Ifaces struct { c driver.Connector; r io.Reader; x bool }
+type GPair[K comparable, V any] struct { k K; flag bool; v V }
+type GUser struct { a bool; p GPair[int8, int64]; q GPair[string, bool]; z bool }
 type (
 	G1 struct { x int32; y bool }
 	G2 struct { y int64; x bool }
@@ -61,6 +63,9 @@ func main() {
 	var h4 ZeroTrail; fmt.Println("ZeroTrail", unsafe.Sizeof(h4), unsafe.Offsetof(h4.z))
 	var h5 Ifaces; fmt.Println("Ifaces", unsafe.Sizeof(h5), unsafe.Offsetof(h5.x))
 	var h6 G1; fmt.Println("G1", unsafe.Sizeof(h6), unsafe.Offsetof(h6.y))
+	var g1 GUser; fmt.Println("GUser", unsafe.Sizeof(g1), unsafe.Offsetof(g1.z))
+	var g2 GPair[int8, int64]; fmt.Println("GPair[int8, int64]", unsafe.Sizeof(g2), -1)
+	var g3 GPair[string, bool]; fmt.Println("GPair[string, bool]", unsafe.Sizeof(g3), -1)
 	var h7 G2; fmt.Println("G2", unsafe.Sizeof(h7), unsafe.Offsetof(h7.x))
 	var x Arr; fmt.Println("Arr", unsafe.Sizeof(x), unsafe.Offsetof(x.c))
 	var x2 Arr2; fmt.Println("Arr2", unsafe.Sizeof(x2), unsafe.Offsetof(x2.c))

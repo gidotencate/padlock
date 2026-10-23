@@ -69,8 +69,16 @@ struct VDd : VBb, VCc { int d; };
 struct NonDyn { char z; };
 struct PrimLater : NonDyn, Vb { char q; };
 struct OnlyVirtualBase : virtual Empty { char k; };
+template<typename T, int N = 4, class Tag = Empty> struct TBuf { char head; T data[N]; Tag tag; };
+template<class T> struct TNode { char used; T v; TNode<T>* next; };
+template<> struct TNode<char> { char used; char v; };
+template struct TBuf<long>;
+using TB2 = TBuf<short, 2>;
+using u32_alias = unsigned int;
+struct TUser { char a; TBuf<char, 8> b; TNode<double> n; TB2 t2; u32_alias u; TNode<char> nc; char z; };
 #define P(T,L) printf(#T " %zu %zu " #L "\n", sizeof(T), offsetof(T, L))
 int main(){
-P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);P(AlNest,c);P(PkNest,l);P(BfNest,t);P(TP1,c);P(TP2,c);P(TP3,c);P(TP4,c);P(TP5,c);P(TP6,c);P(EB1,x);P(EB3,t);P(Nua,x);P(VDd,d);P(PrimLater,q);P(OnlyVirtualBase,k);
+P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);P(AlNest,c);P(PkNest,l);P(BfNest,t);P(TP1,c);P(TP2,c);P(TP3,c);P(TP4,c);P(TP5,c);P(TP6,c);P(EB1,x);P(EB3,t);P(Nua,x);P(VDd,d);P(PrimLater,q);P(OnlyVirtualBase,k);P(TUser,z);
+printf("TBuf<long> %zu -1\nTBuf<char, 8> %zu -1\nTNode<double> %zu -1\nTNode<char> %zu -1\nTBuf<short, 2> %zu -1\n", sizeof(TBuf<long>), sizeof(TBuf<char, 8>), sizeof(TNode<double>), sizeof(TNode<char>), sizeof(TBuf<short, 2>));
 printf("EB2 %zu -1\nVBb %zu -1\n", sizeof(EB2), sizeof(VBb));
 }

@@ -2,6 +2,21 @@
 
 All notable changes to padlock are documented here.
 
+## [0.35.0] — 2026-10-23
+
+Generic types are analyzed **per concrete instantiation** instead of being skipped. Conformance: C++ 48/48, Rust 60/60, Go 36/36, Zig 53/53 (templates/generics included).
+
+### Added
+- **C++ class templates** are laid out once per instantiation used in the analyzed code: field types (`Buf<char, 8> b;`), `using B = Buf<int>;`, `template struct Buf<long>;` (explicit instantiation), nested arguments, and uses in **other files** of the same run (the defining file is re-parsed with those arguments). Type, non-type (`int N`) and defaulted parameters are bound (`class A = Alloc<T>` substitutes earlier arguments). Explicit specializations (`template<> struct Node<int> {…}`) are analyzed as concrete types and replace the primary template for those arguments; when a partial specialization exists, instantiations of the primary are marked uncertain. Variadic and template-template parameters still skip the template.
+- **Rust generic structs** (`struct Pair<A, B>`, const generics, defaults), **Go generic structs** (`type Pair[K comparable, V any] struct`) and **Zig type-returning functions** (`fn List(comptime T: type) type { return struct {…}; }`, comptime value parameters too) are instantiated the same way from their concrete uses (`Pair<u8, u64>`, `Pair[int, string]`, `List(u8)`, `const L = List(u8);`).
+- `[instantiate]` in `.padlock.toml` (also `[cpp.instantiate]`) names instantiations to analyze even when no code uses them: `Buf = ["char, 8", "int"]`. `// padlock:instantiate(...)` comments keep working.
+- Fields whose type is an instantiation resolve to its layout (`Name<args>` / `Name[args]` / `Name(args)`, canonical spacing).
+- A generic type with no instantiation anywhere is still skipped, with a note saying how to supply one.
+
+### Fixed
+- **C++ `using Name = Type;` aliases were ignored** (only C `typedef`s were resolved), so `using u32 = unsigned int;` fields were pointer-sized.
+- Template parameters bound to a struct name (`Tag = Empty`) are shown and resolved as that struct.
+
 ## [0.34.0] — 2026-10-23
 
 Conformance now also compares the **size** of `repr(Rust)` and plain Zig structs (previously not probed at all): Rust 55/55, Zig 50/50.

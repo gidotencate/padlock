@@ -127,7 +127,14 @@ fn zig_type_bit_width(ty: &str, arch: &'static ArchConfig) -> usize {
 
 // ── file-level context ────────────────────────────────────────────────────────
 
+/// Start and end byte of a node.
+type ByteRange = (usize, usize);
+/// A type-returning function's comptime parameters `(name, is_type)` and the
+/// byte range of the struct it returns.
+type GenericFn = (Vec<(String, bool)>, ByteRange);
+
 /// What a pre-pass learns about the file's own declarations.
+#[derive(Clone)]
 struct ZigCtx {
     arch: &'static ArchConfig,
     /// `const N = 8;` → name → expression text.
@@ -139,6 +146,15 @@ struct ZigCtx {
     /// Local `packed struct`s → their field type texts, so a packed struct nested
     /// in another packed struct contributes its exact bit width.
     packed: HashMap<String, Vec<String>>,
+    /// Type-returning functions `fn Pair(comptime A: type, comptime n: usize) type
+    /// { return struct {…}; }` → (parameters as `(name, is_type)`, byte range of
+    /// the returned `struct_declaration`).
+    generic_fns: HashMap<String, GenericFn>,
+    /// Identifiers that stand for a type text: bound comptime parameters, and
+    /// `const P = Pair(u8, 4);` aliases.
+    type_aliases: HashMap<String, String>,
+    /// Concrete calls `Pair(u8, 4)` of type-returning functions.
+    uses: Vec<(String, Vec<String>)>,
 }
 
 /// Bit width of a type inside a `packed struct`: arbitrary-width integers are
@@ -216,13 +232,33 @@ fn collect_zig_decls(source: &str, root: Node<'_>, arch: &'static ArchConfig) ->
         enums: HashMap::new(),
         containers: HashSet::new(),
         packed: HashMap::new(),
+        generic_fns: HashMap::new(),
+        type_aliases: HashMap::new(),
+        uses: Vec::new(),
     };
+    let mut all_params: Vec<String> = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         for i in (0..node.child_count()).rev() {
             if let Some(c) = node.child(i) {
                 stack.push(c);
             }
+        }
+        if node.kind() == "function_declaration" {
+            if let Some((name, generic)) = generic_fn_signature(source, node) {
+                all_params.extend(generic.0.iter().map(|(p, _)| p.clone()));
+                ctx.generic_fns.insert(name, generic);
+            }
+            continue;
+        }
+        if node.kind() == "call_expression"
+            && let Some((name, args)) = call_parts(source, node)
+        {
+            let entry = (name, args);
+            if !ctx.uses.contains(&entry) {
+                ctx.uses.push(entry);
+            }
+            continue;
         }
         if node.kind() != "variable_declaration" {
             continue;
@@ -262,10 +298,129 @@ fn collect_zig_decls(source: &str, root: Node<'_>, arch: &'static ArchConfig) ->
                 ctx.consts
                     .insert(name, node_text(source, *init).to_string());
             }
+            // `const P = Pair(u8, 4);` names an instantiation.
+            "call_expression" => {
+                if let Some((f, args)) = call_parts(source, *init) {
+                    ctx.type_aliases
+                        .insert(name, format!("{f}({})", args.join(", ")));
+                }
+            }
             _ => {}
         }
     }
+    // Calls inside a generic function that mention its parameters are not concrete;
+    // and only calls of type-returning functions are uses.
+    let generic_fns = ctx.generic_fns.clone();
+    ctx.uses.retain(|(f, args)| {
+        generic_fns.contains_key(f)
+            && !args.iter().any(|a| {
+                a.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|w| all_params.iter().any(|p| p == w))
+            })
+    });
     ctx
+}
+
+/// `fn Name(comptime A: type, …) type { return struct {…}; }` → its name,
+/// comptime parameters `(name, is_type)` and the returned struct's byte range.
+fn generic_fn_signature(source: &str, node: Node<'_>) -> Option<(String, GenericFn)> {
+    let name = node_text(source, node.child_by_field_name("name")?).to_string();
+    if node_text(source, node.child_by_field_name("type")?) != "type" {
+        return None;
+    }
+    let params_node = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .find(|c| c.kind() == "parameters")?;
+    let mut params = Vec::new();
+    for p in named_children(params_node) {
+        let comptime = (0..p.child_count())
+            .filter_map(|i| p.child(i))
+            .any(|c| c.kind() == "comptime");
+        let pname = node_text(source, p.child_by_field_name("name")?).to_string();
+        let ptype = p.child_by_field_name("type").map(|t| node_text(source, t));
+        if !comptime {
+            return None;
+        }
+        params.push((pname, ptype == Some("type")));
+    }
+    // The returned container: `return struct {…};` anywhere in the body.
+    let body = node.child_by_field_name("body")?;
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "return_expression"
+            && let Some(sd) = named_children(n)
+                .into_iter()
+                .find(|c| c.kind() == "struct_declaration")
+        {
+            return Some((name, (params, (sd.start_byte(), sd.end_byte()))));
+        }
+        for i in (0..n.child_count()).rev() {
+            if let Some(c) = n.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    None
+}
+
+/// `Pair(u8, 4)` → (`Pair`, [`u8`, `4`]).
+fn call_parts(source: &str, node: Node<'_>) -> Option<(String, Vec<String>)> {
+    let f = node.child_by_field_name("function")?;
+    if f.kind() != "identifier" {
+        return None;
+    }
+    let args = named_children(node)
+        .into_iter()
+        .filter(|c| c.id() != f.id())
+        .map(|c| super::c_cpp::normalize_type_text(node_text(source, c)))
+        .collect();
+    Some((node_text(source, f).to_string(), args))
+}
+
+/// Concrete calls of type-returning functions (`Pair(u8, 4)`) in a Zig source text.
+pub fn generic_uses(source: &str) -> Vec<(String, Vec<String>)> {
+    PARSER
+        .with(|p| p.borrow_mut().parse(source, None))
+        .map(|t| collect_zig_decls(source, t.root_node(), &padlock_core::arch::X86_64_SYSV).uses)
+        .unwrap_or_default()
+}
+
+thread_local! {
+    static TEXT_DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Size a type given as text (a bound comptime parameter), by parsing it as the
+/// type of a one-field probe struct.
+fn size_zig_type_text(text: &str, ctx: &ZigCtx) -> ZSized {
+    let ps = ctx.arch.pointer_size;
+    let depth = TEXT_DEPTH.with(|d| d.get());
+    if depth > 8 {
+        return ZSized {
+            uncertain: true,
+            ..ZSized::plain((ps, ps))
+        };
+    }
+    let probe = format!("const __padlock_probe = struct {{ x: {text} }};");
+    let Some(tree) = PARSER.with(|p| p.borrow_mut().parse(&probe, None)) else {
+        return ZSized::plain((ps, ps));
+    };
+    let mut stack = vec![tree.root_node()];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "container_field"
+            && let Some(t) = n.child_by_field_name("type")
+        {
+            TEXT_DEPTH.with(|d| d.set(depth + 1));
+            let r = type_node_size_align(&probe, t, ctx);
+            TEXT_DEPTH.with(|d| d.set(depth));
+            return r;
+        }
+        for i in (0..n.child_count()).rev() {
+            if let Some(c) = n.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    ZSized::plain((ps, ps))
 }
 
 fn eval_zig_len(expr: &str, ctx: &ZigCtx) -> Option<usize> {
@@ -294,6 +449,9 @@ fn type_node_size_align(source: &str, node: Node<'_>, ctx: &ZigCtx) -> ZSized {
         "builtin_type" => ZSized::plain(zig_type_size_align(node_text(source, node), arch)),
         "identifier" => {
             let text = node_text(source, node);
+            if let Some(bound) = ctx.type_aliases.get(text) {
+                return size_zig_type_text(bound, ctx);
+            }
             if let Some(backing) = ctx.enums.get(text) {
                 ZSized::plain(zig_type_size_align(backing, arch))
             } else if ctx.containers.contains(text) {
@@ -378,6 +536,14 @@ fn type_node_size_align(source: &str, node: Node<'_>, ctx: &ZigCtx) -> ZSized {
             }
             ZSized::plain((ps, ps))
         }
+        // `Pair(u8, 4)`: an instantiation, sized by the nested-struct resolver.
+        "call_expression" => match call_parts(source, node) {
+            Some((f, args)) if ctx.generic_fns.contains_key(&f) => ZSized {
+                named: Some((format!("{f}({})", args.join(", ")), 1)),
+                ..ZSized::plain((ps, ps))
+            },
+            _ => ZSized::plain((ps, ps)),
+        },
         _ => ZSized::plain((ps, ps)),
     }
 }
@@ -467,14 +633,79 @@ fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> V
         {
             layouts.push(layout);
         } else if node.kind() == "function_declaration" {
-            // Detect `fn Foo(comptime T: type) type { ... }` — a comptime-generic
-            // function returning a struct type.  These are invisible as named types
-            // and cannot be sized without knowing the type arguments.  Emit a note
-            // so users know the inner struct was seen but not analyzed.
-            note_comptime_generic_fn(source, node);
+            // `fn Foo(comptime T: type) type { return struct {…}; }` — a
+            // comptime-generic function returning a struct type. Lay it out once
+            // per concrete call `Foo(u32)`; note it as skipped when there is none.
+            let name = node
+                .child_by_field_name("name")
+                .map(|n| node_text(source, n).to_string());
+            match name
+                .as_ref()
+                .and_then(|n| ctx.generic_fns.get(n).map(|g| (n, g)))
+            {
+                Some((name, (params, range))) => {
+                    let found = instantiate_generic_fn(source, root, name, params, *range, &ctx);
+                    if found.is_empty() {
+                        note_comptime_generic_fn(source, node);
+                    }
+                    layouts.extend(found);
+                }
+                None => note_comptime_generic_fn(source, node),
+            }
         }
     }
     layouts
+}
+
+fn instantiate_generic_fn(
+    source: &str,
+    root: Node<'_>,
+    name: &str,
+    params: &[(String, bool)],
+    (start, end): (usize, usize),
+    ctx: &ZigCtx,
+) -> Vec<StructLayout> {
+    let Some(struct_node) = root
+        .descendant_for_byte_range(start, end)
+        .filter(|n| n.kind() == "struct_declaration")
+    else {
+        return Vec::new();
+    };
+    let mut arg_lists = crate::extra_instantiations(name);
+    arg_lists.extend(
+        ctx.uses
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, a)| a.clone()),
+    );
+    let mut out: Vec<StructLayout> = Vec::new();
+    for args in arg_lists {
+        let args: Vec<String> = args
+            .iter()
+            .map(|a| super::c_cpp::normalize_type_text(a))
+            .collect();
+        if args.len() != params.len() {
+            continue;
+        }
+        let inst_name = format!("{name}({})", args.join(", "));
+        if out.iter().any(|l| l.name == inst_name) {
+            continue;
+        }
+        let mut inst = ctx.clone();
+        for ((p, is_type), a) in params.iter().zip(&args) {
+            if *is_type {
+                inst.type_aliases.insert(p.clone(), a.clone());
+            } else {
+                inst.consts.insert(p.clone(), a.clone());
+            }
+        }
+        let line = struct_node.start_position().row as u32 + 1;
+        if let Some(layout) = parse_struct_declaration(source, struct_node, inst_name, &inst, line)
+        {
+            out.push(layout);
+        }
+    }
+    out
 }
 
 /// Emit a `record_skipped` note if `node` is a function that:
@@ -850,10 +1081,19 @@ fn parse_container_field(
                 field_name = Some(source[child.byte_range()].to_string());
             }
             "builtin_type" | "pointer_type" | "nullable_type" | "slice_type" | "array_type"
-            | "error_union" | "error_union_type" | "builtin_function" | "identifier" => {
+            | "error_union" | "error_union_type" | "builtin_function" | "identifier"
+            | "call_expression" => {
                 // A second identifier is a type name (e.g. a named struct or enum).
-                type_text = Some(node_text(source, child).to_string());
-                sized = Some(type_node_size_align(source, child, ctx));
+                let text = node_text(source, child);
+                let sz = type_node_size_align(source, child, ctx);
+                // A bound parameter or `const P = Pair(…)` alias is shown (and
+                // resolved) as what it stands for.
+                type_text = Some(match (&sz.named, ctx.type_aliases.get(text)) {
+                    (Some((n, 1)), _) => n.clone(),
+                    (_, Some(bound)) => bound.clone(),
+                    _ => text.to_string(),
+                });
+                sized = Some(sz);
             }
             // `align(N)` on a field overrides its natural alignment.
             "byte_alignment" => {

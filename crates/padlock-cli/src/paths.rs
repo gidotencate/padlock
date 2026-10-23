@@ -223,6 +223,8 @@ pub fn collect_layouts(
     // Persist updated cache entries.
     cache.flush();
 
+    instantiate_across_files(&mut all_layouts, &mut all_skipped, &analyzed);
+
     // Deduplicate layouts by (source_file, source_line, name): the same struct
     // parsed from the same file at the same line is a duplicate.  This happens
     // when a header is found via multiple overlapping scan paths or passed
@@ -238,6 +240,65 @@ pub fn collect_layouts(
     });
 
     Ok((all_layouts, analyzed, all_skipped))
+}
+
+/// Pass `[instantiate]` entries from `.padlock.toml` to the source frontends.
+pub fn apply_configured_instantiations(cfg: &padlock_core::config::Config) {
+    padlock_source::set_configured_instantiations(
+        cfg.instantiate
+            .iter()
+            .map(|(name, args)| (name.clone(), padlock_source::split_type_args(args)))
+            .collect(),
+    );
+}
+
+/// Generic types (C++ templates, …) skipped because their own file never
+/// instantiates them are instantiated with the uses found in the *other* source
+/// files of this run: every analyzed source file is scanned for uses, and each
+/// defining file is re-parsed (uncached) with those arguments.
+fn instantiate_across_files(
+    all_layouts: &mut Vec<StructLayout>,
+    all_skipped: &mut Vec<SkippedStruct>,
+    analyzed: &[String],
+) {
+    let pending: HashMap<String, Vec<String>> = all_skipped
+        .iter()
+        .filter(|s| padlock_source::skipped_for_lack_of_instantiation(s))
+        .filter_map(|s| Some((s.source_file.clone()?, s.name.clone())))
+        .fold(HashMap::new(), |mut m, (f, n)| {
+            m.entry(f).or_insert_with(Vec::new).push(n);
+            m
+        });
+    if pending.is_empty() {
+        return;
+    }
+    let wanted: std::collections::HashSet<&String> = pending.values().flatten().collect();
+    let uses: Vec<(String, Vec<String>)> = analyzed
+        .par_iter()
+        .filter_map(|f| {
+            let path = Path::new(f);
+            let lang = padlock_source::detect_language(path)?;
+            let text = std::fs::read_to_string(path).ok()?;
+            Some(padlock_source::generic_uses(&text, &lang))
+        })
+        .flatten()
+        .filter(|(name, _)| wanted.contains(name))
+        .collect();
+    if uses.is_empty() {
+        return;
+    }
+    padlock_source::set_discovered_instantiations(uses);
+    let arch = padlock_dwarf::reader::detect_arch_from_host();
+    for file in pending.keys() {
+        let Ok(output) = padlock_source::parse_source(Path::new(file), arch) else {
+            continue;
+        };
+        all_layouts.retain(|l| l.source_file.as_deref() != Some(file.as_str()));
+        all_skipped.retain(|s| s.source_file.as_deref() != Some(file.as_str()));
+        all_layouts.extend(output.layouts);
+        all_skipped.extend(output.skipped);
+    }
+    padlock_source::set_discovered_instantiations(Vec::new());
 }
 
 /// Walk `dir` recursively and return paths of all source files found.

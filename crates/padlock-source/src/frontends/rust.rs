@@ -73,6 +73,10 @@ struct RustCtx {
     local_structs: HashMap<String, LocalStruct>,
     /// Sizes of local structs computed so far (`None` while in progress).
     struct_sizes: std::cell::RefCell<HashMap<String, Option<(usize, usize)>>>,
+    /// Local structs with type/const parameters (instantiated per use).
+    generic_structs: HashSet<String>,
+    /// Concrete uses `Name<args>` of any path in the file (filtered by name later).
+    uses: Vec<(String, Vec<String>)>,
 }
 
 impl RustCtx {
@@ -86,15 +90,55 @@ impl RustCtx {
             depth: Cell::new(0),
             local_structs: HashMap::new(),
             struct_sizes: std::cell::RefCell::new(HashMap::new()),
+            generic_structs: HashSet::new(),
+            uses: Vec::new(),
         }
     }
 }
 
 struct ItemCollector<'a> {
     ctx: &'a mut RustCtx,
+    /// Every generic parameter name declared anywhere in the file: a use whose
+    /// arguments mention one is not concrete.
+    generic_params: Vec<String>,
 }
 
 impl<'ast> Visit<'ast> for ItemCollector<'_> {
+    fn visit_generics(&mut self, node: &'ast syn::Generics) {
+        for p in &node.params {
+            match p {
+                syn::GenericParam::Type(t) => self.generic_params.push(t.ident.to_string()),
+                syn::GenericParam::Const(c) => self.generic_params.push(c.ident.to_string()),
+                syn::GenericParam::Lifetime(_) => {}
+            }
+        }
+        syn::visit::visit_generics(self, node);
+    }
+
+    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        if let Some(seg) = node.path.segments.last()
+            && let syn::PathArguments::AngleBracketed(ab) = &seg.arguments
+        {
+            let args: Vec<String> = ab
+                .args
+                .iter()
+                .filter_map(|a| match a {
+                    syn::GenericArgument::Type(t) => Some(t.to_token_stream().to_string()),
+                    syn::GenericArgument::Const(c) => Some(c.to_token_stream().to_string()),
+                    _ => None,
+                })
+                .map(|t| super::c_cpp::normalize_type_text(&t))
+                .collect();
+            if !args.is_empty() {
+                let entry = (seg.ident.to_string(), args);
+                if !self.ctx.uses.contains(&entry) {
+                    self.ctx.uses.push(entry);
+                }
+            }
+        }
+        syn::visit::visit_type_path(self, node);
+    }
+
     fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
         self.ctx
             .consts
@@ -117,6 +161,9 @@ impl<'ast> Visit<'ast> for ItemCollector<'_> {
             .params
             .iter()
             .any(|p| matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_)));
+        if generic {
+            self.ctx.generic_structs.insert(node.ident.to_string());
+        }
         if !generic {
             self.ctx.local_types.insert(node.ident.to_string());
             let fields = match &node.fields {
@@ -272,6 +319,33 @@ fn rust_type_size_align(ty: &Type, ctx: &RustCtx) -> (usize, usize, TypeInfo) {
                 let r = rust_type_size_align(target, ctx);
                 ctx.depth.set(ctx.depth.get() - 1);
                 return r;
+            }
+
+            // `Foo<u32>` where `Foo` is a local generic struct: name the
+            // instantiation so the nested-struct resolver can size it.
+            if ctx.generic_structs.contains(&name)
+                && let Some(syn::PathArguments::AngleBracketed(ab)) = seg.map(|s| &s.arguments)
+            {
+                let args: Vec<String> = ab
+                    .args
+                    .iter()
+                    .filter_map(|a| match a {
+                        syn::GenericArgument::Type(t) => Some(t.to_token_stream().to_string()),
+                        syn::GenericArgument::Const(c) => Some(c.to_token_stream().to_string()),
+                        _ => None,
+                    })
+                    .map(|t| super::c_cpp::normalize_type_text(&t))
+                    .collect();
+                let ps = arch.pointer_size;
+                return (
+                    ps,
+                    ps,
+                    TypeInfo::Primitive {
+                        name: format!("{name}<{}>", args.join(", ")),
+                        size: ps,
+                        align: ps,
+                    },
+                );
             }
 
             // A local struct: size it directly (tuples and arrays need the number
@@ -919,16 +993,120 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
             .iter()
             .any(|p| matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_)));
         if has_non_lifetime_generics {
-            let name = node.ident.to_string();
-            crate::record_skipped(
-                &name,
-                "generic struct — layout depends on type arguments; \
-                 use binary analysis for accurate results",
-            );
+            self.instantiate_generic_struct(node);
             return;
         }
+        let layout = self.layout_struct(node, node.ident.to_string());
+        self.layouts.push(layout);
+    }
 
+    fn visit_item_enum(&mut self, node: &'ast ItemEnum) {
+        self.visit_item_enum_impl(node);
+    }
+}
+
+impl StructVisitor<'_> {
+    /// Lay out a generic struct once per concrete instantiation found in the file,
+    /// configured, or found in other files (`Name<args>` layouts). Skipped when
+    /// there is none.
+    fn instantiate_generic_struct(&mut self, node: &ItemStruct) {
         let name = node.ident.to_string();
+        // (param name, is const, default)
+        let params: Vec<(String, bool, Option<String>)> = node
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(t) => Some((
+                    t.ident.to_string(),
+                    false,
+                    t.default
+                        .as_ref()
+                        .map(|d| d.1.to_token_stream().to_string()),
+                )),
+                syn::GenericParam::Const(c) => Some((
+                    c.ident.to_string(),
+                    true,
+                    c.default
+                        .as_ref()
+                        .map(|d| d.1.to_token_stream().to_string()),
+                )),
+                syn::GenericParam::Lifetime(_) => None,
+            })
+            .collect();
+        let mut arg_lists: Vec<Vec<String>> = crate::extra_instantiations(&name);
+        arg_lists.extend(
+            self.ctx
+                .uses
+                .iter()
+                .filter(|(n, _)| *n == name)
+                .map(|(_, a)| a.clone()),
+        );
+        let mut done: Vec<String> = Vec::new();
+        for args in arg_lists {
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| super::c_cpp::normalize_type_text(a))
+                .collect();
+            let inst_name = format!("{name}<{}>", args.join(", "));
+            if done.contains(&inst_name) || args.len() > params.len() {
+                continue;
+            }
+            // Bind parameters (defaults fill missing trailing arguments).
+            let mut bound: Vec<(String, bool, String)> = Vec::new();
+            let mut ok = true;
+            for (i, (pname, is_const, default)) in params.iter().enumerate() {
+                match args.get(i).cloned().or_else(|| default.clone()) {
+                    Some(a) => bound.push((pname.clone(), *is_const, a)),
+                    None => ok = false,
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let mut saved_aliases = Vec::new();
+            let mut saved_consts = Vec::new();
+            for (pname, is_const, arg) in &bound {
+                if *is_const {
+                    saved_consts.push((
+                        pname.clone(),
+                        self.ctx.consts.insert(pname.clone(), arg.clone()),
+                    ));
+                } else if let Ok(ty) = syn::parse_str::<Type>(arg) {
+                    saved_aliases.push((pname.clone(), self.ctx.aliases.insert(pname.clone(), ty)));
+                }
+            }
+            let layout = self.layout_struct(node, inst_name.clone());
+            for (k, old) in saved_aliases {
+                match old {
+                    Some(v) => self.ctx.aliases.insert(k, v),
+                    None => self.ctx.aliases.remove(&k),
+                };
+            }
+            for (k, old) in saved_consts {
+                match old {
+                    Some(v) => self.ctx.consts.insert(k, v),
+                    None => self.ctx.consts.remove(&k),
+                };
+            }
+            // Bound parameters change sizes: forget memoised local sizes.
+            self.ctx.struct_sizes.borrow_mut().clear();
+            done.push(inst_name);
+            self.layouts.push(layout);
+        }
+        if done.is_empty() {
+            crate::record_skipped(
+                &name,
+                &format!(
+                    "generic struct — {} in the analyzed files; add an \
+                     `[instantiate]` entry in .padlock.toml or use binary analysis",
+                    crate::INSTANTIATION_HINT
+                ),
+            );
+        }
+    }
+
+    fn layout_struct(&self, node: &ItemStruct, name: String) -> StructLayout {
         let pack = packed_limit(&node.attrs);
         let forced_align = repr_align(&node.attrs);
 
@@ -987,10 +1165,10 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
         }
 
         crate::apply_compiler_order(&mut layout);
-        self.layouts.push(layout);
+        layout
     }
 
-    fn visit_item_enum(&mut self, node: &'ast ItemEnum) {
+    fn visit_item_enum_impl(&mut self, node: &ItemEnum) {
         syn::visit::visit_item_enum(self, node);
 
         // Skip enums with type or const parameters. Lifetime parameters don't
@@ -1183,10 +1361,44 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
 
 // ── public API ────────────────────────────────────────────────────────────────
 
+/// Concrete uses of generic types (`Name<args>`) in a Rust source text.
+pub fn generic_uses(source: &str) -> Vec<(String, Vec<String>)> {
+    let Ok(file) = syn::parse_str::<syn::File>(source) else {
+        return Vec::new();
+    };
+    let mut ctx = RustCtx::new(&padlock_core::arch::X86_64_SYSV);
+    let mut collector = ItemCollector {
+        ctx: &mut ctx,
+        generic_params: Vec::new(),
+    };
+    collector.visit_file(&file);
+    let params = std::mem::take(&mut collector.generic_params);
+    ctx.uses
+        .into_iter()
+        .filter(|(_, args)| {
+            !args.iter().any(|a| {
+                a.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|w| params.iter().any(|p| p == w))
+            })
+        })
+        .collect()
+}
+
 pub fn parse_rust(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let file: syn::File = syn::parse_str(source)?;
     let mut ctx = RustCtx::new(arch);
-    ItemCollector { ctx: &mut ctx }.visit_file(&file);
+    let mut collector = ItemCollector {
+        ctx: &mut ctx,
+        generic_params: Vec::new(),
+    };
+    collector.visit_file(&file);
+    let params = std::mem::take(&mut collector.generic_params);
+    ctx.uses.retain(|(_, args)| {
+        !args.iter().any(|a| {
+            a.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|w| params.iter().any(|p| p == w))
+        })
+    });
     let mut visitor = StructVisitor {
         ctx,
         layouts: Vec::new(),

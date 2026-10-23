@@ -466,12 +466,21 @@ fn cpp_virtual_bases(
 /// nothing when empty; `nvsize` for a non-POD class (its tail padding is
 /// reusable); the full size otherwise. Unknown classes keep a pointer-sized
 /// placeholder.
-fn cpp_subobject(name: &str, views: &HashMap<String, CppView>, ps: usize) -> (usize, usize, bool) {
+fn cpp_subobject(
+    name: &str,
+    views: &HashMap<String, CppView>,
+    ps: usize,
+    msvc: bool,
+) -> (usize, usize, bool) {
     let Some(v) = views.get(name) else {
         return (ps, ps, false);
     };
     if cpp_empty(name, views, 0) {
         return (0, 1, true);
+    }
+    // MSVC never lays a derived class's members into a base's tail padding.
+    if msvc {
+        return (v.size, v.align, true);
     }
     let non_pod = v
         .info
@@ -521,6 +530,7 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
             continue;
         };
         let ps = layout.arch.pointer_size;
+        let msvc = layout.arch.name.ends_with("msvc");
         let mut slots = Vec::new();
         let non_virtual: Vec<&padlock_core::ir::CppBase> =
             info.bases.iter().filter(|b| !b.is_virtual).collect();
@@ -528,7 +538,7 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
             .iter()
             .position(|b| cpp_dynamic(&b.name, &views, 0));
         if let Some(p) = primary {
-            let (sz, al, _) = cpp_subobject(&non_virtual[p].name, &views, ps);
+            let (sz, al, _) = cpp_subobject(&non_virtual[p].name, &views, ps, msvc);
             slots.push(cpp_slot(
                 format!("__base_{}", non_virtual[p].name),
                 &non_virtual[p].name,
@@ -542,7 +552,7 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
             if Some(i) == primary {
                 continue;
             }
-            let (sz, al, _) = cpp_subobject(&b.name, &views, ps);
+            let (sz, al, _) = cpp_subobject(&b.name, &views, ps, msvc);
             slots.push(cpp_slot(format!("__base_{}", b.name), &b.name, sz, al));
         }
         let mut members: Vec<padlock_core::ir::Field> = layout
@@ -559,7 +569,7 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
                 TypeInfo::Primitive { name, .. } | TypeInfo::Opaque { name, .. } => name.clone(),
                 _ => continue,
             };
-            if let (sz, al, true) = cpp_subobject(&ty_name, &views, ps) {
+            if let (sz, al, true) = cpp_subobject(&ty_name, &views, ps, msvc) {
                 m.size = sz;
                 m.align = al;
             }

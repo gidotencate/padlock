@@ -185,7 +185,12 @@ fn is_apple_binary(file: &object::File<'_>) -> bool {
 /// Return the architecture of the machine running padlock.
 /// Used when analysing source files (no binary available to inspect).
 pub fn detect_arch_from_host() -> &'static ArchConfig {
-    #[cfg(target_arch = "x86_64")]
+    // Source files on a Windows (MSVC) host are laid out with the MSVC ABI.
+    #[cfg(all(target_arch = "x86_64", target_env = "msvc"))]
+    {
+        &padlock_core::arch::X86_64_MSVC
+    }
+    #[cfg(all(target_arch = "x86_64", not(target_env = "msvc")))]
     {
         &X86_64_SYSV
     }

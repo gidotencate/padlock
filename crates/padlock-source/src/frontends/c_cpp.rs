@@ -115,9 +115,18 @@ fn c_int_size(arch: &ArchConfig) -> usize {
     if arch.pointer_size <= 2 { 2 } else { 4 }
 }
 
-/// `long`: 8 on LP64 targets, 4 on ILP32 and 16-bit ones.
+/// `long`: 8 on LP64 targets, 4 on ILP32, LLP64 (Windows/MSVC) and 16-bit ones.
 fn c_long_size(arch: &ArchConfig) -> usize {
-    if arch.pointer_size >= 8 { 8 } else { 4 }
+    if arch.pointer_size >= 8 && !is_msvc(arch) {
+        8
+    } else {
+        4
+    }
+}
+
+/// The Microsoft x64 ABI (MSVC / clang-cl).
+fn is_msvc(arch: &ArchConfig) -> bool {
+    arch.name.ends_with("msvc")
 }
 
 /// `long double`: x87 80-bit (16 bytes on x86-64, 12 on i386), IEEE quad (16) on
@@ -126,7 +135,7 @@ fn c_long_size(arch: &ArchConfig) -> usize {
 fn c_long_double(arch: &ArchConfig) -> (usize, usize) {
     match arch.name {
         "x86" => (12, 4),
-        "aarch64-apple" | "cortex_m" | "cortex_m4" => (8, 8),
+        "aarch64-apple" | "cortex_m" | "cortex_m4" | "x86_64-msvc" => (8, 8),
         "avr" => (4, 1),
         _ => (16, 16),
     }
@@ -585,7 +594,7 @@ fn c_type_size_align_uncapped(ty: &str, arch: &'static ArchConfig) -> (usize, us
         // C/C++ character types
         // wchar_t: 4B on Linux/macOS (GCC/Clang POSIX), 2B on Windows/MSVC.
         // All current padlock arch configs are POSIX, so 4B is correct here.
-        "wchar_t" if arch.name == "avr" => (2, 2),
+        "wchar_t" if arch.name == "avr" || is_msvc(arch) => (2, 2),
         "wchar_t" => (4, 4),
         "char8_t" => (1, 1),
         "char16_t" => (2, 2),
@@ -1096,6 +1105,12 @@ fn resolve_bitfield_groups(
     pack_n: usize,
     is_union: bool,
 ) -> (Vec<RawField>, usize) {
+    if is_msvc(arch) {
+        return (
+            resolve_bitfield_units_msvc(raw_fields, aliases, arch, is_union),
+            1,
+        );
+    }
     struct Seg {
         start_bit: u64,
         parts: Vec<String>,
@@ -1217,6 +1232,62 @@ fn resolve_bitfield_groups(
         flush(&mut seg, c, &mut byte_off, &mut result);
     }
     (result, struct_align)
+}
+
+/// MSVC bit-field layout: consecutive bit-fields share a storage unit only while
+/// their declared types have the same size and the unit has room; each unit is
+/// a field of the declared type (so it is aligned and padded like one). A
+/// zero-width bit-field ends the unit.
+fn resolve_bitfield_units_msvc(
+    raw_fields: Vec<RawField>,
+    aliases: &HashMap<String, String>,
+    arch: &'static ArchConfig,
+    is_union: bool,
+) -> Vec<RawField> {
+    let mut result: Vec<RawField> = Vec::new();
+    // (base type, unit bytes, bits used, member labels, first line)
+    let mut unit: Option<(String, usize, usize, Vec<String>, u32)> = None;
+    let flush = |unit: &mut Option<(String, usize, usize, Vec<String>, u32)>,
+                 result: &mut Vec<RawField>| {
+        if let Some((ty, _, _, parts, line)) = unit.take() {
+            let name = if parts.is_empty() {
+                "[__pad]".to_string()
+            } else {
+                format!("[{}]", parts.join("|"))
+            };
+            result.push((name, ty, None, None, line));
+        }
+    };
+    for (fname, ty, guard, alignas, line) in raw_fields {
+        if !is_bitfield_type(&ty) {
+            flush(&mut unit, &mut result);
+            result.push((fname, ty, guard, alignas, line));
+            continue;
+        }
+        let base = strip_bitfield_suffix(&ty).to_string();
+        let width: usize = ty[ty.rfind(':').unwrap() + 1..].trim().parse().unwrap_or(0);
+        let (sizing, _) = resolve_field_type(&base, aliases, arch);
+        let bytes = c_type_size_align(&sizing, arch).0.max(1);
+        if width == 0 {
+            flush(&mut unit, &mut result);
+            continue;
+        }
+        let fits = unit
+            .as_ref()
+            .is_some_and(|(_, ub, used, _, _)| *ub == bytes && used + width <= bytes * 8);
+        if is_union || !fits {
+            flush(&mut unit, &mut result);
+            unit = Some((base, bytes, 0, Vec::new(), line));
+        }
+        if let Some((_, _, used, parts, _)) = unit.as_mut() {
+            *used += width;
+            if !fname.is_empty() {
+                parts.push(format!("{fname}:{width}"));
+            }
+        }
+    }
+    flush(&mut unit, &mut result);
+    result
 }
 
 /// Simulate C/C++ struct layout given ordered fields.
@@ -5229,5 +5300,25 @@ struct S {
         assert!(
             matches!(&l.fields[1].ty, TypeInfo::Primitive { name, .. } if name == "_BitInt(7)")
         );
+    }
+
+    #[test]
+    fn msvc_abi_long_wchar_and_bitfield_units() {
+        use padlock_core::arch::X86_64_MSVC;
+        let parse = |src: &str| {
+            crate::parse_source_str(src, &crate::SourceLanguage::C, &X86_64_MSVC)
+                .unwrap()
+                .remove(0)
+        };
+        // clang -triple x86_64-pc-windows-msvc: long is 4, wchar_t 2.
+        let l = parse("struct L { char a; long b; wchar_t w; long double d; };");
+        assert_eq!(offset(&l, "b"), 4);
+        assert_eq!(offset(&l, "w"), 8);
+        assert_eq!(offset(&l, "d"), 16);
+        assert_eq!(l.total_size, 24);
+        // Bit-fields of different types never share a unit: sizeof == 12.
+        let b = parse("struct B { unsigned a:3; unsigned b:5; char c; short d:4; int e:2; };");
+        assert_eq!(b.total_size, 12);
+        assert_eq!(offset(&b, "c"), 4);
     }
 }

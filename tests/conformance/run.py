@@ -143,6 +143,48 @@ def cross_truth(src, target, tmp):
             offs[m.group(1)] = (size - 1, m.group(2))
     return {t: (sizes[t], offs[t][0], offs[t][1]) for t in sizes if t in offs}, path
 
+def clang_layouts(src_text, triple, tmp, preprocess_target):
+    """`{name: (size, {field: offset})}` from clang's own record-layout dump
+    (`-fdump-record-layouts`) for `triple`; works for targets nothing here can run
+    or read (MSVC / COFF). Headers come from `preprocess_target`'s libc. Structs
+    the target rejects (e.g. a 40-bit `long` bit-field on LLP64) are dropped."""
+    zig = os.environ.get("ZIG", "zig")
+    lines = src_text.splitlines()
+    for _ in range(12):
+        raw = os.path.join(tmp, "raw.c")
+        open(raw, "w").write("\n".join(lines) + "\n")
+        pp = os.path.join(tmp, "pp.c")
+        r = sh([zig, "cc", "-target", preprocess_target, "-E", "-P", raw, "-o", pp])
+        if r.returncode != 0:
+            sys.exit(f"preprocessing for {triple} failed:\n{r.stderr[-2000:]}")
+        r = sh([zig, "clang", "-cc1", "-triple", triple, "-fdump-record-layouts",
+                "-emit-llvm", "-o", os.devnull, "-w", pp])
+        if r.returncode == 0:
+            break
+        pp_lines = open(pp).read().splitlines()
+        bad = set()
+        for ln in re.findall(r"pp\.c:(\d+):\d+: error", r.stderr):
+            bad |= set(re.findall(r"struct (\w+)", pp_lines[int(ln) - 1]))
+        if not bad:
+            sys.exit(f"clang layout dump for {triple} failed:\n{r.stderr[-2000:]}")
+        lines = [l for l in lines if not any(re.search(rf"\bstruct {b}\b", l) for b in bad)]
+    out = {}
+    cur = None
+    for line in r.stdout.splitlines():
+        m = re.match(r"^\s+0 \| (?:struct|union|class) (\S+)$", line)
+        if m:
+            cur = m.group(1); out[cur] = [None, {}]; continue
+        if cur is None:
+            continue
+        m = re.search(r"\|\s+\[sizeof=(\d+)", line)
+        if m:
+            out[cur][0] = int(m.group(1)); cur = None; continue
+        # Direct members are indented by exactly 3 spaces after `|`.
+        m = re.match(r"^\s+(\d+)(?::\d+-\d+)? \|   (?! )(.+?) (\w+)$", line)
+        if m:
+            out[cur][1].setdefault(m.group(3), int(m.group(1)))
+    return out
+
 def short_name(name):
     """`main.Arr` / `layout::Arr` / `layout.Arr` → `Arr` (DWARF names carry the module);
     spaces are dropped so `GPair[int8,int64]` matches `GPair[int8, int64]`."""
@@ -265,6 +307,39 @@ def main():
                     else:
                         print(f"[{tag}] FAIL  {name}: {detail}"); failures.append(key)
             print(f"[{tag}] {len(t) - bad}/{len(t)} match the compiler")
+        # Windows x64 (MSVC ABI), from clang's record-layout dump.
+        text = open(src).read()
+        head = text[: text.index("#define P(T,L)")]
+        head = head.replace("#include <stdio.h>", "")
+        calls = re.findall(r"P\((\w+),\s*(\w+)\)", text[text.index("int main"):])
+        probe = head + "".join(f"struct {t} __pl_{t};\n" for t, _ in calls)
+        tag = "msvc-c"
+        with tempfile.TemporaryDirectory() as tmp:
+            dump = clang_layouts(probe, "x86_64-pc-windows-msvc", tmp, "x86_64-windows-gnu")
+            ppath = os.path.join(tmp, "probe.c")
+            open(ppath, "w").write(probe)
+            got = padlock_layouts(a.padlock, ppath, "x86_64-msvc")
+        bad = 0
+        for t, l in calls:
+            if t not in dump or dump[t][0] is None or l not in dump[t][1]:
+                continue
+            sz, off = dump[t][0], dump[t][1][l]
+            g = got.get(t)
+            rows = g["rows"] if g else []
+            o = next((o for o, n in rows if n == l), None)
+            ok = bool(g) and g.get("size") == sz and o == off
+            key = f"{tag}:{t}"
+            if ok and key in xfail:
+                print(f"[{tag}] XPASS {t} (remove from xfail.txt)"); failures.append(key + " XPASS")
+            elif not ok:
+                bad += 1; newx.append(key)
+                detail = f"truth {sz}/{off} padlock {g.get('size') if g else 'missing'}/{o}"
+                if key in xfail:
+                    print(f"[{tag}] xfail {t}: {detail}")
+                else:
+                    print(f"[{tag}] FAIL  {t}: {detail}"); failures.append(key)
+        n = sum(1 for t, l in calls if t in dump and dump[t][0] is not None and l in dump[t][1])
+        print(f"[{tag}] {n - bad}/{n} match the compiler")
         # Go and Zig probes for 32-bit x86 run natively on an x86-64 host.
         for lang, cross, arch in [("go", "386", "x86"), ("zig", "x86-linux", "x86")]:
             if not have(lang):

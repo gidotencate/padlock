@@ -2,6 +2,12 @@
 
 All notable changes to padlock are documented here.
 
+## [0.43.0] — 2026-10-23
+
+### Added
+- **Windows x64 / MSVC ABI** (`--target x86_64-msvc`, `x86_64-pc-windows-msvc`, `msvc`, `windows`; the default for sources on a Windows MSVC host): `long` is 4 bytes (LLP64), `wchar_t` 2, `long double` 8, bit-fields of different declared types never share a storage unit (each unit is laid out like a field of its type), and C++ derived classes never reuse a base's tail padding. `x86_64-pc-windows-gnu` keeps the SysV layout.
+- Conformance `--cross` checks the MSVC ABI against clang's own record-layout dump (`-fdump-record-layouts`, `-triple x86_64-pc-windows-msvc`): 47/47.
+
 ## [0.42.0] — 2026-10-23
 
 The conformance harness gained `--cross`: C layouts for aarch64, riscv64, x86 (i386), Cortex-M4, Cortex-M0 and AVR (compiled with `zig cc`; truth read from symbol sizes), and Go/Zig on 32-bit x86. Before the fixes: x86 C 40/46, Cortex-M0 C and AVR C 0 (crash), x86 Go 26/36, x86 Zig 40/53. Now all match.

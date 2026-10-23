@@ -2,6 +2,14 @@
 
 All notable changes to padlock are documented here.
 
+## [0.38.0] — 2026-10-23
+
+### Fixed
+- **C23 `_BitInt(N)` fields were silently dropped** — tree-sitter-c/cpp do not know the type and error-recovered the declaration away. `_BitInt(N)` / `unsigned _BitInt(N)` / `signed _BitInt(N)` are now parsed and sized per the x86-64/AArch64 psABIs (1/2/4/8 bytes; wider ones in 8-byte chunks on x86-64, 16-byte chunks on AArch64).
+
+### Added
+- Conformance language `c23`, compiled with `zig cc -std=c23` (gcc < 14 has no `_BitInt`).
+
 ## [0.37.0] — 2026-10-23
 
 ### Changed

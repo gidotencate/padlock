@@ -142,6 +142,33 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     {
         return (n, 1);
     }
+    // C23 `_BitInt(N)` (rewritten to `__bitintN…` before parsing): the x86-64 and
+    // AArch64 psABIs round up to 1/2/4/8 bytes, beyond 64 bits to whole 8-byte
+    // (x86-64) or 16-byte (AArch64) chunks aligned to that chunk.
+    if let Some(bits) = ty
+        .strip_prefix("__ubitint")
+        .or_else(|| ty.strip_prefix("__bitint"))
+        .map(|r| r.trim_end_matches('_'))
+        .or_else(|| {
+            ty.strip_prefix("_BitInt(")
+                .and_then(|r| r.strip_suffix(')'))
+                .map(str::trim)
+        })
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        let bytes = bits.div_ceil(8).max(1);
+        return if bytes <= 8 {
+            let size = bytes.next_power_of_two();
+            (size, size)
+        } else {
+            let chunk = if arch.name.starts_with("aarch64") {
+                16
+            } else {
+                8
+            };
+            (bytes.next_multiple_of(chunk), chunk)
+        };
+    }
     // C++ pointer-to-member-function: two words (function pointer + `this` adjustment).
     if ty == "__memfn_ptr" {
         return (arch.pointer_size * 2, arch.pointer_size);
@@ -3015,6 +3042,14 @@ fn parse_field_declarations(
     if base_ty.is_empty() {
         return Vec::new();
     }
+    // Undo the `_BitInt(N)` parsing workaround for display (see `rewrite_bitint`).
+    for (prefix, spelled) in [("__ubitint", "unsigned _BitInt"), ("__bitint", "_BitInt")] {
+        if let Some(rest) = base_ty.strip_prefix(prefix) {
+            let bits = rest.trim_end_matches('_').to_string();
+            base_ty = format!("{spelled}({bits})");
+            break;
+        }
+    }
     // `double _Complex z;` — tree-sitter drops the `_Complex` specifier.
     let field_src = source[node.byte_range()].to_string();
     if (field_src.contains("_Complex") || field_src.contains("__complex__"))
@@ -3097,7 +3132,60 @@ pub fn template_uses(source: &str) -> Vec<(String, Vec<String>)> {
         .unwrap_or_default()
 }
 
+/// tree-sitter-c/cpp do not know C23 `_BitInt(N)`; rewrite each use (with an
+/// optional `unsigned`/`signed`) to a same-length identifier `__bitintN_…` /
+/// `__ubitintN_…`, so byte offsets stay valid. `c_type_size_align` sizes those.
+fn rewrite_bitint(source: &str) -> std::borrow::Cow<'_, str> {
+    if !source.contains("_BitInt") {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    let mut out = source.to_string();
+    let mut search = 0;
+    while let Some(rel) = out[search..].find("_BitInt") {
+        let at = search + rel;
+        let after = &out[at + "_BitInt".len()..];
+        let open = after.len() - after.trim_start().len();
+        let rest = after.trim_start();
+        let (Some(inner), true) = (
+            rest.strip_prefix('(')
+                .and_then(|r| r.split_once(')'))
+                .map(|(n, _)| n),
+            rest.starts_with('('),
+        ) else {
+            search = at + 1;
+            continue;
+        };
+        let Ok(bits) = inner.trim().parse::<u32>() else {
+            search = at + 1;
+            continue;
+        };
+        let end = at + "_BitInt".len() + open + 1 + inner.len() + 1;
+        // Absorb a preceding `unsigned` / `signed` keyword.
+        let before = out[..at].trim_end();
+        let (start, unsigned) = if before.ends_with("unsigned") {
+            (before.len() - "unsigned".len(), true)
+        } else if before.ends_with("signed") {
+            (before.len() - "signed".len(), false)
+        } else {
+            (at, false)
+        };
+        let mut ident = format!("{}{bits}", if unsigned { "__ubitint" } else { "__bitint" });
+        let width = end - start;
+        if ident.len() > width {
+            search = at + 1;
+            continue;
+        }
+        while ident.len() < width {
+            ident.push('_');
+        }
+        out.replace_range(start..end, &ident);
+        search = start + width;
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
+    let source = &*rewrite_bitint(source);
     let tree = C_PARSER
         .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
@@ -3107,6 +3195,7 @@ pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<St
 }
 
 pub fn parse_cpp(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
+    let source = &*rewrite_bitint(source);
     let tree = CPP_PARSER
         .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
@@ -4978,5 +5067,22 @@ struct S {
         let d: Vec<_> = ls.iter().filter(|l| l.name == "D").collect();
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].total_size, 2);
+    }
+
+    #[test]
+    fn c23_bitint_fields_are_sized() {
+        // clang (zig cc -std=c23): sizeof == 40, e at 32.
+        let l = layout_of(
+            "struct B { char a; _BitInt(7) b; unsigned _BitInt(33) c; _BitInt(128) d; char e; };",
+            "B",
+            false,
+        );
+        assert_eq!(offset(&l, "c"), 8);
+        assert_eq!(offset(&l, "d"), 16);
+        assert_eq!(offset(&l, "e"), 32);
+        assert_eq!(l.total_size, 40);
+        assert!(
+            matches!(&l.fields[1].ty, TypeInfo::Primitive { name, .. } if name == "_BitInt(7)")
+        );
     }
 }

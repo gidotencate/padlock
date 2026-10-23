@@ -201,6 +201,8 @@ mod tests {
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
             uncertain_fields: Vec::new(),
+            forced_align: None,
+            pack_limit: None,
         }
     }
 

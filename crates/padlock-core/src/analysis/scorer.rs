@@ -133,6 +133,8 @@ mod tests {
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
             uncertain_fields: Vec::new(),
+            forced_align: None,
+            pack_limit: None,
         };
         assert!((score(&layout) - 100.0).abs() < 1e-9);
     }
@@ -196,6 +198,8 @@ mod tests {
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
             uncertain_fields: Vec::new(),
+            forced_align: None,
+            pack_limit: None,
         };
         let bd = score_with_breakdown(&layout);
         assert_eq!(bd.false_sharing_deduction, 0.0);

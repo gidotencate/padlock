@@ -140,6 +140,18 @@ pub struct StructLayout {
     /// inaccurate. For precise sizing use binary analysis or `--go-types`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uncertain_fields: Vec<String>,
+
+    /// Minimum alignment imposed on the struct itself (`alignas(N)`,
+    /// `__attribute__((aligned(N)))`, `repr(align(N))`, a bit-field's declared
+    /// type). Kept so that re-laying-out the struct after nested types are
+    /// resolved does not lose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced_align: Option<usize>,
+
+    /// `#pragma pack(N)` / `repr(packed(N))` cap on member alignment (`N > 1`;
+    /// `N == 1` is `is_packed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -299,6 +311,8 @@ pub mod test_fixtures {
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
             uncertain_fields: Vec::new(),
+            forced_align: None,
+            pack_limit: None,
         }
     }
 
@@ -360,6 +374,8 @@ pub mod test_fixtures {
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
             uncertain_fields: Vec::new(),
+            forced_align: None,
+            pack_limit: None,
         }
     }
 

@@ -1180,6 +1180,8 @@ fn simulate_layout(
         is_repr_rust: false,
         suppressed_findings: Vec::new(),
         uncertain_fields: Vec::new(),
+        forced_align: None,
+        pack_limit: None,
     }
 }
 
@@ -1215,6 +1217,8 @@ fn simulate_union_layout(
         is_repr_rust: false,
         suppressed_findings: Vec::new(),
         uncertain_fields: Vec::new(),
+        forced_align: None,
+        pack_limit: None,
     }
 }
 
@@ -1348,6 +1352,9 @@ fn parse_class_specifier(
 
     apply_min_align(&mut layout, bf_align, pack_n);
     apply_min_align(&mut layout, struct_alignas.unwrap_or(1), pack_n);
+    let forced = bf_align.max(struct_alignas.unwrap_or(1));
+    layout.forced_align = (forced > 1).then_some(forced);
+    layout.pack_limit = (pack_n > 1).then_some(pack_n);
 
     mark_uncertain_arrays(&mut layout);
     layout.uncertain_fields.extend(pp_labels);
@@ -1890,6 +1897,9 @@ fn parse_struct_or_union_specifier(
     // Apply struct-level alignas: the struct's alignment requirement is at
     // least N; trailing padding may grow to satisfy the new alignment.
     apply_min_align(&mut layout, struct_alignas.unwrap_or(1), pack_n);
+    let forced = bf_align.max(struct_alignas.unwrap_or(1));
+    layout.forced_align = (forced > 1).then_some(forced);
+    layout.pack_limit = (pack_n > 1).then_some(pack_n);
 
     mark_uncertain_arrays(&mut layout);
     layout.uncertain_fields.extend(pp_labels);
@@ -2846,6 +2856,8 @@ typedef struct {
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
             uncertain_fields: Vec::new(),
+            forced_align: None,
+            pack_limit: None,
         };
         assert!(padlock_core::analysis::false_sharing::has_false_sharing(
             &layout

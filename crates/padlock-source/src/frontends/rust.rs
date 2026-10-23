@@ -827,6 +827,8 @@ fn simulate_rust_layout(
         is_repr_rust: false, // callers override this after construction
         suppressed_findings: Vec::new(), // callers may override after construction
         uncertain_fields,
+        forced_align,
+        pack_limit: pack.filter(|n| *n > 1),
     }
 }
 
@@ -1007,6 +1009,8 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
                     enum_line,
                 ),
                 uncertain_fields: Vec::new(),
+                forced_align: None,
+                pack_limit: None,
             };
             self.layouts.push(layout);
             return;
@@ -1103,6 +1107,8 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
                 enum_line,
             ),
             uncertain_fields: Vec::new(),
+            forced_align: None,
+            pack_limit: None,
         });
     }
 }

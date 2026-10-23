@@ -2,6 +2,15 @@
 
 All notable changes to padlock are documented here.
 
+## [0.30.0] — 2026-10-23
+
+### Fixed
+- **Struct-level alignment and packing were lost whenever a struct contained another struct.** After nested types are sized, the resolver re-lays-out the parent from its fields alone, dropping `alignas(N)` / `__attribute__((aligned(N)))` / `repr(align(N))`, bit-field-imposed alignment, and `#pragma pack(N)` / `repr(packed(N))`. `struct alignas(64) A { In i; char c; }` came out as 12 bytes instead of 64, and a `#pragma pack(2)` struct as 24 instead of 18. `StructLayout` now records `forced_align` and `pack_limit`, and re-layout honours them.
+- **Zig packed structs nested in packed structs** were counted as pointer-sized bytes; they now contribute their exact bit width (enums too), so `packed struct { x: In, y: u8, z: In }` with a 5-bit `In` is a `u18` (4 bytes).
+
+### Changed
+- `StructLayout` gained two optional fields (`forced_align`, `pack_limit`, omitted from JSON when unset).
+
 ## [0.29.0] — 2026-10-23
 
 ### Fixed

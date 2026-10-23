@@ -343,11 +343,12 @@ fn resimulate_layout(layout: &mut StructLayout) {
     }
 
     let packed = layout.is_packed;
+    let cap = if packed { Some(1) } else { layout.pack_limit };
     let mut offset = 0usize;
     let mut struct_align = 1usize;
 
     for field in layout.fields.iter_mut() {
-        let eff_align = if packed { 1 } else { field.align };
+        let eff_align = cap.map_or(field.align, |c| field.align.min(c));
         if eff_align > 0 {
             offset = offset.next_multiple_of(eff_align);
         }
@@ -356,7 +357,12 @@ fn resimulate_layout(layout: &mut StructLayout) {
         struct_align = struct_align.max(eff_align);
     }
 
-    if !packed && struct_align > 0 {
+    // `alignas(N)` / `repr(align(N))` / a Zig packed struct's backing integer:
+    // the struct's own alignment survives re-layout, and pads even a packed struct.
+    if let Some(fa) = layout.forced_align {
+        struct_align = struct_align.max(fa);
+    }
+    if (!packed || layout.forced_align.is_some()) && struct_align > 0 {
         offset = offset.next_multiple_of(struct_align);
     }
 
@@ -873,5 +879,46 @@ struct Shared {
 "#;
         let layouts = parse_source_str(src, &SourceLanguage::Cpp, &X86_64_SYSV).unwrap();
         assert!(concurrency::has_concurrent_fields(&layouts[0]));
+    }
+
+    // ── re-layout after nested resolution keeps struct-level attributes ──────
+
+    fn find<'a>(ls: &'a [StructLayout], name: &str) -> &'a StructLayout {
+        ls.iter().find(|l| l.name == name).unwrap()
+    }
+
+    #[test]
+    fn nested_resolution_keeps_alignas_and_pragma_pack() {
+        let src = "struct In { char x; int y; };
+struct alignas(64) A { In i; char c; };
+#pragma pack(push, 2)
+struct P { char a; In i; long l; };
+#pragma pack(pop)";
+        let ls =
+            parse_source_str(src, &SourceLanguage::Cpp, &padlock_core::arch::X86_64_SYSV).unwrap();
+        // g++: sizeof(A) == 64, sizeof(P) == 18
+        assert_eq!(find(&ls, "A").total_size, 64);
+        assert_eq!(find(&ls, "P").total_size, 18);
+    }
+
+    #[test]
+    fn nested_resolution_keeps_repr_align_and_packed_n() {
+        let src = "#[repr(C)] struct In { x: u8, y: u32 }
+#[repr(C, align(64))] struct A { i: In, c: u8 }
+#[repr(C, packed(2))] struct P { a: u8, i: In, l: u64 }";
+        let ls =
+            parse_source_str(src, &SourceLanguage::Rust, &padlock_core::arch::X86_64_SYSV).unwrap();
+        assert_eq!(find(&ls, "A").total_size, 64);
+        assert_eq!(find(&ls, "P").total_size, 18);
+    }
+
+    #[test]
+    fn zig_packed_struct_nested_in_packed_struct_counts_bits() {
+        let src = "const In = packed struct { a: u3, b: u2 };
+const P = packed struct { x: In, y: u8, z: In };";
+        let ls =
+            parse_source_str(src, &SourceLanguage::Zig, &padlock_core::arch::X86_64_SYSV).unwrap();
+        // 5 + 8 + 5 = 18 bits → u18 → 4 bytes (zig @sizeOf)
+        assert_eq!(find(&ls, "P").total_size, 4);
     }
 }

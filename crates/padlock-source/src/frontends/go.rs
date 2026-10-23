@@ -674,6 +674,8 @@ fn parse_struct_type(
             decl_start_byte,
         ),
         uncertain_fields,
+        forced_align: None,
+        pack_limit: None,
     })
 }
 

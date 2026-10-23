@@ -56,9 +56,11 @@ enum One { Only }
 #[repr(C)] struct EnumF { a: u8, e: E16, o: One, c: u8 }
 #[repr(C)] struct CStr { a: u8, s: std::ffi::CString, c: u8 }
 #[repr(C)] struct TupNest { a: u8, t: ((u8, u16), u32, [u8; 3]), u: (In, u8), c: u8 }
+#[repr(C, align(64))] struct AlNest { i: In, c: u8 }
+#[repr(C, packed(2))] struct PkNest { a: u8, i: In, l: u64 }
 macro_rules! p { ($t:ident, $f:ident) => { println!("{} {} {}", stringify!($t), size_of::<$t>(), offset_of!($t, $f)); } }
 fn main() {
 p!(Arr,c);p!(ArrConst,c);p!(ArrExpr,c);p!(ArrArr,c);p!(ArrS,c);p!(Tup,c);p!(Unit,c);p!(Str,c);p!(Opt,c);p!(Atom,c);p!(Sync,c);p!(Ptrs,c);p!(Maps,c);p!(Cells,c);p!(Fns,c);p!(Num,c);p!(Us,c);p!(Pk,c);p!(Pk2,c);p!(AlO,c);p!(Nested,c);p!(Pd,c);p!(WE,c);p!(Dur,c);p!(NZ,c);p!(Raw,c);p!(Wrap,c);p!(Pin,c);p!(PS,c);p!(Bs,c);p!(Ty,c);p!(Rg,c);
-p!(Opts,c);p!(Unsz,g);p!(Alias,c);p!(Lens,d);p!(NestArr,c);p!(Pk4,c);p!(SyncMore,c);p!(Ranges,c);p!(EnumF,c);p!(CStr,c);p!(TupNest,c);
+p!(Opts,c);p!(Unsz,g);p!(Alias,c);p!(Lens,d);p!(NestArr,c);p!(Pk4,c);p!(SyncMore,c);p!(Ranges,c);p!(EnumF,c);p!(CStr,c);p!(TupNest,c);p!(AlNest,c);p!(PkNest,l);
     println!("Al {} 0", size_of::<Al>());
 }

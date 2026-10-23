@@ -40,7 +40,12 @@ struct Bf { unsigned a:3; unsigned b:5; char c; };
 struct St { static int s; char a; int b; };
 struct Cx { char a; bool b; wchar_t w; char16_t c16; char32_t c32; char c; };
 struct Mut { char a; mutable int m; const int k; char c; };
+struct alignas(64) AlNest { In i; char c; };
+#pragma pack(push, 2)
+struct PkNest { char a; In i; long l; };
+#pragma pack(pop)
+struct BfNest { unsigned a:3; In i; char t; };
 #define P(T,L) printf(#T " %zu %zu\n", sizeof(T), offsetof(T, L))
 int main(){
-P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);
+P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);P(AlNest,c);P(PkNest,l);P(BfNest,t);
 }

@@ -2,6 +2,14 @@
 
 All notable changes to padlock are documented here.
 
+## [0.52.0] — 2026-10-23
+
+Found by checking padlock against the compiler on real code (glibc's own headers with `padlock verify`): analyzing a header on its own, without the headers it includes, silently produced wrong layouts that looked exact.
+
+### Fixed
+- **C/C++ fields of a type padlock cannot size** (a typedef from a header that was not analyzed, such as `in_port_t` or `__uid_t`) were silently given a pointer-sized placeholder and presented as exact. They are now opaque types: resolved if another analyzed struct defines them, otherwise listed in `uncertain_fields`.
+- **Members written as macro invocations** (`__SOCKADDR_COMMON (sin_);`, `DECLARE_BITMAP(bits, 64);`) were silently dropped. The struct now lists ``macro member `…` (not expanded)`` in `uncertain_fields` (use `--compile-commands` or binary analysis for the expanded layout).
+
 ## [0.51.0] — 2026-10-23
 
 ### Added

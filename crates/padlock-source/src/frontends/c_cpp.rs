@@ -30,6 +30,8 @@ thread_local! {
     /// known here; that matters wherever an offset must be right during parsing
     /// (bit-field runs, anonymous aggregates), before the nested-struct resolver runs.
     static RECORD_SIZES: RefCell<HashMap<String, (usize, usize)>> = RefCell::new(HashMap::new());
+    /// Set when `c_type_size_align` had to guess (a type name it does not know).
+    static UNKNOWN_TYPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `#pragma pack` in effect for the record being parsed: it also applies to
     /// anonymous aggregates defined inside it.
     static CURRENT_PACK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -625,8 +627,11 @@ fn c_type_size_align_uncapped(ty: &str, arch: &'static ArchConfig) -> (usize, us
         ty if ty.ends_with('*') => (arch.pointer_size, arch.pointer_size),
         // A record laid out earlier in this file.
         ty if let Some(sa) = RECORD_SIZES.with(|r| r.borrow().get(ty).copied()) => sa,
-        // Unknown — use pointer size as a reasonable default
-        _ => (arch.pointer_size, arch.pointer_size),
+        // Unknown — use pointer size as a placeholder and say so.
+        _ => {
+            UNKNOWN_TYPE.with(|u| u.set(true));
+            (arch.pointer_size, arch.pointer_size)
+        }
     }
 }
 
@@ -1052,7 +1057,12 @@ fn make_field(
 ) -> Field {
     let (fname, ty_name, guard, alignas, field_line) = raw;
     let (sizing_ty, display_ty) = resolve_field_type(&ty_name, aliases, arch);
+    UNKNOWN_TYPE.with(|u| u.set(false));
     let (size, natural_align) = c_type_size_align(&sizing_ty, arch);
+    // A type padlock could not size (a typedef from a header that was not
+    // analyzed, say) is opaque: the nested-struct resolver may still find it,
+    // and otherwise reports the field as uncertain.
+    let guessed = UNKNOWN_TYPE.with(|u| u.replace(false));
     // alignas(N) / aligned(N) on a field sets its alignment; outside a packed
     // struct it can only raise it (`simulate_layout` applies that rule, the
     // type keeps its natural alignment for reference).
@@ -1068,10 +1078,18 @@ fn make_field(
     };
     Field {
         name: fname,
-        ty: TypeInfo::Primitive {
-            name: display_ty,
-            size,
-            align: natural_align,
+        ty: if guessed {
+            TypeInfo::Opaque {
+                name: display_ty,
+                size,
+                align: natural_align,
+            }
+        } else {
+            TypeInfo::Primitive {
+                name: display_ty,
+                size,
+                align: natural_align,
+            }
         },
         offset: 0,
         size,
@@ -1579,12 +1597,19 @@ fn parse_class_specifier_inner(
     // Collect declared fields: (field_name, type_text, guard, alignas_override, source_line)
     let mut raw_fields: Vec<RawField> = Vec::new();
     let (members, pp_labels) = body_members(source, body, aliases);
+    let mut macro_labels: Vec<String> = Vec::new();
     for child in members {
         if child.kind() == "field_declaration" {
             if let Some(anon_fields) = parse_anonymous_nested(source, child, arch, false, aliases) {
                 raw_fields.extend(anon_fields);
             } else {
-                raw_fields.extend(parse_field_declarations(source, child, arch, aliases));
+                let parsed = parse_field_declarations(source, child, arch, aliases);
+                if parsed.is_empty()
+                    && let Some(label) = unexpanded_macro_member(source, child)
+                {
+                    macro_labels.push(label);
+                }
+                raw_fields.extend(parsed);
             }
         }
     }
@@ -1673,6 +1698,7 @@ fn parse_class_specifier_inner(
 
     mark_uncertain_arrays(&mut layout);
     layout.uncertain_fields.extend(pp_labels);
+    layout.uncertain_fields.extend(macro_labels);
     if aliases.contains_key(CPP_KEY) {
         let is_class = node.kind() == "class_specifier";
         layout.cpp = Some(cpp_class_info(source, node, body, aliases, is_class));
@@ -2617,6 +2643,7 @@ fn parse_struct_or_union_specifier_inner(
 
     let mut raw_fields: Vec<RawField> = Vec::new();
     let (members, pp_labels) = body_members(source, body, aliases);
+    let mut macro_labels: Vec<String> = Vec::new();
 
     for child in members {
         if child.kind() == "field_declaration" {
@@ -2628,7 +2655,13 @@ fn parse_struct_or_union_specifier_inner(
             {
                 raw_fields.extend(anon_fields);
             } else {
-                raw_fields.extend(parse_field_declarations(source, child, arch, aliases));
+                let parsed = parse_field_declarations(source, child, arch, aliases);
+                if parsed.is_empty()
+                    && let Some(label) = unexpanded_macro_member(source, child)
+                {
+                    macro_labels.push(label);
+                }
+                raw_fields.extend(parsed);
             }
         }
     }
@@ -2729,6 +2762,7 @@ fn parse_struct_or_union_specifier_inner(
 
     mark_uncertain_arrays(&mut layout);
     layout.uncertain_fields.extend(pp_labels);
+    layout.uncertain_fields.extend(macro_labels);
     if aliases.contains_key(CPP_KEY) {
         let is_class = node.kind() == "class_specifier";
         layout.cpp = Some(cpp_class_info(source, node, body, aliases, is_class));
@@ -3275,6 +3309,29 @@ fn register_anonymous(
     record_size(&layout);
     PENDING_ANON.with(|p| p.borrow_mut().push(layout));
     Some(name)
+}
+
+/// A member written as a macro invocation (`__SOCKADDR_COMMON (sin_);`,
+/// `DECLARE_BITMAP(bits, 64);`): its fields exist only after preprocessing, so
+/// the struct is incomplete. Returns a label for `uncertain_fields`.
+fn unexpanded_macro_member(source: &str, node: Node<'_>) -> Option<String> {
+    let has_declarator =
+        (0..node.child_count()).any(|i| node.field_name_for_child(i) == Some("declarator"));
+    if has_declarator {
+        return None;
+    }
+    let mac = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .find(|c| c.kind() == "macro_type_specifier")?;
+    let name = mac.child_by_field_name("name")?;
+    if name.is_missing() || &source[name.byte_range()] == "_Atomic" {
+        return None;
+    }
+    let text = source[node.byte_range()]
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    Some(format!("macro member `{text}` (not expanded)"))
 }
 
 /// A declarator with its pointer / array / function wrappers peeled off.
@@ -5601,5 +5658,33 @@ struct S {
         let b = parse("struct B { unsigned a:3; unsigned b:5; char c; short d:4; int e:2; };");
         assert_eq!(b.total_size, 12);
         assert_eq!(offset(&b, "c"), 4);
+    }
+
+    #[test]
+    fn unknown_types_and_macro_members_are_flagged() {
+        let l = layout_of(
+            "struct sockaddr_in { __SOCKADDR_COMMON (sin_); in_port_t sin_port; unsigned char z; };",
+            "sockaddr_in",
+            false,
+        );
+        assert!(
+            l.uncertain_fields.contains(&"sin_port".to_string()),
+            "{:?}",
+            l.uncertain_fields
+        );
+        assert!(
+            l.uncertain_fields
+                .iter()
+                .any(|u| u.contains("__SOCKADDR_COMMON")),
+            "{:?}",
+            l.uncertain_fields
+        );
+        // Known and locally defined types are not flagged.
+        let l = layout_of(
+            "typedef unsigned short port_t; struct S { port_t p; size_t n; };",
+            "S",
+            false,
+        );
+        assert!(l.uncertain_fields.is_empty(), "{:?}", l.uncertain_fields);
     }
 }

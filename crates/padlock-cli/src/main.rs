@@ -15,6 +15,7 @@ mod commands {
     pub mod check;
     pub mod diff;
     pub mod explain;
+    pub mod ffi;
     pub mod fix;
     pub mod init;
     pub mod list;
@@ -186,6 +187,17 @@ enum Commands {
         filter: Option<String>,
     },
 
+    /// Check that Rust `#[repr(C)]` structs match the C/C++ structs of the same
+    /// name (size, alignment, field offsets). Exits 1 on any mismatch.
+    Ffi {
+        /// Rust and C/C++ source files or directories
+        #[arg(num_args = 1.., value_name = "PATH")]
+        paths: Vec<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show a visual field-by-field memory layout table for each struct
     Explain {
         /// Paths to analyze: source files, binaries, or directories
@@ -349,6 +361,13 @@ fn main() -> anyhow::Result<()> {
             no_cache,
             target,
         } => commands::explain::run(&paths, filter.as_deref(), no_cache, target.as_deref()),
+
+        Commands::Ffi { paths, json } => {
+            if !commands::ffi::run(&paths, json)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
 
         Commands::Verify {
             paths,

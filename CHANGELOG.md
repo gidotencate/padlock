@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.50.0] — 2026-10-23
+
+### Added
+- **`padlock ffi <paths>…`**: checks every Rust `#[repr(C)]` struct against the C/C++ struct of the same name among the analyzed files — size, alignment, field count, and each field's offset and size by position — and exits 1 on any mismatch (`--json` available). Catches FFI drift such as a `u64` mirroring a C `unsigned int`.
+
 ## [0.49.0] — 2026-10-23
 
 ### Changed

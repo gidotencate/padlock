@@ -21,6 +21,17 @@ pub const X86_64_SYSV: ArchConfig = ArchConfig {
     endianness: Endianness::Little,
 };
 
+/// x86-64 Windows (MSVC ABI, LLP64): same sizes and alignments as SysV except
+/// `long` is 4 bytes, `wchar_t` 2, `long double` 8, and bit-fields of different
+/// declared types never share a storage unit.
+pub const X86_64_MSVC: ArchConfig = ArchConfig {
+    name: "x86_64-msvc",
+    pointer_size: 8,
+    cache_line_size: 64,
+    max_align: 16,
+    endianness: Endianness::Little,
+};
+
 pub const AARCH64: ArchConfig = ArchConfig {
     name: "aarch64",
     pointer_size: 8,
@@ -142,6 +153,7 @@ pub fn arch_by_name(name: &str) -> Option<&'static ArchConfig> {
     match name {
         // Short names (used in config files and existing code).
         "x86_64" => Some(&X86_64_SYSV),
+        "x86_64_msvc" | "x86_64-msvc" | "msvc" | "windows" => Some(&X86_64_MSVC),
         "aarch64" => Some(&AARCH64),
         "aarch64_apple" => Some(&AARCH64_APPLE),
         "wasm32" => Some(&WASM32),
@@ -157,7 +169,9 @@ pub fn arch_by_name(name: &str) -> Option<&'static ArchConfig> {
 
 /// Map a Rust target triple to an `ArchConfig`.
 pub fn arch_by_triple(triple: &str) -> Option<&'static ArchConfig> {
-    if triple.starts_with("x86_64-") {
+    if triple.starts_with("x86_64-") && triple.ends_with("-windows-msvc") {
+        Some(&X86_64_MSVC)
+    } else if triple.starts_with("x86_64-") {
         Some(&X86_64_SYSV)
     } else if triple.starts_with("i386-")
         || triple.starts_with("i586-")
@@ -208,7 +222,8 @@ mod tests {
     #[test]
     fn target_triples_resolve() {
         assert_eq!(arch_by_name("x86_64-unknown-linux-gnu"), Some(&X86_64_SYSV));
-        assert_eq!(arch_by_name("x86_64-pc-windows-msvc"), Some(&X86_64_SYSV));
+        assert_eq!(arch_by_name("x86_64-pc-windows-msvc"), Some(&X86_64_MSVC));
+        assert_eq!(arch_by_name("x86_64-pc-windows-gnu"), Some(&X86_64_SYSV));
         assert_eq!(arch_by_name("aarch64-unknown-linux-gnu"), Some(&AARCH64));
         assert_eq!(arch_by_name("aarch64-linux-android"), Some(&AARCH64));
         // Apple targets get the 128-byte cache line config.

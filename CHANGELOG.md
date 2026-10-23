@@ -2,6 +2,12 @@
 
 All notable changes to padlock are documented here.
 
+## [0.53.0] — 2026-10-23
+
+### Fixed
+- **`padlock verify` matched Go types across packages by short name** (a `regexp/syntax.Error` checked against `regexp.Error`, a type from an `_test.go` example against an unrelated one). Go types now match only the binary type of their own package (`pkg.Name` / `…/pkg.Name`, or `main.Name`), and test-only types are skipped. Checked against the Go standard library (`net/http`, `encoding/json`, `bufio`, `regexp`).
+- `reflect.Value` is a known Go type (3 words).
+
 ## [0.52.0] — 2026-10-23
 
 Found by checking padlock against the compiler on real code (glibc's own headers with `padlock verify`): analyzing a header on its own, without the headers it includes, silently produced wrong layouts that looked exact.

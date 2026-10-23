@@ -124,6 +124,23 @@ pub fn run(
     // unique candidate. Ambiguous matches are reported as not found.
     let pick = |src: &StructLayout| -> Option<&StructLayout> {
         let cands = by_key.get(&match_key(&src.name))?;
+        // Go names types by import path (`regexp/syntax.Error`): only a type of
+        // the source file's own package is the same type.
+        if let Some(f) = src.source_file.as_deref()
+            && f.ends_with(".go")
+        {
+            let pkg = std::path::Path::new(f)
+                .parent()
+                .and_then(|d| d.file_name())
+                .and_then(|d| d.to_str())
+                .unwrap_or("");
+            let want = format!("{pkg}.{}", src.name);
+            let main = format!("main.{}", src.name);
+            return cands
+                .iter()
+                .find(|c| c.name == want || c.name.ends_with(&format!("/{want}")) || c.name == main)
+                .copied();
+        }
         if let Some(exact) = cands.iter().find(|c| c.name == src.name) {
             return Some(exact);
         }
@@ -163,8 +180,14 @@ pub fn run(
     let mut verdicts: Vec<Verdict> = src_layouts
         .iter()
         .filter(|l| re.as_ref().is_none_or(|r| r.is_match(&l.name)))
-        // Anonymous types cannot be matched by name.
+        // Anonymous types cannot be matched by name; test-only types are not in
+        // the binary.
         .filter(|l| !l.name.starts_with('<'))
+        .filter(|l| {
+            !l.source_file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("_test.go"))
+        })
         .map(|src| match pick(src) {
             Some(bin) => compare(src, bin),
             None => Verdict {

@@ -87,6 +87,8 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         // sync.Cond: { noCopy; L Locker (2 words); notify notifyList (4 words:
         //   wait, notify uint32, lock uintptr, head, tail pointers); checker copyChecker (1 word) }
         "sync.Cond" => (8 + arch.pointer_size * 6, arch.pointer_size),
+        // reflect.Value: { typ_ *abi.Type; ptr unsafe.Pointer; flag uintptr }.
+        "reflect.Value" => (arch.pointer_size * 3, arch.pointer_size),
         // atomic.Pointer[T]: { _ [0]*T; _ noCopy; v unsafe.Pointer } — one pointer.
         "atomic.Pointer" => (arch.pointer_size, arch.pointer_size),
         // Plain integer-backed stdlib types.
@@ -164,6 +166,7 @@ fn is_known_external_go_type(ty: &str) -> bool {
             | "atomic.Uintptr"
             | "atomic.Value"
             | "atomic.Pointer"
+            | "reflect.Value"
             | "sync.Pool"
             | "sync.Cond"
             | "time.Duration"

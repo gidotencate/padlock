@@ -2,6 +2,15 @@
 
 All notable changes to padlock are documented here.
 
+## [0.41.0] — 2026-10-23
+
+### Fixed
+- **C++ types with the same name in different namespaces or classes collided**: the nested-struct resolver keyed on the bare name, so a field of `nb::Same` could be sized as `na::Same`. C++ layouts are now named with their enclosing namespaces and classes (`net::Conn`, `Outer::Inner`), and field and base-class types are resolved the way C++ name lookup does (innermost scope first). Anonymous namespaces add no qualifier.
+- **`typedef struct { … } T;` could rename the wrong anonymous struct** (the first anonymous layout in the file, e.g. an unrelated nested member type) instead of the one it declares.
+
+### Changed
+- **BREAKING (output)**: namespaced and nested C++ types are reported with their qualified name (`Outer::Inner`, `ns::Conn`).
+
 ## [0.40.0] — 2026-10-23
 
 ### Added

@@ -1888,6 +1888,13 @@ fn extract_structs_from_tree(
         // resolution logic sizes the instantiation exactly as if it were a
         // concrete struct — one synthetic layout per `instantiate` line, named
         // `Name<Arg1, Arg2>`. Multiple lines produce multiple instantiations.
+        // C++ types are named with their enclosing namespaces and classes
+        // (`net::Conn`, `Outer::Inner`) so equal short names do not collide.
+        let scope = if cpp {
+            cpp_scope(source, node)
+        } else {
+            String::new()
+        };
         let is_record_specifier = matches!(
             node.kind(),
             "struct_specifier" | "union_specifier" | "class_specifier"
@@ -1920,7 +1927,7 @@ fn extract_structs_from_tree(
                 if let Some(n) = name_node.filter(|n| n.kind() == "template_type")
                     && let Some(mut layout) = parse_with(&aliases)
                 {
-                    layout.name = normalize_type_text(&source[n.byte_range()]);
+                    layout.name = scoped(&scope, normalize_type_text(&source[n.byte_range()]));
                     specializations.push(layout.name.clone());
                     layouts.push(layout);
                 }
@@ -1985,7 +1992,7 @@ fn extract_structs_from_tree(
                     }
                 }
                 if let Some(mut layout) = parse_with(&inst_aliases) {
-                    layout.name = inst_name;
+                    layout.name = scoped(&scope, inst_name);
                     instantiated.push((layouts.len(), layout.name.clone(), tpl_name.clone()));
                     layouts.push(layout);
                     produced += 1;
@@ -2007,7 +2014,7 @@ fn extract_structs_from_tree(
 
         match node.kind() {
             "struct_specifier" => {
-                if let Some(layout) = parse_struct_or_union_specifier(
+                if let Some(mut layout) = parse_struct_or_union_specifier(
                     source,
                     node,
                     arch,
@@ -2015,11 +2022,12 @@ fn extract_structs_from_tree(
                     &aliases,
                     current_pack,
                 ) {
+                    layout.name = scoped(&scope, layout.name);
                     layouts.push(layout);
                 }
             }
             "union_specifier" => {
-                if let Some(layout) = parse_struct_or_union_specifier(
+                if let Some(mut layout) = parse_struct_or_union_specifier(
                     source,
                     node,
                     arch,
@@ -2027,13 +2035,15 @@ fn extract_structs_from_tree(
                     &aliases,
                     current_pack,
                 ) {
+                    layout.name = scoped(&scope, layout.name);
                     layouts.push(layout);
                 }
             }
             "class_specifier" => {
-                if let Some(layout) =
+                if let Some(mut layout) =
                     parse_class_specifier(source, node, arch, &aliases, current_pack)
                 {
+                    layout.name = scoped(&scope, layout.name);
                     layouts.push(layout);
                 }
             }
@@ -2084,9 +2094,12 @@ fn extract_structs_from_tree(
             && let Some(layout) =
                 parse_typedef_struct_or_union(source, node, arch, &aliases, current_pack)
         {
-            let existing = layouts
-                .iter()
-                .position(|l| l.name == layout.name || l.name == "<anonymous>");
+            // The anonymous struct this typedef names was already laid out by the
+            // first pass, from the same declaration (same line): rename that one.
+            let existing = layouts.iter().position(|l| {
+                l.name == layout.name
+                    || (l.name == "<anonymous>" && l.source_line == layout.source_line)
+            });
             match existing {
                 Some(i) if layouts[i].name == "<anonymous>" => {
                     layouts[i] = layout;
@@ -2096,8 +2109,103 @@ fn extract_structs_from_tree(
             }
         }
     }
+    if cpp {
+        qualify_cpp_references(layouts);
+    }
     let _ = cursor;
     let _ = cursor2; // silence unused warnings
+}
+
+/// The `ns::Outer` scope a C++ declaration sits in: enclosing named namespaces and
+/// classes, outermost first (anonymous namespaces contribute nothing).
+fn cpp_scope(source: &str, node: Node<'_>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        match n.kind() {
+            "namespace_definition" => {
+                if let Some(name) = n.child_by_field_name("name") {
+                    parts.push(source[name.byte_range()].trim().to_string());
+                }
+            }
+            "struct_specifier" | "class_specifier" | "union_specifier" => {
+                if let Some(name) = n.child_by_field_name("name") {
+                    parts.push(normalize_type_text(&source[name.byte_range()]));
+                }
+            }
+            _ => {}
+        }
+        cur = n.parent();
+    }
+    parts.reverse();
+    parts.join("::")
+}
+
+fn scoped(scope: &str, name: String) -> String {
+    if scope.is_empty() || name.starts_with('<') {
+        name
+    } else {
+        format!("{scope}::{name}")
+    }
+}
+
+/// `(scope, short name)` of a qualified type name, ignoring `::` inside
+/// template arguments: `a::B<c::D>` → (`a`, `B<c::D>`).
+fn split_scope(name: &str) -> (&str, &str) {
+    let head_end = name.find('<').unwrap_or(name.len());
+    match name[..head_end].rfind("::") {
+        Some(i) => (&name[..i], &name[i + 2..]),
+        None => ("", name),
+    }
+}
+
+/// Point type references at the qualified layout they mean: a field of type `S`
+/// declared inside `b::Outer` refers to `b::Outer::S`, else `b::S`, else `S`
+/// (C++ name lookup, innermost scope first). Base-class names likewise.
+fn qualify_cpp_references(layouts: &mut [StructLayout]) {
+    let known: std::collections::HashSet<String> = layouts.iter().map(|l| l.name.clone()).collect();
+    let lookup = |scope: &str, ty: &str| -> Option<String> {
+        if known.contains(ty) && !ty.contains("::") && scope.is_empty() {
+            return None;
+        }
+        let mut sc = scope;
+        loop {
+            let cand = if sc.is_empty() {
+                ty.to_string()
+            } else {
+                format!("{sc}::{ty}")
+            };
+            if known.contains(&cand) {
+                return (cand != ty).then_some(cand);
+            }
+            if sc.is_empty() {
+                return None;
+            }
+            sc = split_scope(sc).0;
+        }
+    };
+    for l in layouts.iter_mut() {
+        // Members resolve in the class's own scope (nested types), then outward.
+        let own_scope = l.name.clone();
+        for f in l.fields.iter_mut() {
+            let name = match &mut f.ty {
+                TypeInfo::Primitive { name, .. } | TypeInfo::Opaque { name, .. } => name,
+                _ => continue,
+            };
+            let (base, dims) = split_array_dims(name);
+            if let Some(q) = lookup(&own_scope, base) {
+                *name = format!("{q}{dims}");
+            }
+        }
+        if let Some(info) = l.cpp.as_mut() {
+            let scope = split_scope(&own_scope).0.to_string();
+            for b in info.bases.iter_mut() {
+                if let Some(q) = lookup(&scope, &b.name) {
+                    b.name = q;
+                }
+            }
+        }
+    }
 }
 
 /// Parse a `#pragma pack(...)` directive and update the pack stack/current level.

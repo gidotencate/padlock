@@ -796,3 +796,53 @@ fn compile_commands_gives_compiler_exact_layouts() {
     );
     assert_eq!(struct_size(&out.stdout, "Box<double>"), Some(16));
 }
+
+#[test]
+fn go_exact_uses_the_go_toolchain_layout() {
+    if std::process::Command::new("go")
+        .arg("version")
+        .output()
+        .is_err()
+    {
+        eprintln!("go not available; skipping");
+        return;
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("go.mod"),
+        "module example.com/p\n\ngo 1.21\n",
+    )
+    .unwrap();
+    // `url.URL` is a struct from another package: padlock cannot size it from
+    // source and reports it as uncertain; the toolchain knows it exactly.
+    std::fs::write(
+        dir.path().join("p.go"),
+        "package p\n\nimport \"net/url\"\n\ntype S struct {\n\tok bool\n\tu  url.URL\n\tn  int32\n}\n",
+    )
+    .unwrap();
+    let before_files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    let out = padlock()
+        .args(["analyze", "--json", "--no-cache", "--go-exact"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let s = v["structs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["struct_name"] == "S")
+        .unwrap();
+    // go 1.21+: unsafe.Sizeof(url.URL{}) == 144 on amd64 → S = 8 + 144 + 4 → 160.
+    let size = s["total_size"].as_u64().unwrap();
+    assert!(
+        size > 100,
+        "url.URL must be sized by the toolchain, got {size}"
+    );
+    assert!(s.get("uncertain_fields").is_none());
+    // The probe is virtual: nothing was added to the package.
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        before_files.len()
+    );
+}

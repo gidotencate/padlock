@@ -79,7 +79,7 @@ pub fn collect_layouts(
                 );
                 continue;
             }
-            let arch = padlock_dwarf::reader::detect_arch_from_host();
+            let arch = source_arch();
 
             // Partition files into cache hits and misses.
             let mut hits: Vec<(
@@ -176,7 +176,7 @@ pub fn collect_layouts(
             if !include_generated && should_skip_source_file(path) {
                 continue;
             }
-            let arch = padlock_dwarf::reader::detect_arch_from_host();
+            let arch = source_arch();
             // Try cache for single source files too.
             let (layouts, skipped) = if let Some((layouts, skipped)) = cache.get(path) {
                 (layouts, skipped)
@@ -250,6 +250,36 @@ pub fn collect_layouts(
     Ok((all_layouts, analyzed, all_skipped))
 }
 
+static SOURCE_ARCH: std::sync::RwLock<Option<&'static padlock_core::arch::ArchConfig>> =
+    std::sync::RwLock::new(None);
+
+/// Choose the architecture source files are *parsed* for (`--target`,
+/// `arch.override`, `--word-size`): pointer and `long` sizes, alignments. Without
+/// it sources are laid out for the host. Binaries always use their own arch.
+pub fn set_source_arch(target: Option<&str>, word_size: Option<usize>) {
+    let base = match target {
+        Some(name) => padlock_core::arch::arch_by_name(name).unwrap_or_else(|| {
+            eprintln!("padlock: warning: unknown target/arch '{name}', ignoring override");
+            padlock_dwarf::reader::detect_arch_from_host()
+        }),
+        None => padlock_dwarf::reader::detect_arch_from_host(),
+    };
+    let arch = match word_size {
+        Some(_) => padlock_core::arch::with_overrides(base, None, word_size),
+        None => base,
+    };
+    *SOURCE_ARCH.write().unwrap_or_else(|e| e.into_inner()) =
+        (target.is_some() || word_size.is_some()).then_some(arch);
+}
+
+/// The architecture source files are parsed for (host unless overridden).
+pub fn source_arch() -> &'static padlock_core::arch::ArchConfig {
+    SOURCE_ARCH
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(padlock_dwarf::reader::detect_arch_from_host)
+}
+
 /// Pass `[instantiate]` entries from `.padlock.toml` to the source frontends.
 pub fn apply_configured_instantiations(cfg: &padlock_core::config::Config) {
     padlock_source::set_configured_instantiations(
@@ -296,7 +326,7 @@ fn instantiate_across_files(
         return;
     }
     padlock_source::set_discovered_instantiations(uses);
-    let arch = padlock_dwarf::reader::detect_arch_from_host();
+    let arch = source_arch();
     for file in pending.keys() {
         let Ok(output) = padlock_source::parse_source(Path::new(file), arch) else {
             continue;

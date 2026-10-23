@@ -9,7 +9,12 @@ use std::path::PathBuf;
 
 use crate::paths::collect_layouts;
 
-pub fn run(paths: &[PathBuf], filter: Option<&str>, no_cache: bool) -> anyhow::Result<()> {
+pub fn run(
+    paths: &[PathBuf],
+    filter: Option<&str>,
+    no_cache: bool,
+    target: Option<&str>,
+) -> anyhow::Result<()> {
     let re = filter
         .map(regex::Regex::new)
         .transpose()
@@ -17,6 +22,7 @@ pub fn run(paths: &[PathBuf], filter: Option<&str>, no_cache: bool) -> anyhow::R
 
     if let Some(first) = paths.first() {
         let cfg = padlock_core::config::Config::for_path(first);
+        crate::paths::set_source_arch(target.or(cfg.arch_override.as_deref()), None);
         padlock_source::set_preprocessor_defines(&cfg.defines);
         padlock_source::set_declared_order(cfg.declared_order);
         crate::paths::apply_configured_instantiations(&cfg);

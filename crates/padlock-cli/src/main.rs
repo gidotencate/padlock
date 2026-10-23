@@ -194,6 +194,10 @@ enum Commands {
         /// Skip the on-disk parse cache (`.padlock-cache/`)
         #[arg(long)]
         no_cache: bool,
+        /// Lay out source files for this target (short arch name or Rust target
+        /// triple, e.g. `aarch64`, `cortex_m4`, `x86`, `avr`) instead of the host
+        #[arg(long, value_name = "TRIPLE")]
+        target: Option<String>,
     },
 
     /// Analyse eBPF object files or binaries that contain a .BTF section.
@@ -340,7 +344,8 @@ fn main() -> anyhow::Result<()> {
             paths,
             filter,
             no_cache,
-        } => commands::explain::run(&paths, filter.as_deref(), no_cache),
+            target,
+        } => commands::explain::run(&paths, filter.as_deref(), no_cache, target.as_deref()),
 
         Commands::Verify {
             paths,

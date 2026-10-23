@@ -95,7 +95,6 @@ fn c_integer_size_align(ty: &str, arch: &'static ArchConfig) -> Option<(usize, u
     if !any {
         return None;
     }
-    let ps = arch.pointer_size;
     Some(if ch {
         (1, 1)
     } else if short {
@@ -103,14 +102,49 @@ fn c_integer_size_align(ty: &str, arch: &'static ArchConfig) -> Option<(usize, u
     } else if longs >= 2 {
         (8, 8)
     } else if longs == 1 {
-        (ps, ps)
+        let l = c_long_size(arch);
+        (l, l)
     } else {
-        (4, 4)
+        let i = c_int_size(arch);
+        (i, i)
     })
 }
 
-/// Map a C/C++ type name to (size, align) using the target arch.
+/// `int`: 2 bytes on 16-bit-pointer targets (AVR), 4 everywhere else.
+fn c_int_size(arch: &ArchConfig) -> usize {
+    if arch.pointer_size <= 2 { 2 } else { 4 }
+}
+
+/// `long`: 8 on LP64 targets, 4 on ILP32 and 16-bit ones.
+fn c_long_size(arch: &ArchConfig) -> usize {
+    if arch.pointer_size >= 8 { 8 } else { 4 }
+}
+
+/// `long double`: x87 80-bit (16 bytes on x86-64, 12 on i386), IEEE quad (16) on
+/// 64-bit Linux AArch64/RISC-V and wasm32, plain `double` on Apple AArch64 and
+/// 32-bit ARM, `float`-sized on AVR.
+fn c_long_double(arch: &ArchConfig) -> (usize, usize) {
+    match arch.name {
+        "x86" => (12, 4),
+        "aarch64-apple" | "cortex_m" | "cortex_m4" => (8, 8),
+        "avr" => (4, 1),
+        _ => (16, 16),
+    }
+}
+
+/// Map a C/C++ type name to (size, align) using the target arch. Natural
+/// alignment is capped at the target's maximum scalar alignment (`double` and
+/// `long long` are 4-aligned on i386, everything is 1-aligned on AVR).
 fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
+    let (size, align) = c_type_size_align_uncapped(ty, arch);
+    // Vector types (`__m256`, 32-aligned) are deliberately over-aligned.
+    if size > 8 && align > 8 {
+        return (size, align);
+    }
+    (size, align.min(arch.max_align.max(1)))
+}
+
+fn c_type_size_align_uncapped(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     let ty = ty.trim();
     // Fixed-size array `T[N]` / `T[N][M]` (`[]` flexible, `[?]` unevaluated → 1 element).
     if ty.ends_with(']')
@@ -482,12 +516,14 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     match ty {
         "char" | "_Bool" | "bool" => (1, 1),
         "short" | "short int" => (2, 2),
-        "int" => (4, 4),
-        "long" | "long int" => (arch.pointer_size, arch.pointer_size),
+        "int" => (c_int_size(arch), c_int_size(arch)),
+        "long" | "long int" => (c_long_size(arch), c_long_size(arch)),
         "long long" | "long long int" => (8, 8),
         "float" => (4, 4),
+        // AVR's `double` is 32-bit.
+        "double" if arch.name == "avr" => (4, 4),
         "double" => (8, 8),
-        "long double" => (16, 16),
+        "long double" => c_long_double(arch),
 
         // C99 stdint exact-width types
         "int8_t" | "uint8_t" => (1, 1),
@@ -549,6 +585,7 @@ fn c_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         // C/C++ character types
         // wchar_t: 4B on Linux/macOS (GCC/Clang POSIX), 2B on Windows/MSVC.
         // All current padlock arch configs are POSIX, so 4B is correct here.
+        "wchar_t" if arch.name == "avr" => (2, 2),
         "wchar_t" => (4, 4),
         "char8_t" => (1, 1),
         "char16_t" => (2, 2),

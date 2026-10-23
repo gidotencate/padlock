@@ -2,6 +2,20 @@
 
 All notable changes to padlock are documented here.
 
+## [0.42.0] — 2026-10-23
+
+The conformance harness gained `--cross`: C layouts for aarch64, riscv64, x86 (i386), Cortex-M4, Cortex-M0 and AVR (compiled with `zig cc`; truth read from symbol sizes), and Go/Zig on 32-bit x86. Before the fixes: x86 C 40/46, Cortex-M0 C and AVR C 0 (crash), x86 Go 26/36, x86 Zig 40/53. Now all match.
+
+### Fixed
+- **`--target` / `arch.override` / `--word-size` did not change how source files were laid out** — layouts were parsed for the *host* and only relabelled afterwards, so `--target cortex_m` still reported 8-byte pointers and `long`s. Sources are now parsed for the requested target (`analyze`, `summary`, `check`, `explain`), and the parse cache is keyed by it.
+- **`padlock explain` panicked (division by zero)** for targets without a cache (`cortex_m`, `avr`).
+- **C/C++ data model per target**: `int` is 2 bytes and `long` 4 on AVR, `long` is 4 on every 32-bit target, `long double` is 12 bytes/4-aligned on i386, 8 on 32-bit ARM and Apple AArch64, `double` is 4 bytes on AVR, `wchar_t` 2 on AVR, and natural alignment is capped at the target's maximum (`double`/`long long` are 4-aligned in i386 structs; everything is 1-aligned on AVR).
+- **Go on 32-bit targets**: `int64`/`uint64`/`float64`/`complex128` are word-aligned (4 on 386/arm); `time.Time`, `sync.Map`, `sync.Cond`, `time.Month` sizes follow the word size.
+- **Zig**: scalars up to 8 bytes follow the target's maximum alignment (`u64` 4-aligned on x86); `f80` is 16 bytes on x86-64 (was 10) and 12 on x86; `c_longdouble` is 12 on x86.
+
+### Added
+- `padlock explain --target <arch>`.
+
 ## [0.41.0] — 2026-10-23
 
 ### Fixed

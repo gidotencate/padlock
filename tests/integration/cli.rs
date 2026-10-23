@@ -722,3 +722,30 @@ fn verify_agrees_with_gcc_and_reports_mismatches() {
         .failure()
         .stdout(contains("size-mismatch"));
 }
+
+#[test]
+fn target_flag_lays_sources_out_for_that_target() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("t.c");
+    std::fs::write(&file, "struct T { char a; void *p; long l; double d; };\n").unwrap();
+    let size_for = |target: Option<&str>| {
+        let mut cmd = padlock();
+        cmd.args(["analyze", "--json", "--no-cache"]);
+        if let Some(t) = target {
+            cmd.args(["--target", t]);
+        }
+        let out = cmd.arg(&file).output().unwrap();
+        total_sizes(&out.stdout)
+    };
+    // x86-64: 1+7, 8, 8, 8 = 32. i386: 1+3, 4, 4, 8 (4-aligned) = 20.
+    // Cortex-M: 1+3, 4, 4, 8 (8-aligned) = 24.
+    assert_eq!(size_for(None), vec![32]);
+    assert_eq!(size_for(Some("x86")), vec![20]);
+    assert_eq!(size_for(Some("cortex_m")), vec![24]);
+    // `explain` on a target without a cache must not panic.
+    padlock()
+        .args(["explain", "--no-cache", "--target", "avr"])
+        .arg(&file)
+        .assert()
+        .success();
+}

@@ -47,7 +47,19 @@ fn int_abi_size_align(bits: usize) -> (usize, usize) {
     }
 }
 
+/// Size/alignment of a Zig type name; the alignment of scalars up to 8 bytes is
+/// capped at the target's maximum scalar alignment (`u64` is 4-aligned on x86, as
+/// in its C ABI). 128-bit integers keep their 16-byte alignment (LLVM ≥ 18).
 fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
+    let (size, align) = zig_type_size_align_uncapped(ty, arch);
+    if size > 8 {
+        (size, align)
+    } else {
+        (size, align.min(arch.max_align.max(1)))
+    }
+}
+
+fn zig_type_size_align_uncapped(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
     let ty = ty.trim();
     match ty {
         "bool" => (1, 1),
@@ -56,8 +68,9 @@ fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "u32" | "i32" | "f32" => (4, 4),
         "u64" | "i64" | "f64" => (8, 8),
         "u128" | "i128" | "f128" => (16, 16),
-        // f80 is the x87 80-bit float; stored as 10 bytes, aligned to 16 on x86-64
-        "f80" => (10, 16),
+        // f80 is the x87 80-bit float: 16 bytes / align 16 on x86-64, 12 / 4 on x86.
+        "f80" if arch.pointer_size == 4 => (12, 4),
+        "f80" => (16, 16),
         "usize" | "isize" => (arch.pointer_size, arch.pointer_size),
         "void" | "anyopaque" => (0, 1),
         // comptime-only or type-erased — treat as pointer-sized
@@ -73,6 +86,7 @@ fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "c_longlong" | "c_ulonglong" => (8, 8),
         "c_float" => (4, 4),
         "c_double" => (8, 8),
+        "c_longdouble" if arch.pointer_size == 4 => (12, 4),
         "c_longdouble" => (16, 16),
 
         // Arbitrary-width integers: uN / iN where N is a decimal number. A field

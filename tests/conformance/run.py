@@ -25,10 +25,11 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 def sh(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
-def truth(lang, src, tmp):
+def truth(lang, src, tmp, cross=None):
     exe = os.path.join(tmp, "probe")
     if lang == "go":
-        r = sh(["go", "run", src])
+        env = dict(os.environ, GOARCH=cross) if cross else None
+        r = sh(["go", "run", src], env=env)
     elif lang == "c":
         r = sh(["gcc", "-std=gnu11", "-w", src, "-o", exe]); r = sh([exe]) if r.returncode == 0 else r
     elif lang == "cpp":
@@ -40,7 +41,8 @@ def truth(lang, src, tmp):
         r = sh([os.environ.get("ZIG", "zig"), "cc", "-std=c23", "-w", src, "-o", exe])
         r = sh([exe]) if r.returncode == 0 else r
     elif lang == "zig":
-        r = sh([os.environ.get("ZIG", "zig"), "run", src, "--cache-dir", os.path.join(tmp, "zc")])
+        r = sh([os.environ.get("ZIG", "zig"), "run", src, "--cache-dir", os.path.join(tmp, "zc"),
+                *(["-target", cross] if cross else [])])
         r.stdout = r.stderr if r.returncode == 0 else r.stdout  # std.debug.print -> stderr
     if r.returncode != 0:
         sys.exit(f"{lang}: ground-truth probe failed:\n{r.stdout}{r.stderr}")
@@ -76,13 +78,78 @@ def debug_binary(lang, src, tmp):
         sys.exit(f"{lang}: debug build failed:\n{r.stdout}{r.stderr}")
     return exe
 
+# (zig cc target, padlock --target name) pairs for `--cross`.
+CROSS_TARGETS = [
+    ("aarch64-linux-gnu", "aarch64"),
+    ("riscv64-linux-gnu", "riscv64"),
+    ("x86-linux-gnu", "x86"),
+    ("thumb-freestanding-eabi -mcpu=cortex_m4", "cortex_m4"),
+    ("thumb-freestanding-eabi -mcpu=cortex_m0", "cortex_m"),
+    ("avr-freestanding -mmcu=atmega328p", "avr"),
+]
+
+def cross_truth(src, target, tmp):
+    """Sizes/offsets of the C probe's `P(T, L)` structs as compiled for `target`.
+
+    The probe cannot run there, so each `P(T, L)` becomes two file-scope arrays
+    whose *symbol sizes* are `sizeof(struct T)` and `offsetof(struct T, L) + 1`,
+    read back from the object's symbol table. Structs the target cannot compile
+    (`__int128` on 32-bit, …) are dropped and retried.
+    """
+    zig = os.environ.get("ZIG", "zig")
+    text = open(src).read()
+    head = text[: text.index("#define P(T,L)")]
+    head = head.replace("#include <stdio.h>", "").replace("#include <wchar.h>", "")
+    calls = re.findall(r"P\((\w+),\s*(\w+)\)", text[text.index("int main"):])
+    drop = set()
+    for _ in range(12):
+        body = [l for l in head.splitlines()
+                if not any(re.match(rf"^\s*(typedef\s+)?struct\s+{d}\b", l) for d in drop)]
+        probe = "\n".join(body) + "\n#include <stddef.h>\n"
+        for t, l in calls:
+            if t in drop:
+                continue
+            probe += (f"__attribute__((used)) static char __pl_sz_{t}[sizeof(struct {t})];\n"
+                      f"__attribute__((used)) static char __pl_off_{t}__{l}[offsetof(struct {t}, {l}) + 1];\n")
+        path = os.path.join(tmp, "cross.c")
+        open(path, "w").write(probe)
+        obj = os.path.join(tmp, "cross.o")
+        r = sh([zig, "cc", *("-target " + target).split(), "-std=gnu11", "-w", "-c", path, "-o", obj])
+        if r.returncode == 0:
+            break
+        bad = set(re.findall(r"struct (\w+)", r.stderr)) - drop
+        bad |= {t for t, _ in calls for line in r.stderr.splitlines()
+                if "error" in line and re.search(rf"\b{t}\b", line)}
+        if not bad:
+            sys.exit(f"cross probe for {target} failed:\n{r.stderr[-2000:]}")
+        drop |= bad
+    else:
+        sys.exit(f"cross probe for {target} kept failing")
+    syms = sh(["readelf", "-sW", obj]).stdout
+    sizes, offs = {}, {}
+    for line in syms.splitlines():
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+        size, name = parts[2], parts[-1]
+        if not re.match(r"^(0x[0-9a-fA-F]+|\d+)$", size):
+            continue
+        size = int(size, 0) if size.startswith("0x") else int(size)
+        m = re.match(r"^(?:\w+\.)?__pl_sz_(\w+?)(?:\.\d+)?$", name)
+        if m:
+            sizes[m.group(1)] = size
+        m = re.match(r"^(?:\w+\.)?__pl_off_(\w+?)__(\w+?)(?:\.\d+)?$", name)
+        if m:
+            offs[m.group(1)] = (size - 1, m.group(2))
+    return {t: (sizes[t], offs[t][0], offs[t][1]) for t in sizes if t in offs}, path
+
 def short_name(name):
     """`main.Arr` / `layout::Arr` / `layout.Arr` → `Arr` (DWARF names carry the module);
     spaces are dropped so `GPair[int8,int64]` matches `GPair[int8, int64]`."""
     return re.sub(r"^(?:[A-Za-z_][\w]*(?:::|\.))+(?=[A-Za-z_])", "", name).replace(" ", "")
 
-def padlock_layouts(padlock, src):
-    out = sh([padlock, "explain", "--no-cache", src]).stdout
+def padlock_layouts(padlock, src, target=None):
+    out = sh([padlock, "explain", "--no-cache", *(["--target", target] if target else []), src]).stdout
     cur, got, prev = None, {}, ""
     for l in out.splitlines():
         m = re.match(r"^(\d+) bytes\s+align", l)
@@ -109,6 +176,8 @@ def main():
     ap.add_argument("--lang", default="go,c,cpp,rust,zig,c23")
     ap.add_argument("--backend", default="both", choices=["source", "dwarf", "both"],
                     help="check padlock's source frontends, its DWARF reader on a debug build, or both")
+    ap.add_argument("--cross", action="store_true",
+                    help="also check C layouts for other targets (zig cc + padlock --target)")
     ap.add_argument("--update-xfail", action="store_true", help="rewrite xfail.txt from current failures")
     a = ap.parse_args()
     xfile = os.path.join(HERE, "xfail.txt")
@@ -159,6 +228,69 @@ def main():
                     print(f"[{tag}] FAIL  {name}: {detail}"); failures.append(key)
         total_bad += bad
         print(f"[{tag}] {len(t) - bad}/{len(t)} match the compiler")
+    if a.cross and shutil.which(os.environ.get("ZIG", "zig")) and shutil.which("readelf"):
+        src = os.path.join(HERE, "c", "layout.c")
+        for target, arch in CROSS_TARGETS:
+            tag = f"{arch}-c"
+            with tempfile.TemporaryDirectory() as tmp:
+                t, probe = cross_truth(src, target, tmp)
+                # Analyze the same probe source padlock would see, for that target.
+                out = sh([a.padlock, "explain", "--no-cache", "--target", arch, probe]).stdout
+                got = {}
+                cur, prev = None, ""
+                for l in out.splitlines():
+                    m = re.match(r"^(\d+) bytes\s+align", l)
+                    if m:
+                        cur = re.sub(r"\s+\(.*:\d+\)$", "", prev.strip())
+                        got.setdefault(cur, {"rows": []})["size"] = int(m.group(1)); continue
+                    if l.strip():
+                        prev = l
+                    m = re.match(r"^│\s+(\d+)\s+│\s+(\d+)\s+│.*│\s+(.+?)\s*│$", l)
+                    if m and cur and "<padding>" not in l:
+                        got[cur]["rows"].append((int(m.group(1)), m.group(3).split(":")[0].strip()))
+            bad = 0
+            for name, (sz, off, field) in t.items():
+                g = got.get(name)
+                rows = g["rows"] if g else []
+                o = next((o for o, n in rows if n == field), None)
+                ok = bool(g) and g.get("size") == sz and o == off
+                key = f"{tag}:{name}"
+                if ok and key in xfail:
+                    print(f"[{tag}] XPASS {name} (remove from xfail.txt)"); failures.append(key + " XPASS")
+                elif not ok:
+                    bad += 1; newx.append(key)
+                    detail = f"truth {sz}/{off} padlock {g.get('size') if g else 'missing'}/{o}"
+                    if key in xfail:
+                        print(f"[{tag}] xfail {name}: {detail}")
+                    else:
+                        print(f"[{tag}] FAIL  {name}: {detail}"); failures.append(key)
+            print(f"[{tag}] {len(t) - bad}/{len(t)} match the compiler")
+        # Go and Zig probes for 32-bit x86 run natively on an x86-64 host.
+        for lang, cross, arch in [("go", "386", "x86"), ("zig", "x86-linux", "x86")]:
+            if not have(lang):
+                continue
+            tag = f"{arch}-{lang}"
+            src = os.path.join(HERE, lang, f"layout.{ext[lang]}")
+            with tempfile.TemporaryDirectory() as tmp:
+                t = truth(lang, src, tmp, cross)
+            got = padlock_layouts(a.padlock, src, arch)
+            bad = 0
+            for name, (sz, off, field) in t.items():
+                g = got.get(name)
+                rows = g["rows"] if g else []
+                o = next((o for o, n in rows if n == field), None) if field else (rows[-1][0] if rows else None)
+                ok = bool(g) and g.get("size") == sz and (off < 0 or o == off)
+                key = f"{tag}:{name}"
+                if ok and key in xfail:
+                    print(f"[{tag}] XPASS {name} (remove from xfail.txt)"); failures.append(key + " XPASS")
+                elif not ok:
+                    bad += 1; newx.append(key)
+                    detail = f"truth {sz}/{off} padlock {g.get('size') if g else 'missing'}/{o}"
+                    if key in xfail:
+                        print(f"[{tag}] xfail {name}: {detail}")
+                    else:
+                        print(f"[{tag}] FAIL  {name}: {detail}"); failures.append(key)
+            print(f"[{tag}] {len(t) - bad}/{len(t)} match the compiler")
     if a.update_xfail:
         with open(xfile, "w") as f:
             f.write("# Known layout gaps vs. the real compiler (see run.py). Remove entries as they are fixed.\n")

@@ -29,10 +29,11 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "int8" | "uint8" | "byte" => (1, 1),
         "int16" | "uint16" => (2, 2),
         "int32" | "uint32" | "rune" | "float32" => (4, 4),
-        "int64" | "uint64" | "float64" => (8, 8),
-        // complex64 is two float32 (align 4); complex128 is two float64 (align 8).
+        // 64-bit scalars are only word-aligned on 32-bit targets (386, arm).
+        "int64" | "uint64" | "float64" => (8, arch.pointer_size.min(8)),
+        // complex64 is two float32 (align 4); complex128 is two float64.
         "complex64" => (8, 4),
-        "complex128" => (16, 8),
+        "complex128" => (16, arch.pointer_size.min(8)),
         "int" | "uint" => (arch.pointer_size, arch.pointer_size),
         "uintptr" => (arch.pointer_size, arch.pointer_size),
         "string" => (arch.pointer_size * 2, arch.pointer_size), // ptr + len
@@ -85,11 +86,12 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "sync.Pool" => (arch.pointer_size * 5, arch.pointer_size),
         // sync.Cond: { noCopy; L Locker (2 words); notify notifyList (4 words:
         //   wait, notify uint32, lock uintptr, head, tail pointers); checker copyChecker (1 word) }
-        "sync.Cond" => (arch.pointer_size * 7, arch.pointer_size),
+        "sync.Cond" => (8 + arch.pointer_size * 6, arch.pointer_size),
         // atomic.Pointer[T]: { _ [0]*T; _ noCopy; v unsafe.Pointer } — one pointer.
         "atomic.Pointer" => (arch.pointer_size, arch.pointer_size),
         // Plain integer-backed stdlib types.
-        "time.Duration" | "time.Month" | "time.Weekday" => (8, 8),
+        "time.Duration" => (8, arch.pointer_size.min(8)),
+        "time.Month" | "time.Weekday" => (arch.pointer_size, arch.pointer_size),
         "os.FileMode" | "fs.FileMode" => (4, 4),
         // []byte-backed stdlib types.
         "net.IP" | "json.RawMessage" | "net.HardwareAddr" => {
@@ -131,10 +133,10 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         | "slog.Handler" => (arch.pointer_size * 2, arch.pointer_size),
         // sync.Map (Go 1.19+): { mu Mutex(8); read atomic.Pointer(8);
         //   dirty map(8); misses int(8) } = 4 words. Stable layout since 1.19.
-        "sync.Map" => (arch.pointer_size * 4, arch.pointer_size),
+        "sync.Map" => (8 + arch.pointer_size * 3, arch.pointer_size),
         // time.Time: { wall uint64; ext int64; loc *Location } = 24B, align 8.
         // Stable across all Go versions (Go 1 compatibility guarantee).
-        "time.Time" => (24, 8),
+        "time.Time" => (16 + arch.pointer_size, arch.pointer_size.min(8)),
         // strings.Builder: { addr *Builder(1 word); buf []byte(3 words) } = 4 words.
         "strings.Builder" => (arch.pointer_size * 4, arch.pointer_size),
         // bytes.Buffer: { buf []byte(3 words); off int(1 word); lastRead int8(1B+pad) }

@@ -40,8 +40,25 @@ const N: usize = 8;
 #[repr(C)] struct Bs { a: u8, s: std::sync::mpsc::Sender<u8>, c: u8 }
 #[repr(C)] struct Ty { a: u8, t: (u8, u8), c: u8 }
 #[repr(C)] struct Rg { a: u8, r: std::ops::Range<u32>, c: u8 }
+type Word = u16;
+const LEN: usize = 3;
+const BIG: usize = LEN * 2 + size_of::<u64>();
+#[repr(C)] struct Opts { a: u8, o1: Option<&'static str>, o2: Option<Vec<u8>>, o3: Option<bool>, o4: Option<char>, o5: Option<Box<str>>, o6: Option<String>, o7: Option<std::time::Duration>, c: u8 }
+#[repr(C)] struct Unsz { a: u8, b: Box<str>, c: Box<[u8]>, d: Arc<str>, e: &'static [u8], f: *const [u8], g: u8 }
+#[repr(C)] struct Alias { a: u8, w: Word, x: [Word; LEN], c: u8 }
+#[repr(C)] struct Lens { a: u8, b: [u8; BIG], c: [u32; LEN as usize], d: u8 }
+#[repr(C)] struct NestArr { a: u8, n: [[In; 2]; 3], c: u8 }
+#[repr(C, packed(4))] struct Pk4 { a: u8, b: u64, c: u8 }
+#[repr(C)] struct SyncMore { a: u8, cv: std::sync::Condvar, o: std::sync::Once, ol: std::sync::OnceLock<u64>, c: u8 }
+#[repr(C)] struct Ranges { a: u8, r: std::ops::RangeInclusive<u16>, s: std::ops::Range<u64>, c: u8 }
+#[repr(u16)] enum E16 { A, B }
+enum One { Only }
+#[repr(C)] struct EnumF { a: u8, e: E16, o: One, c: u8 }
+#[repr(C)] struct CStr { a: u8, s: std::ffi::CString, c: u8 }
+#[repr(C)] struct TupNest { a: u8, t: ((u8, u16), u32, [u8; 3]), u: (In, u8), c: u8 }
 macro_rules! p { ($t:ident, $f:ident) => { println!("{} {} {}", stringify!($t), size_of::<$t>(), offset_of!($t, $f)); } }
 fn main() {
 p!(Arr,c);p!(ArrConst,c);p!(ArrExpr,c);p!(ArrArr,c);p!(ArrS,c);p!(Tup,c);p!(Unit,c);p!(Str,c);p!(Opt,c);p!(Atom,c);p!(Sync,c);p!(Ptrs,c);p!(Maps,c);p!(Cells,c);p!(Fns,c);p!(Num,c);p!(Us,c);p!(Pk,c);p!(Pk2,c);p!(AlO,c);p!(Nested,c);p!(Pd,c);p!(WE,c);p!(Dur,c);p!(NZ,c);p!(Raw,c);p!(Wrap,c);p!(Pin,c);p!(PS,c);p!(Bs,c);p!(Ty,c);p!(Rg,c);
-println!("Al {} 0", size_of::<Al>());
+p!(Opts,c);p!(Unsz,g);p!(Alias,c);p!(Lens,d);p!(NestArr,c);p!(Pk4,c);p!(SyncMore,c);p!(Ranges,c);p!(EnumF,c);p!(CStr,c);p!(TupNest,c);
+    println!("Al {} 0", size_of::<Al>());
 }

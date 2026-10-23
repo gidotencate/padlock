@@ -112,6 +112,18 @@ fn tokenize(expr: &str) -> Option<Vec<Tok>> {
                 }
             }
             let path = &expr[start..i];
+            // `N as usize`: integer casts do not change the value we model.
+            if path == "as" {
+                let rest = expr[i..].trim_start();
+                let ty_len = rest
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                if ty_len == 0 || toks.is_empty() {
+                    return None;
+                }
+                i = expr.len() - rest.len() + ty_len;
+                continue;
+            }
             if is_sizeof_name(path) {
                 let rest = &expr[i..];
                 // Rust: `size_of::<T>()`
@@ -287,6 +299,13 @@ mod tests {
         assert_eq!(ev("@sizeOf(u64)"), Some(8));
         assert_eq!(ev("std::mem::size_of::<u64>() * 2"), Some(16));
         assert_eq!(ev("size_of::<u8>()"), Some(1));
+    }
+
+    #[test]
+    fn integer_casts_are_transparent() {
+        assert_eq!(ev("N as usize * 2"), Some(16));
+        assert_eq!(ev("(N + 1) as u32"), Some(9));
+        assert_eq!(ev("as usize"), None);
     }
 
     #[test]

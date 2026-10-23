@@ -2,6 +2,19 @@
 
 All notable changes to padlock are documented here.
 
+## [0.27.0] — 2026-10-23
+
+Conformance harness against `rustc` (`repr(C)` structs, `size_of`/`offset_of!`): Rust 22/33 → 43/44 (the remaining case is a tuple holding a local struct).
+
+### Fixed
+- **Rust array lengths were only understood as integer literals**; `[u8; N]` with a `const N`, or `[u8; N * 2 + 1]`, silently became a **zero-length** array. Lengths are now evaluated: `const`s (including ones defined in terms of other consts), arithmetic, `as` casts, and `size_of::<T>()`. An unevaluable length is sized as one element and listed in `uncertain_fields`. Local `type Alias = T;` is resolved, and arrays of local structs (including nested arrays) are scaled by the nested-struct resolver.
+- **Tuples** (`(u8, u32, u8)`) were pointer-sized; they are now laid out like rustc does (largest alignment first).
+- **Fat pointers to `str` / `[T]`** (`&str`, `&[T]`, `Box<str>`, `Box<[T]>`, `Arc<str>`, `*const [T]`) were one word instead of two; `Option<…>` of them follows.
+- **`Option<T>` of types with a niche** (`Vec`, `String`, `PathBuf`, `bool`, `char`, `Duration`, `Box<str>`, …) was inflated by a tag byte.
+- **`Mutex<T>`, `RwLock<T>`, `OnceLock<T>`, `Condvar`, `Once`, `Range<T>`, `RangeInclusive<T>`, `mpsc::Sender/Receiver`, `CString`** were pointer-sized regardless of `T` (std futex implementation on Linux; macOS/Windows differ).
+- **`#[repr(packed(N))]`** was treated as `packed(1)`; it now caps alignment at `N` and keeps trailing padding.
+- **Fieldless enum discriminant width** ignored `#[repr(u16)]` / `#[repr(u32)]` / `#[repr(C)]` (always 1 byte), so a `repr(C)` enum field made its parent struct too small; a single-variant fieldless enum is zero-sized.
+
 ## [0.26.0] — 2026-10-23
 
 Conformance harness (`tests/conformance/run.py`) against `go run` + `unsafe.Sizeof/Offsetof`: Go 9/26 → 33/33.

@@ -136,6 +136,26 @@ struct ZigCtx {
     enums: HashMap<String, String>,
     /// Local `struct` / `union` names, sized later by the nested-struct resolver.
     containers: HashSet<String>,
+    /// Local `packed struct`s → their field type texts, so a packed struct nested
+    /// in another packed struct contributes its exact bit width.
+    packed: HashMap<String, Vec<String>>,
+}
+
+/// Bit width of a type inside a `packed struct`: arbitrary-width integers are
+/// exact, enums use their backing integer, nested packed structs the sum of
+/// their fields; everything else its byte size × 8.
+fn zig_bits(ty: &str, ctx: &ZigCtx, depth: u8) -> usize {
+    let ty = ty.trim();
+    if depth > 8 {
+        return ctx.arch.pointer_size * 8;
+    }
+    if let Some(backing) = ctx.enums.get(ty) {
+        return zig_bits(backing, ctx, depth + 1);
+    }
+    if let Some(fields) = ctx.packed.get(ty) {
+        return fields.iter().map(|f| zig_bits(f, ctx, depth + 1)).sum();
+    }
+    zig_type_bit_width(ty, ctx.arch)
 }
 
 /// Size/alignment of a type node plus what the caller needs to finish the job.
@@ -195,6 +215,7 @@ fn collect_zig_decls(source: &str, root: Node<'_>, arch: &'static ArchConfig) ->
         consts: HashMap::new(),
         enums: HashMap::new(),
         containers: HashSet::new(),
+        packed: HashMap::new(),
     };
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
@@ -220,6 +241,18 @@ fn collect_zig_decls(source: &str, root: Node<'_>, arch: &'static ArchConfig) ->
         };
         match init.kind() {
             "struct_declaration" | "union_declaration" => {
+                let is_packed = (0..init.child_count())
+                    .filter_map(|i| init.child(i))
+                    .any(|c| c.kind() == "packed");
+                if is_packed {
+                    let types = named_children(*init)
+                        .into_iter()
+                        .filter(|c| c.kind() == "container_field")
+                        .filter_map(|f| f.child_by_field_name("type"))
+                        .map(|t| node_text(source, t).to_string())
+                        .collect();
+                    ctx.packed.insert(name.clone(), types);
+                }
                 ctx.containers.insert(name);
             }
             "enum_declaration" => {
@@ -652,6 +685,8 @@ fn parse_union_declaration(
         is_repr_rust: false,
         suppressed_findings: Vec::new(), // set by parse_variable_declaration
         uncertain_fields,
+        forced_align: None,
+        pack_limit: None,
     })
 }
 
@@ -704,15 +739,24 @@ fn parse_struct_declaration(
         // Total struct size = ceil(total_bits / 8).
         let mut bit_offset = 0usize;
         for (fname, type_text, _byte_size, _byte_align, field_line) in &raw_fields {
-            let bit_width = zig_type_bit_width(type_text, arch);
+            let bit_width = zig_bits(type_text, ctx, 0);
             let byte_offset = bit_offset / 8;
             let byte_size = bit_width
                 .div_ceil(8)
                 .max(if bit_width == 0 { 0 } else { 1 });
+            // A named type's bits are already counted here; label it so the
+            // nested-struct resolver does not re-size it in bytes.
+            let display = if ctx.packed.contains_key(type_text.as_str())
+                || ctx.enums.contains_key(type_text.as_str())
+            {
+                format!("{type_text} ({bit_width} bits)")
+            } else {
+                type_text.clone()
+            };
             fields.push(Field {
                 name: fname.clone(),
                 ty: TypeInfo::Primitive {
-                    name: type_text.clone(),
+                    name: display,
                     size: byte_size,
                     align: 1,
                 },
@@ -775,6 +819,9 @@ fn parse_struct_declaration(
         is_repr_rust: !is_extern && !is_packed,
         suppressed_findings: Vec::new(), // set by parse_variable_declaration
         uncertain_fields,
+        // A packed struct's size is its backing integer's ABI size.
+        forced_align: is_packed.then_some(struct_align),
+        pack_limit: None,
     })
 }
 

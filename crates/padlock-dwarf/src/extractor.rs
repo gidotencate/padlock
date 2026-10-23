@@ -344,6 +344,8 @@ impl<'a, R: Reader> Extractor<'a, R> {
             is_repr_rust: false,
             suppressed_findings: Vec::new(),
             uncertain_fields,
+            forced_align: None,
+            pack_limit: None,
         }))
     }
 

@@ -36,6 +36,8 @@ const Atom = struct { a: u8, x: std.atomic.Value(u32), y: std.atomic.Value(u64),
 
 const E3 = enum { a, b, c };
 const E1 = enum { a };
+const PkInner = packed struct { a: u3, b: u2 };
+const PkNest = packed struct { x: PkInner, y: u8, z: PkInner };
 const PkA = packed struct { a: u8, b: u32 };
 const PkOdd = packed struct { a: u3, b: u5, c: u24 };
 const WOpt32 = struct { v: ?u32 };
@@ -87,6 +89,7 @@ pub fn main() void {
     p(WithU, "c");
     p(PkOuter, "c");
     p(Al, "c");
+    w(PkNest);
     w(PkA);
     w(PkOdd);
     w(WOpt32);

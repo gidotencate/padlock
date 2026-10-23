@@ -331,6 +331,7 @@ pub fn parse_source_str(
     // Resolve fields whose type names match other structs in this file.
     // This makes nested struct sizes accurate (instead of defaulting to pointer size).
     resolve_nested_structs(&mut layouts);
+    hide_anonymous_aggregates(&mut layouts);
 
     // Annotate concurrency patterns
     for layout in &mut layouts {
@@ -396,7 +397,12 @@ fn cpp_views(layouts: &[StructLayout]) -> HashMap<String, CppView> {
         .map(|l| {
             let nv = l.fields.iter().filter(|f| !f.name.starts_with("__vbase_"));
             let nvsize = nv.clone().map(|f| f.offset + f.size).max().unwrap_or(0);
-            let nvalign = nv.map(|f| f.align).max().unwrap_or(1).max(1);
+            // Never stricter than the class itself (`#pragma pack` / `packed` cap it).
+            let nvalign = nv
+                .map(|f| f.align)
+                .max()
+                .unwrap_or(1)
+                .clamp(1, l.align.max(1));
             (
                 l.name.clone(),
                 CppView {
@@ -597,6 +603,12 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
             continue;
         }
         layout.fields = rebuilt;
+        // `packed` applies to data members, not to base subobjects or the vptr.
+        for f in &layout.fields {
+            if is_cpp_slot(&f.name) && !layout.explicit_align.contains(&f.name) {
+                layout.explicit_align.push(f.name.clone());
+            }
+        }
         resimulate_layout(layout);
         if layout.total_size == 0 {
             // C++ objects are never zero-sized.
@@ -605,6 +617,28 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
         changed_any = true;
     }
     changed_any
+}
+
+/// Drop the synthetic layouts of anonymous member aggregates once they have done
+/// their job (sizing their parents), and show the members that use them as
+/// `struct { … }` / `union { … }`.
+fn hide_anonymous_aggregates(layouts: &mut Vec<StructLayout>) {
+    let prefix = frontends::c_cpp::ANON_PREFIX;
+    layouts.retain(|l| !l.name.starts_with(prefix));
+    for l in layouts.iter_mut() {
+        for f in l.fields.iter_mut() {
+            if let TypeInfo::Primitive { name, .. } | TypeInfo::Opaque { name, .. } = &mut f.ty
+                && let Some(rest) = name.strip_prefix(prefix)
+            {
+                let kind = rest.split('#').next().unwrap_or("struct");
+                let dims = name
+                    .find('[')
+                    .map(|i| name[i..].to_string())
+                    .unwrap_or_default();
+                *name = format!("{kind} {{ … }}{dims}");
+            }
+        }
+    }
 }
 
 /// Split `Name[2][3]` into (`Name`, 6). `[]` counts as 0 elements and an
@@ -649,6 +683,40 @@ fn resolve_nested_structs(layouts: &mut [StructLayout]) {
             .iter()
             .map(|l| (l.name.clone(), (l.total_size, l.align)))
             .collect();
+        // C++ classes that are not POD: GCC ignores `packed` for members of such
+        // a type ("ignoring packed attribute because of unpacked non-POD field").
+        let mut non_pod: std::collections::HashSet<String> = layouts
+            .iter()
+            .filter(|l| {
+                l.cpp
+                    .as_ref()
+                    .is_some_and(|i| i.non_pod || i.has_virtual_methods || !i.bases.is_empty())
+            })
+            .map(|l| l.name.clone())
+            .collect();
+        let packed_types: std::collections::HashSet<String> = layouts
+            .iter()
+            .filter(|l| l.is_packed)
+            .map(|l| l.name.clone())
+            .collect();
+        // …and so is any C++ class or union with a non-POD member.
+        loop {
+            let before = non_pod.len();
+            for l in layouts.iter().filter(|l| l.cpp.is_some()) {
+                let has_non_pod_member = l.fields.iter().any(|f| match &f.ty {
+                    TypeInfo::Primitive { name, .. } | TypeInfo::Opaque { name, .. } => {
+                        non_pod.contains(split_c_array_suffix(name).0)
+                    }
+                    _ => false,
+                });
+                if has_non_pod_member {
+                    non_pod.insert(l.name.clone());
+                }
+            }
+            if non_pod.len() == before {
+                break;
+            }
+        }
 
         let mut changed_any = apply_cpp_inheritance(layouts);
 
@@ -691,12 +759,40 @@ fn resolve_nested_structs(layouts: &mut [StructLayout]) {
 
                 if let Some(&(elem_size, struct_align)) = known.get(elem_name) {
                     let struct_size = elem_size.saturating_mul(elem_count);
-                    // Only update if the size would change — avoids infinite loops
+                    // An explicitly aligned member keeps its alignment (never below
+                    // the type's own); in a packed struct others drop to 1.
+                    // (A type that is itself packed can be packed into another.)
+                    if layout.is_packed
+                        && non_pod.contains(elem_name)
+                        && !packed_types.contains(elem_name)
+                    {
+                        // Track the member type's alignment as it gets resolved.
+                        if field.align != struct_align {
+                            field.align = struct_align;
+                            changed = true;
+                        }
+                        if !layout.explicit_align.contains(&field.name) {
+                            layout.explicit_align.push(field.name.clone());
+                            changed = true;
+                        }
+                    }
+                    let eff_align = if layout.explicit_align.contains(&field.name) {
+                        // In a packed struct the explicit value stands as written.
+                        if layout.is_packed || layout.pack_limit.is_some() {
+                            field.align
+                        } else {
+                            field.align.max(struct_align)
+                        }
+                    } else if layout.is_packed {
+                        1
+                    } else {
+                        struct_align
+                    };
+                    // Only update if something would change — avoids infinite loops
                     // for pointer-sized structs that already have the right size.
-                    if field.size == struct_size && field.align == struct_align {
+                    if field.size == struct_size && field.align == eff_align {
                         continue;
                     }
-                    let eff_align = if layout.is_packed { 1 } else { struct_align };
                     field.ty = TypeInfo::Opaque {
                         name: type_name,
                         size: struct_size,
@@ -753,7 +849,14 @@ fn resimulate_layout(layout: &mut StructLayout) {
             field.offset = 0;
         }
         let max_size = layout.fields.iter().map(|f| f.size).max().unwrap_or(0);
-        let max_align = layout.fields.iter().map(|f| f.align).max().unwrap_or(1);
+        // `union U { … } __attribute__((aligned(64)))` keeps its alignment.
+        let max_align = layout
+            .fields
+            .iter()
+            .map(|f| f.align)
+            .max()
+            .unwrap_or(1)
+            .max(layout.forced_align.unwrap_or(1));
         layout.total_size = if max_align > 0 {
             max_size.next_multiple_of(max_align)
         } else {
@@ -773,7 +876,14 @@ fn resimulate_layout(layout: &mut StructLayout) {
     let mut struct_align = 1usize;
 
     for field in layout.fields.iter_mut() {
-        let eff_align = cap.map_or(field.align, |c| field.align.min(c));
+        let eff_align = if layout.explicit_align.contains(&field.name) {
+            // `#pragma pack(N)` caps even explicit alignment (the attribute does not).
+            layout
+                .pack_limit
+                .map_or(field.align, |p| field.align.min(p))
+        } else {
+            cap.map_or(field.align, |c| field.align.min(c))
+        };
         if eff_align > 0 {
             offset = offset.next_multiple_of(eff_align);
         }
@@ -787,7 +897,9 @@ fn resimulate_layout(layout: &mut StructLayout) {
     if let Some(fa) = layout.forced_align {
         struct_align = struct_align.max(fa);
     }
-    if (!packed || layout.forced_align.is_some()) && struct_align > 0 {
+    // Packed structs have alignment 1 unless a member is explicitly aligned, so
+    // rounding is a no-op for them.
+    if struct_align > 0 {
         offset = offset.next_multiple_of(struct_align);
     }
 

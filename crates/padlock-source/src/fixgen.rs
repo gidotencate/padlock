@@ -1588,6 +1588,7 @@ mod tests {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         };
         let fixed = apply_fixes_go(src, &[&layout]);
         // X (int64, align 8) must appear before Flag (bool, align 1)

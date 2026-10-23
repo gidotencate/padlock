@@ -402,6 +402,7 @@ mod tests {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         };
         let out = render_explain(&big);
         assert!(
@@ -479,6 +480,7 @@ mod tests {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         };
         let out = render_explain(&big);
         // field 'b' starts at offset 64 → cache line 1

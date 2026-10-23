@@ -800,6 +800,7 @@ fn parse_struct_type(
         forced_align: None,
         pack_limit: None,
         cpp: None,
+        explicit_align: Vec::new(),
     })
 }
 

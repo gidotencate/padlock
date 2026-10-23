@@ -2,6 +2,21 @@
 
 All notable changes to padlock are documented here.
 
+## [0.48.0] — 2026-10-23
+
+New: `tests/conformance/fuzz.py`, differential fuzzing of C/C++ layouts against gcc/g++ (random scalars, constant-expression arrays, bit-fields incl. `T : 0`, nested/anonymous aggregates, unions, enums, `packed`/`aligned`/`#pragma pack`, C++ inheritance). Before the fixes below: 483 mismatching fields in the first 30 C rounds. Now: **0 mismatches in 260 C rounds (~6,500 structs)**; C++ is down to a handful of mismatches per 60 rounds, all combining `packed` with inheritance.
+
+### Fixed
+- **Anonymous member aggregates (`struct { … } m;`, anonymous unions) were sized before their own members' types were known**, so one containing a named struct got a pointer-sized placeholder for it. They are now synthetic layouts the nested-struct resolver sizes like any type (shown as `struct { … }` / `union { … }`); records laid out earlier in a file are also known while parsing, so bit-field runs after them start at the right offset.
+- **`#pragma pack` was ignored for unions and for anonymous aggregates defined inside the packed region.**
+- **Explicit member alignment**: `aligned(N)` / `alignas(N)` survives the `packed` attribute (but not `#pragma pack`), can never lower a type's natural alignment outside a packed struct (`aligned(2)` on a `long double` is ignored), survives nested-struct resolution, applies inside unions, and a type-level `aligned(N)` wins over `#pragma pack`; a packed struct with an aligned member is padded to that alignment.
+- **Bit-fields**: under `packed` or `#pragma pack` they may straddle unit boundaries; `T : 0` reserves the bytes up to the next `T` boundary even when packing or a smaller next type would pull the run back, including at the end of the struct and before an ordinary member (`struct { char a; long long : 0; char b; }` puts `b` at 8); a run is aligned by its *first* member's type; bit-field types no longer raise the alignment of a `packed` struct, and `#pragma pack` caps it.
+- **C++ `packed`**: base subobjects and the vptr are not packed (but `#pragma pack` caps them); a member of non-POD class type keeps its alignment (GCC ignores `packed` for it) unless that type is itself packed; non-POD-ness propagates through members; a class's non-virtual alignment never exceeds its own (pragma-capped) alignment.
+- `union U { … } __attribute__((aligned(N)))` kept its alignment only until a nested type was resolved.
+
+### Changed
+- `StructLayout` gained `explicit_align` (field names with an explicit alignment; omitted from JSON when empty).
+
 ## [0.47.0] — 2026-10-23
 
 ### Added

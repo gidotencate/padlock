@@ -933,6 +933,7 @@ fn parse_union_declaration(
         forced_align: None,
         pack_limit: None,
         cpp: None,
+        explicit_align: Vec::new(),
     })
 }
 
@@ -1069,6 +1070,7 @@ fn parse_struct_declaration(
         forced_align: is_packed.then_some(struct_align),
         pack_limit: None,
         cpp: None,
+        explicit_align: Vec::new(),
     };
     crate::apply_compiler_order(&mut layout);
     Some(layout)

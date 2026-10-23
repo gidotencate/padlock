@@ -12,6 +12,7 @@ use anyhow::Context;
 use clap::{Args, ValueEnum};
 use padlock_core::findings::{Finding, Report, Severity};
 use padlock_core::ir::{StructLayout, find_padding};
+use std::path::PathBuf;
 
 use padlock_core::config::Config;
 
@@ -72,6 +73,14 @@ pub struct FilterArgs {
     /// Merged with `defines` from `.padlock.toml`.
     #[arg(long = "define", short = 'D', value_name = "NAME[=VALUE]")]
     pub defines: Vec<String>,
+
+    /// Exact C/C++ layouts: compile every translation unit in this
+    /// `compile_commands.json` with debug info (using its own flags, defines and
+    /// include paths) and read the layouts the compiler produced. Structs from
+    /// those files replace the source-level estimates; templates are exact for
+    /// every instantiation the code uses.
+    #[arg(long, value_name = "FILE")]
+    pub compile_commands: Option<PathBuf>,
 
     /// Lay out Rust `repr(Rust)` and plain Zig structs in source declaration order.
     ///
@@ -260,6 +269,7 @@ mod tests {
         FilterArgs {
             defines: Vec::new(),
             declared_order: false,
+            compile_commands: None,
             filter: filter.map(str::to_owned),
             exclude: exclude.map(str::to_owned),
             min_holes,

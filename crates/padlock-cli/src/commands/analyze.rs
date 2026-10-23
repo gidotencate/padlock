@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use padlock_core::findings::Report;
 
 use crate::filter::{FailSeverity, FilterArgs};
-use crate::paths::collect_layouts;
 use padlock_core::config::Config;
 
 /// Output and arch options for the `analyze` subcommand.
@@ -61,8 +60,7 @@ pub fn run(paths: &[PathBuf], opts: AnalyzeOpts, filter: &FilterArgs) -> anyhow:
         target.as_deref().or(cfg.arch_override.as_deref()),
         word_size,
     );
-    let (mut layouts, analyzed, skipped) =
-        collect_layouts(paths, filter.include_generated, filter.no_cache)?;
+    let (mut layouts, analyzed, skipped) = crate::paths::collect_layouts_with(paths, &filter)?;
 
     // Apply arch override: CLI --target takes precedence over config arch.override.
     let arch_name_override = target.as_deref().or(cfg.arch_override.as_deref());

@@ -24,7 +24,6 @@ use padlock_core::findings::{Report, Severity};
 use serde::{Deserialize, Serialize};
 
 use crate::filter::FilterArgs;
-use crate::paths::collect_layouts;
 use padlock_core::config::Config;
 
 /// Per-struct snapshot stored in the baseline file.
@@ -79,8 +78,7 @@ pub fn run(
 
     // Parse sources for the requested target, not just relabel them afterwards.
     crate::paths::set_source_arch(target.as_deref().or(cfg.arch_override.as_deref()), None);
-    let (mut layouts, analyzed, skipped) =
-        collect_layouts(paths, filter.include_generated, filter.no_cache)?;
+    let (mut layouts, analyzed, skipped) = crate::paths::collect_layouts_with(paths, &filter)?;
 
     // Apply arch override: CLI --target takes precedence over config arch.override.
     let arch_name_override = target.as_deref().or(cfg.arch_override.as_deref());

@@ -280,6 +280,39 @@ pub fn source_arch() -> &'static padlock_core::arch::ArchConfig {
         .unwrap_or_else(padlock_dwarf::reader::detect_arch_from_host)
 }
 
+/// [`collect_layouts`], plus exact compiler layouts from `--compile-commands`
+/// when given: those replace the source-level layouts of the files compiled.
+pub fn collect_layouts_with(
+    paths: &[PathBuf],
+    filter: &crate::filter::FilterArgs,
+) -> anyhow::Result<(Vec<StructLayout>, Vec<String>, Vec<SkippedStruct>)> {
+    let (mut layouts, mut analyzed, mut skipped) =
+        collect_layouts(paths, filter.include_generated, filter.no_cache)?;
+    if let Some(cc) = &filter.compile_commands {
+        let (exact, compiled) = crate::compile_commands::collect(cc)?;
+        let compiled: std::collections::HashSet<String> = compiled
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let exact_files: std::collections::HashSet<String> =
+            exact.iter().filter_map(|l| l.source_file.clone()).collect();
+        // Source-level estimates for anything the compiler described are dropped.
+        let replaced = |f: &Option<String>| {
+            f.as_ref().is_some_and(|f| {
+                let canon = std::fs::canonicalize(f)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| f.clone());
+                exact_files.contains(&canon) || exact_files.contains(f) || compiled.contains(&canon)
+            })
+        };
+        layouts.retain(|l| !replaced(&l.source_file));
+        skipped.retain(|s| !replaced(&s.source_file));
+        layouts.extend(exact);
+        analyzed.extend(compiled);
+    }
+    Ok((layouts, analyzed, skipped))
+}
+
 /// Pass `[instantiate]` entries from `.padlock.toml` to the source frontends.
 pub fn apply_configured_instantiations(cfg: &padlock_core::config::Config) {
     padlock_source::set_configured_instantiations(

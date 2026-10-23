@@ -197,7 +197,7 @@ def padlock_layouts(padlock, src, target=None):
         m = re.match(r"^(\d+) bytes\s+align", l)
         if m:
             # The header line above: `Name  (file:line)` (source) or `Name` (binary).
-            cur = re.sub(r"\s+\(.*:\d+\)$", "", prev.strip())
+            cur = re.sub(r"\s{2}\([^()]*\)$", "", prev.strip())
             got.setdefault(cur, {"rows": []})["size"] = int(m.group(1))
             continue
         if l.strip():
@@ -283,7 +283,7 @@ def main():
                 for l in out.splitlines():
                     m = re.match(r"^(\d+) bytes\s+align", l)
                     if m:
-                        cur = re.sub(r"\s+\(.*:\d+\)$", "", prev.strip())
+                        cur = re.sub(r"\s{2}\([^()]*\)$", "", prev.strip())
                         got.setdefault(cur, {"rows": []})["size"] = int(m.group(1)); continue
                     if l.strip():
                         prev = l

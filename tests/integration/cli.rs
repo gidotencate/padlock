@@ -749,3 +749,50 @@ fn target_flag_lays_sources_out_for_that_target() {
         .assert()
         .success();
 }
+
+#[test]
+fn compile_commands_gives_compiler_exact_layouts() {
+    if std::process::Command::new("g++")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("g++ not available; skipping");
+        return;
+    }
+    let dir = tempfile::TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir(&src).unwrap();
+    // A macro-generated field and a -D-selected branch: invisible to source parsing.
+    std::fs::write(
+        src.join("conn.h"),
+        "#define FIELD(t, n) t n;\ntemplate<class T> struct Box { char tag; T value; };\nstruct Conn {\n  char state;\n  FIELD(long, id)\n#ifdef WIDE\n  long extra[4];\n#endif\n  Box<double> b;\n};\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("conn.cpp"), "#include \"conn.h\"\nConn g;\n").unwrap();
+    let db = dir.path().join("compile_commands.json");
+    std::fs::write(
+        &db,
+        serde_json::json!([{
+            "directory": src,
+            "file": "conn.cpp",
+            "command": "g++ -std=c++17 -DWIDE -O2 -c conn.cpp -o conn.o"
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let out = padlock()
+        .args(["analyze", "--json", "--no-cache", "--compile-commands"])
+        .arg(&db)
+        .arg(&src)
+        .output()
+        .unwrap();
+    // g++ -DWIDE: char(1)+7, long 8, long[4] 32, Box<double> 16 = 64.
+    assert_eq!(
+        struct_size(&out.stdout, "Conn"),
+        Some(64),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(struct_size(&out.stdout, "Box<double>"), Some(16));
+}

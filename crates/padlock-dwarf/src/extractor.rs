@@ -234,14 +234,11 @@ impl<'a, R: Reader> Extractor<'a, R> {
             },
         };
 
-        let source_file = self.attr_string(unit, entry, gimli::DW_AT_decl_file)?;
-        let source_line = entry.attr_value(gimli::DW_AT_decl_line).and_then(|v| {
-            if let gimli::AttributeValue::Udata(n) = v {
-                Some(n as u32)
-            } else {
-                None
-            }
-        });
+        let source_file = self.decl_file(unit, entry);
+        let source_line = entry
+            .attr_value(gimli::DW_AT_decl_line)
+            .and_then(|v| v.udata_value())
+            .map(|n| n as u32);
 
         let mut fields = Vec::new();
         let mut uncertain_fields: Vec<String> = Vec::new();
@@ -538,6 +535,39 @@ impl<'a, R: Reader> Extractor<'a, R> {
             }),
             access: AccessPattern::Unknown,
         }))
+    }
+
+    /// The path named by an entry's `DW_AT_decl_file` (an index into the unit's
+    /// line-program file table), joined with its include directory and the
+    /// unit's compilation directory when relative.
+    pub(crate) fn decl_file(
+        &self,
+        unit: &Unit<R>,
+        entry: &DebuggingInformationEntry<R>,
+    ) -> Option<String> {
+        let index = match entry.attr_value(gimli::DW_AT_decl_file)? {
+            gimli::AttributeValue::FileIndex(i) => i,
+            v => v.udata_value()?,
+        };
+        let program = unit.line_program.as_ref()?;
+        let header = program.header();
+        let file = header.file(index)?;
+        let text = |v: gimli::AttributeValue<R>| -> Option<String> {
+            let s = self.dwarf.attr_string(unit, v).ok()?;
+            Some(s.to_string_lossy().ok()?.into_owned())
+        };
+        let name = text(file.path_name())?;
+        let mut path = std::path::PathBuf::new();
+        if let Some(dir) = unit.comp_dir.as_ref()
+            && let Ok(d) = dir.to_string_lossy()
+        {
+            path.push(d.as_ref());
+        }
+        if let Some(dir) = file.directory(header).and_then(text) {
+            path.push(dir);
+        }
+        path.push(name);
+        Some(path.to_string_lossy().into_owned())
     }
 
     pub(crate) fn attr_string(

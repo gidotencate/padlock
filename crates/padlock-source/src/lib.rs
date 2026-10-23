@@ -40,6 +40,33 @@ pub fn cpp_stdlib() -> CppStdlib {
     frontends::c_cpp::active_stdlib()
 }
 
+// ── compiler-chosen field order ───────────────────────────────────────────────
+
+static DECLARED_ORDER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lay out Rust `repr(Rust)` structs and plain (non-`extern`/`packed`) Zig
+/// structs in source declaration order instead of the order the compiler picks.
+/// Off by default. Process-global.
+pub fn set_declared_order(on: bool) {
+    DECLARED_ORDER.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `set_declared_order(true)` is in effect.
+pub fn declared_order() -> bool {
+    DECLARED_ORDER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Put the fields of a struct whose order the compiler chooses (`is_repr_rust`:
+/// Rust `repr(Rust)`, plain Zig) in the order current rustc and zig use —
+/// largest alignment first, ties in declaration order — and lay it out again.
+/// Sizes match the compilers; individual offsets are an estimate (rustc may
+/// move a field with a large niche to the front).
+pub(crate) fn apply_compiler_order(layout: &mut StructLayout) {
+    if layout.is_repr_rust && !layout.is_packed && !layout.is_union && !declared_order() {
+        resimulate_layout(layout);
+    }
+}
+
 // ── preprocessor defines ──────────────────────────────────────────────────────
 
 static DEFINES: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::new(Vec::new());
@@ -583,6 +610,10 @@ fn resimulate_layout(layout: &mut StructLayout) {
         return;
     }
 
+    if layout.is_repr_rust && !layout.is_packed && !declared_order() {
+        // Stable: equal alignments keep their current (declaration) order.
+        layout.fields.sort_by_key(|f| std::cmp::Reverse(f.align));
+    }
     let packed = layout.is_packed;
     let cap = if packed { Some(1) } else { layout.pack_limit };
     let mut offset = 0usize;
@@ -879,7 +910,7 @@ mod tests {
         // Without resolution: SmallHeader is pointer-sized (8), total 8+32=40 → wrong.
         // With resolution: SmallHeader is 1 byte, then 7 pad, then BigPayload at 8 → total 40.
         // Actually u64 array: [u64;4] parsed as Array of 4 u64 = 32 bytes, align 8.
-        let src = "struct SmallHeader { flag: bool }\nstruct Wrapper { h: SmallHeader, data: u64 }";
+        let src = "struct SmallHeader { flag: bool }\n#[repr(C)] struct Wrapper { h: SmallHeader, data: u64 }";
         let layouts = parse_source_str(src, &SourceLanguage::Rust, &X86_64_SYSV).unwrap();
         let wrapper = layouts.iter().find(|l| l.name == "Wrapper").unwrap();
         let h = wrapper.fields.iter().find(|f| f.name == "h").unwrap();

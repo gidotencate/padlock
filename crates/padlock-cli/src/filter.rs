@@ -73,6 +73,16 @@ pub struct FilterArgs {
     #[arg(long = "define", short = 'D', value_name = "NAME[=VALUE]")]
     pub defines: Vec<String>,
 
+    /// Lay out Rust `repr(Rust)` and plain Zig structs in source declaration order.
+    ///
+    /// By default padlock shows them in the order the compiler actually uses
+    /// (largest alignment first), so their sizes match the compiled program and
+    /// padding the compiler already removes is not reported. Use this flag to see
+    /// the waste the declared order *would* have. Also `declared_order = true` in
+    /// `.padlock.toml`.
+    #[arg(long)]
+    pub declared_order: bool,
+
     /// Show only structs that have reorganizable padding (a reorder suggestion exists)
     #[arg(long)]
     pub packable: bool,
@@ -134,6 +144,8 @@ impl FilterArgs {
         defines.append(&mut self.defines);
         self.defines = defines;
         padlock_source::set_preprocessor_defines(&self.defines);
+        self.declared_order |= cfg.declared_order;
+        padlock_source::set_declared_order(self.declared_order);
         if matches!(self.sort_by, SortBy::Score)
             && let Some(ref s) = cfg.sort_by
         {
@@ -246,6 +258,7 @@ mod tests {
     ) -> FilterArgs {
         FilterArgs {
             defines: Vec::new(),
+            declared_order: false,
             filter: filter.map(str::to_owned),
             exclude: exclude.map(str::to_owned),
             min_holes,

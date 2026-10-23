@@ -174,13 +174,15 @@ fn render_struct_with_embed(
         if is_zig {
             out.push_str(
                 "    note: field order is implementation-defined in a plain Zig struct \
-                 (not extern/packed) — compiler may reorder fields; \
-                 use binary analysis for actual layout\n",
+                 (not extern/packed) — shown largest-alignment-first as zig currently \
+                 lays it out (--declared-order shows source order); \
+                 use binary analysis for the exact layout\n",
             );
         } else {
             out.push_str(
-                "    note: repr(Rust) — compiler may reorder fields; \
-                 use binary analysis for actual layout\n",
+                "    note: repr(Rust) — the compiler chooses the field order; shown \
+                 largest-alignment-first as current rustc lays it out (--declared-order \
+                 shows source order); use binary analysis for the exact layout\n",
             );
         }
     }

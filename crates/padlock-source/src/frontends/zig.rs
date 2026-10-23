@@ -801,7 +801,7 @@ fn parse_struct_declaration(
         }
     }
 
-    Some(StructLayout {
+    let mut layout = StructLayout {
         name,
         total_size: offset,
         align: struct_align,
@@ -824,7 +824,9 @@ fn parse_struct_declaration(
         forced_align: is_packed.then_some(struct_align),
         pack_limit: None,
         cpp: None,
-    })
+    };
+    crate::apply_compiler_order(&mut layout);
+    Some(layout)
 }
 
 /// Parse a `container_field` node and return `(name, type_text, size, align, source_line)`.

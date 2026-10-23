@@ -89,6 +89,9 @@ pub struct Config {
     /// struct bodies, like a compiler's `-D`. Entries are `NAME` or `NAME=VALUE`.
     /// Example: `["CONFIG_SMP", "WORD_BITS=64"]`
     pub defines: Vec<String>,
+    /// Show Rust `repr(Rust)` / plain Zig structs in declaration order rather than
+    /// the compiler's order (`--declared-order`).
+    pub declared_order: bool,
 }
 
 impl Default for Config {
@@ -108,6 +111,7 @@ impl Default for Config {
             exclude_paths: Vec::new(),
             custom_sync_types: Vec::new(),
             defines: Vec::new(),
+            declared_order: false,
         }
     }
 }
@@ -252,6 +256,11 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let declared_order = padlock
+            .and_then(|p| p.get("declared_order"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         Some(Self {
             min_severity,
             fail_below,
@@ -267,6 +276,7 @@ impl Config {
             exclude_paths,
             custom_sync_types,
             defines,
+            declared_order,
         })
     }
 

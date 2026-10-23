@@ -313,6 +313,9 @@ pub fn collect_layouts_with(
     if filter.go_exact {
         crate::go_exact::refine(&mut layouts);
     }
+    if filter.rust_exact {
+        crate::rust_exact::refine(&mut layouts);
+    }
     Ok((layouts, analyzed, skipped))
 }
 

@@ -90,6 +90,7 @@ mod tests {
             declared_order: false,
             compile_commands: None,
             go_exact: false,
+            rust_exact: false,
             filter: None,
             exclude: None,
             min_holes: None,

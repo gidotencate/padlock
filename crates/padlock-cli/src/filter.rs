@@ -88,6 +88,13 @@ pub struct FilterArgs {
     #[arg(long)]
     pub go_exact: bool,
 
+    /// Exact Rust layouts: build each Cargo package once with rustc's
+    /// `-Zprint-type-sizes` (via `RUSTC_BOOTSTRAP=1`, into
+    /// `target/padlock-rust-exact`) and use the field order, sizes and
+    /// alignment rustc chose. Only types rustc generated code for are refined.
+    #[arg(long)]
+    pub rust_exact: bool,
+
     /// Lay out Rust `repr(Rust)` and plain Zig structs in source declaration order.
     ///
     /// By default padlock shows them in the order the compiler actually uses
@@ -277,6 +284,7 @@ mod tests {
             declared_order: false,
             compile_commands: None,
             go_exact: false,
+            rust_exact: false,
             filter: filter.map(str::to_owned),
             exclude: exclude.map(str::to_owned),
             min_holes,

@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.46.0] — 2026-10-23
+
+### Added
+- **`--rust-exact`** (`analyze`, `summary`, `check`, `list`): exact Rust layouts from rustc. Each Cargo package owning an analyzed `.rs` file is built once (into `target/padlock-rust-exact`, so the normal build cache is untouched) with `-Zprint-type-sizes`, enabled on stable through `RUSTC_BOOTSTRAP=1`; the field order, sizes and alignment rustc chose replace padlock's estimates — exact for `repr(Rust)` reordering, niche placement and std types. Refined structs are no longer flagged as estimates. Only types rustc generated code for are refined; enums keep padlock's model.
+
 ## [0.45.0] — 2026-10-23
 
 ### Added

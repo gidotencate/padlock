@@ -136,6 +136,7 @@ mod tests {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         };
         assert!((score(&layout) - 100.0).abs() < 1e-9);
     }
@@ -202,6 +203,7 @@ mod tests {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         };
         let bd = score_with_breakdown(&layout);
         assert_eq!(bd.false_sharing_deduction, 0.0);

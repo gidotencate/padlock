@@ -165,6 +165,7 @@ pub fn extract_from_pdb(
                 forced_align: None,
                 pack_limit: None,
                 cpp: None,
+                explicit_align: Vec::new(),
             });
             continue;
         }
@@ -195,6 +196,7 @@ pub fn extract_from_pdb(
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         });
     }
 

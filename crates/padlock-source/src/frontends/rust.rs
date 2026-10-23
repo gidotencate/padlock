@@ -968,6 +968,7 @@ fn simulate_rust_layout(
         forced_align,
         pack_limit: pack.filter(|n| *n > 1),
         cpp: None,
+        explicit_align: Vec::new(),
     }
 }
 
@@ -1256,6 +1257,7 @@ impl StructVisitor<'_> {
                 forced_align: None,
                 pack_limit: None,
                 cpp: None,
+                explicit_align: Vec::new(),
             };
             self.layouts.push(layout);
             return;
@@ -1355,6 +1357,7 @@ impl StructVisitor<'_> {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         });
     }
 }

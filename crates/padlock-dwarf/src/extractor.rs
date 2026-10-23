@@ -487,6 +487,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         }))
     }
 

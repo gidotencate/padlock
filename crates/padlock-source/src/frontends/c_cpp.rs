@@ -16,7 +16,23 @@ use crate::CppStdlib;
 /// never saw a thread-local set on the main thread (so `--stdlib` was ignored).
 static STDLIB: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
+/// Name prefix of the synthetic layouts that stand for anonymous member
+/// aggregates (`struct { … } m;`, anonymous unions). They are sized by the
+/// nested-struct resolver like any named type — so a named struct inside them is
+/// resolved too — and removed from the output afterwards.
+pub(crate) const ANON_PREFIX: &str = "\u{1}anon:";
+
 thread_local! {
+    /// Anonymous aggregates laid out while parsing the current file.
+    static PENDING_ANON: RefCell<Vec<StructLayout>> = const { RefCell::new(Vec::new()) };
+    /// `(size, align)` of every record laid out so far in the current file. A
+    /// by-value member's type must be complete where it is used, so it is always
+    /// known here; that matters wherever an offset must be right during parsing
+    /// (bit-field runs, anonymous aggregates), before the nested-struct resolver runs.
+    static RECORD_SIZES: RefCell<HashMap<String, (usize, usize)>> = RefCell::new(HashMap::new());
+    /// `#pragma pack` in effect for the record being parsed: it also applies to
+    /// anonymous aggregates defined inside it.
+    static CURRENT_PACK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static C_PARSER: RefCell<Parser> = RefCell::new({
         let mut p = Parser::new();
         p.set_language(&tree_sitter_c::LANGUAGE.into())
@@ -607,6 +623,8 @@ fn c_type_size_align_uncapped(ty: &str, arch: &'static ArchConfig) -> (usize, us
 
         // Pointer types
         ty if ty.ends_with('*') => (arch.pointer_size, arch.pointer_size),
+        // A record laid out earlier in this file.
+        ty if let Some(sa) = RECORD_SIZES.with(|r| r.borrow().get(ty).copied()) => sa,
         // Unknown — use pointer size as a reasonable default
         _ => (arch.pointer_size, arch.pointer_size),
     }
@@ -1035,7 +1053,9 @@ fn make_field(
     let (fname, ty_name, guard, alignas, field_line) = raw;
     let (sizing_ty, display_ty) = resolve_field_type(&ty_name, aliases, arch);
     let (size, natural_align) = c_type_size_align(&sizing_ty, arch);
-    // alignas(N) on a field overrides its alignment requirement.
+    // alignas(N) / aligned(N) on a field sets its alignment; outside a packed
+    // struct it can only raise it (`simulate_layout` applies that rule, the
+    // type keeps its natural alignment for reference).
     let align = alignas.unwrap_or(natural_align);
     let access = if let Some(g) = guard {
         AccessPattern::Concurrent {
@@ -1051,7 +1071,7 @@ fn make_field(
         ty: TypeInfo::Primitive {
             name: display_ty,
             size,
-            align,
+            align: natural_align,
         },
         offset: 0,
         size,
@@ -1104,6 +1124,8 @@ fn resolve_bitfield_groups(
     arch: &'static ArchConfig,
     pack_n: usize,
     is_union: bool,
+    attr_packed: bool,
+    pragma_pack: usize,
 ) -> (Vec<RawField>, usize) {
     if is_msvc(arch) {
         return (
@@ -1116,6 +1138,8 @@ fn resolve_bitfield_groups(
         parts: Vec<String>,
         first_line: u32,
         unit_align: usize,
+        /// Alignment of the type of the run's first bit-field (where it starts).
+        first_align: usize,
     }
 
     let mut result: Vec<RawField> = Vec::new();
@@ -1124,6 +1148,8 @@ fn resolve_bitfield_groups(
     let mut byte_off = 0usize;
     // Bit position inside the current bit-field run (None outside a run).
     let mut cursor: Option<u64> = None;
+    // The run's next bits were pushed to a `T : 0` boundary.
+    let mut after_zero_width = false;
     let mut seg: Option<Seg> = None;
 
     // Close the open segment at `end_bit`, emitting its synthetic field.
@@ -1142,8 +1168,8 @@ fn resolve_bitfield_groups(
             // the padding before it is reported; one that continues mid-unit packs
             // tight against the previous field.
             let aligned_start =
-                sg.start_bit % 8 == 0 && start_byte.is_multiple_of(sg.unit_align.max(1));
-            let align = (named && aligned_start && pack_n != 1).then_some(sg.unit_align);
+                sg.start_bit % 8 == 0 && start_byte.is_multiple_of(sg.first_align.max(1));
+            let align = (named && aligned_start && pack_n != 1).then_some(sg.first_align);
             let align = align.or(Some(1));
             result.push((
                 name,
@@ -1155,15 +1181,41 @@ fn resolve_bitfield_groups(
             *byte_off = end_byte;
         };
 
+    // `T : 0` with nothing after it in its run still moves the next byte to T's
+    // unit boundary (`struct { char a; long long : 0; char b; }` puts `b` at 8).
+    let pad_to = |bit: u64, byte_off: &mut usize, result: &mut Vec<RawField>, line: u32| {
+        let target = bit.div_ceil(8) as usize;
+        if target > *byte_off {
+            result.push((
+                "[__pad]".to_string(),
+                format!("__bits<{}>", target - *byte_off),
+                None,
+                Some(1),
+                line,
+            ));
+            *byte_off = target;
+        }
+    };
+
     for (fname, ty, guard, alignas, line) in raw_fields {
         if !is_bitfield_type(&ty) {
             if let Some(c) = cursor.take() {
+                let open_run = seg.is_some();
                 flush(&mut seg, c, &mut byte_off, &mut result);
+                if !open_run {
+                    pad_to(c, &mut byte_off, &mut result, line);
+                }
             }
             let (sizing, _) = resolve_field_type(&ty, aliases, arch);
             let (size, natural) = c_type_size_align(&sizing, arch);
-            let mut align = alignas.unwrap_or(natural);
-            if pack_n > 0 {
+            // Same rule as `simulate_layout`: an explicit alignment survives the
+            // `packed` attribute but not `#pragma pack`.
+            let mut align = match alignas {
+                Some(a) if !attr_packed || pack_n == 0 => a.max(natural),
+                Some(a) => a,
+                None => natural,
+            };
+            if pack_n > 0 && !(attr_packed && alignas.is_some()) {
                 align = align.min(pack_n);
             }
             if align > 0 {
@@ -1204,22 +1256,46 @@ fn resolve_bitfield_groups(
         let mut pos = cursor.unwrap_or(byte_off as u64 * 8);
         if width == 0 {
             flush(&mut seg, pos, &mut byte_off, &mut result);
-            cursor = Some(pos.next_multiple_of(unit_bits));
+            // `T : 0` moves to the next boundary of T's *alignment* (which is
+            // smaller than its size on AVR, for one).
+            cursor = Some(pos.next_multiple_of((unit_align as u64 * 8).clamp(8, unit_bits)));
+            after_zero_width = true;
             continue;
         }
-        if pack_n != 1 && width <= unit_bits && pos / unit_bits != (pos + width - 1) / unit_bits {
+        // Under `packed` or `#pragma pack` bit-fields may straddle unit boundaries.
+        if pack_n == 0 && width <= unit_bits && pos / unit_bits != (pos + width - 1) / unit_bits {
             flush(&mut seg, pos, &mut byte_off, &mut result);
             pos = pos.next_multiple_of(unit_bits);
         }
+        // A run that starts past the previous field (after `T : 0`) leaves bytes
+        // the layout must keep; under packing the run's alignment cannot create
+        // that gap, so it is spelled out.
+        if (pack_n > 0 || after_zero_width) && seg.is_none() && (pos / 8) as usize > byte_off {
+            let gap = (pos / 8) as usize - byte_off;
+            result.push((
+                "[__pad]".to_string(),
+                format!("__bits<{gap}>"),
+                None,
+                Some(1),
+                line,
+            ));
+            byte_off += gap;
+        }
+        after_zero_width = false;
         let sg = seg.get_or_insert_with(|| Seg {
             start_bit: pos,
             parts: Vec::new(),
             first_line: line,
             unit_align,
+            first_align: unit_align,
         });
         if !fname.is_empty() {
             sg.parts.push(format!("{fname}:{width}"));
-            if pack_n != 1 {
+            // The declared type aligns the struct, capped by `#pragma pack`; the
+            // `packed` attribute alone removes that.
+            if pragma_pack > 0 {
+                struct_align = struct_align.max(unit_align.min(pragma_pack));
+            } else if !attr_packed {
                 struct_align = struct_align.max(unit_align);
             }
         }
@@ -1229,7 +1305,12 @@ fn resolve_bitfield_groups(
         cursor = Some(pos + width);
     }
     if let Some(c) = cursor.take() {
+        let open_run = seg.is_some();
+        let line = result.last().map(|r| r.4).unwrap_or(0);
         flush(&mut seg, c, &mut byte_off, &mut result);
+        if !open_run {
+            pad_to(c, &mut byte_off, &mut result, line);
+        }
     }
     (result, struct_align)
 }
@@ -1305,16 +1386,36 @@ fn simulate_layout(
     arch: &'static ArchConfig,
     source_line: Option<u32>,
     pack_n: usize,
+    explicit_align: &[String],
+    pragma_pack: usize,
 ) -> StructLayout {
     let mut offset = 0usize;
     let mut struct_align = 1usize;
 
     for f in fields.iter_mut() {
-        let eff_align = if pack_n > 0 {
+        // An explicit `aligned(N)` / `alignas(N)` on the member is honoured even
+        // inside a packed struct (GCC/Clang); elsewhere it can only raise the
+        // type's natural alignment.
+        let natural = match &f.ty {
+            TypeInfo::Primitive { align, .. } | TypeInfo::Opaque { align, .. } => *align,
+            _ => f.align,
+        };
+        // `#pragma pack(N)` caps even an explicit alignment; the `packed`
+        // attribute does not.
+        let eff_align = if explicit_align.contains(&f.name) {
+            if pragma_pack > 0 {
+                f.align.min(pragma_pack)
+            } else if pack_n > 0 {
+                f.align
+            } else {
+                f.align.max(natural)
+            }
+        } else if pack_n > 0 {
             f.align.min(pack_n)
         } else {
             f.align
         };
+        f.align = eff_align.max(if pack_n > 0 { 1 } else { f.align });
         if eff_align > 0 {
             offset = offset.next_multiple_of(eff_align);
         }
@@ -1322,8 +1423,9 @@ fn simulate_layout(
         offset += f.size;
         struct_align = struct_align.max(eff_align);
     }
-    // Trailing padding (not present when fully packed)
-    if pack_n != 1 && struct_align > 0 {
+    // Trailing padding to the struct's alignment (1 when fully packed, unless a
+    // member is explicitly aligned).
+    if struct_align > 0 {
         offset = offset.next_multiple_of(struct_align);
     }
 
@@ -1343,6 +1445,7 @@ fn simulate_layout(
         forced_align: None,
         pack_limit: None,
         cpp: None,
+        explicit_align: explicit_align.to_vec(),
     }
 }
 
@@ -1353,12 +1456,24 @@ fn simulate_union_layout(
     name: String,
     arch: &'static ArchConfig,
     source_line: Option<u32>,
+    pack_n: usize,
 ) -> StructLayout {
     for f in fields.iter_mut() {
         f.offset = 0;
     }
     let max_size = fields.iter().map(|f| f.size).max().unwrap_or(0);
-    let max_align = fields.iter().map(|f| f.align).max().unwrap_or(1);
+    // `packed` / `#pragma pack` cap the union's alignment like a struct's.
+    let max_align = fields
+        .iter()
+        .map(|f| {
+            if pack_n > 0 {
+                f.align.min(pack_n)
+            } else {
+                f.align
+            }
+        })
+        .max()
+        .unwrap_or(1);
     let total_size = if max_align > 0 {
         max_size.next_multiple_of(max_align)
     } else {
@@ -1373,14 +1488,15 @@ fn simulate_union_layout(
         source_file: None,
         source_line,
         arch,
-        is_packed: false,
+        is_packed: pack_n == 1,
         is_union: true,
         is_repr_rust: false,
         suppressed_findings: Vec::new(),
         uncertain_fields: Vec::new(),
         forced_align: None,
-        pack_limit: None,
+        pack_limit: (pack_n > 1).then_some(pack_n),
         cpp: None,
+        explicit_align: Vec::new(),
     }
 }
 
@@ -1391,6 +1507,19 @@ fn simulate_union_layout(
 /// - Base-class storage as a synthetic `__base_<Name>` field (size resolved
 ///   later by the nested-struct resolution pass in `lib.rs`).
 fn parse_class_specifier(
+    source: &str,
+    node: Node<'_>,
+    arch: &'static ArchConfig,
+    aliases: &HashMap<String, String>,
+    pragma_pack: usize,
+) -> Option<StructLayout> {
+    let prev = CURRENT_PACK.with(|c| c.replace(pragma_pack));
+    let r = parse_class_specifier_inner(source, node, arch, aliases, pragma_pack);
+    CURRENT_PACK.with(|c| c.set(prev));
+    r
+}
+
+fn parse_class_specifier_inner(
     source: &str,
     node: Node<'_>,
     arch: &'static ArchConfig,
@@ -1493,11 +1622,24 @@ fn parse_class_specifier(
         .iter()
         .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
     {
-        resolve_bitfield_groups(raw_fields, aliases, arch, pack_n, is_union)
+        resolve_bitfield_groups(
+            raw_fields,
+            aliases,
+            arch,
+            pack_n,
+            is_union,
+            is_packed,
+            pragma_pack,
+        )
     } else {
         (raw_fields, 1)
     };
 
+    let explicit_align: Vec<String> = raw_fields
+        .iter()
+        .filter(|(_, _, _, al, _)| al.is_some())
+        .map(|(n, ..)| n.clone())
+        .collect();
     // Declared member fields
     fields.extend(
         raw_fields
@@ -1506,13 +1648,28 @@ fn parse_class_specifier(
     );
 
     let line = node.start_position().row as u32 + 1;
-    let mut layout = simulate_layout(&mut fields, class_name, arch, Some(line), pack_n);
+    let mut layout = simulate_layout(
+        &mut fields,
+        class_name,
+        arch,
+        Some(line),
+        pack_n,
+        &explicit_align,
+        if is_packed { 0 } else { pragma_pack },
+    );
 
-    apply_min_align(&mut layout, bf_align, pack_n);
-    apply_min_align(&mut layout, struct_alignas.unwrap_or(1), pack_n);
+    apply_min_align(&mut layout, bf_align, pragma_pack);
+    // A type-level `aligned(N)` wins over `#pragma pack` (GCC/Clang).
+    apply_min_align(&mut layout, struct_alignas.unwrap_or(1), 0);
+    let bf_align = if pragma_pack > 0 {
+        bf_align.min(pragma_pack)
+    } else {
+        bf_align
+    };
     let forced = bf_align.max(struct_alignas.unwrap_or(1));
     layout.forced_align = (forced > 1).then_some(forced);
-    layout.pack_limit = (pack_n > 1).then_some(pack_n);
+    // Any `#pragma pack` (even 1) is recorded: it also caps explicit alignments.
+    layout.pack_limit = (pragma_pack > 0).then_some(pragma_pack);
 
     mark_uncertain_arrays(&mut layout);
     layout.uncertain_fields.extend(pp_labels);
@@ -1877,6 +2034,8 @@ fn extract_structs_from_tree(
     layouts: &mut Vec<StructLayout>,
     cpp: bool,
 ) {
+    PENDING_ANON.with(|p| p.borrow_mut().clear());
+    RECORD_SIZES.with(|r| r.borrow_mut().clear());
     // Phase 0: collect within-file typedef scalar aliases for field type resolution.
     let mut aliases = collect_typedef_aliases(source, root);
     // …and integer constants used in array-length expressions.
@@ -1960,8 +2119,13 @@ fn extract_structs_from_tree(
 
     let cursor = root.walk();
     let mut stack = vec![root];
+    let mut registered = 0;
 
     while let Some(node) = stack.pop() {
+        for l in &layouts[registered..] {
+            record_size(l);
+        }
+        registered = layouts.len();
         // Push children in reverse so we process left-to-right in document order.
         // Of a preprocessor conditional only the compiled-in branch is visited, so
         // `#if 0` code and the losing side of `#ifdef X … #else …` are not analyzed.
@@ -2120,6 +2284,17 @@ fn extract_structs_from_tree(
             continue;
         }
 
+        // A tagless aggregate declared as a member (`struct { … } m;`, anonymous
+        // unions) is laid out as part of its parent (see `register_anonymous`).
+        let is_member_aggregate = is_record_specifier
+            && node.child_by_field_name("name").is_none()
+            && node
+                .parent()
+                .is_some_and(|p| p.kind() == "field_declaration");
+        if is_member_aggregate {
+            continue;
+        }
+
         match node.kind() {
             "struct_specifier" => {
                 if let Some(mut layout) = parse_struct_or_union_specifier(
@@ -2217,6 +2392,7 @@ fn extract_structs_from_tree(
             }
         }
     }
+    layouts.extend(PENDING_ANON.with(|p| std::mem::take(&mut *p.borrow_mut())));
     if cpp {
         qualify_cpp_references(layouts);
     }
@@ -2370,6 +2546,21 @@ fn parse_struct_or_union_specifier(
     aliases: &HashMap<String, String>,
     pragma_pack: usize,
 ) -> Option<StructLayout> {
+    let prev = CURRENT_PACK.with(|c| c.replace(pragma_pack));
+    let r =
+        parse_struct_or_union_specifier_inner(source, node, arch, is_union, aliases, pragma_pack);
+    CURRENT_PACK.with(|c| c.set(prev));
+    r
+}
+
+fn parse_struct_or_union_specifier_inner(
+    source: &str,
+    node: Node<'_>,
+    arch: &'static ArchConfig,
+    is_union: bool,
+    aliases: &HashMap<String, String>,
+    pragma_pack: usize,
+) -> Option<StructLayout> {
     let mut name = "<anonymous>".to_string();
     let mut body_node: Option<Node> = None;
     let mut is_packed = false;
@@ -2457,11 +2648,24 @@ fn parse_struct_or_union_specifier(
         .iter()
         .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
     {
-        resolve_bitfield_groups(raw_fields, aliases, arch, pack_n, is_union)
+        resolve_bitfield_groups(
+            raw_fields,
+            aliases,
+            arch,
+            pack_n,
+            is_union,
+            is_packed,
+            pragma_pack,
+        )
     } else {
         (raw_fields, 1)
     };
 
+    let explicit_align: Vec<String> = raw_fields
+        .iter()
+        .filter(|(_, _, _, al, _)| al.is_some())
+        .map(|(n, ..)| n.clone())
+        .collect();
     let mut fields: Vec<Field> = raw_fields
         .into_iter()
         .map(|raw| make_field(raw, aliases, arch))
@@ -2493,18 +2697,35 @@ fn parse_struct_or_union_specifier(
 
     let line = node.start_position().row as u32 + 1;
     let mut layout = if is_union {
-        simulate_union_layout(&mut fields, name, arch, Some(line))
+        let mut u = simulate_union_layout(&mut fields, name, arch, Some(line), pack_n);
+        u.explicit_align = explicit_align.clone();
+        u
     } else {
-        simulate_layout(&mut fields, name, arch, Some(line), pack_n)
+        simulate_layout(
+            &mut fields,
+            name,
+            arch,
+            Some(line),
+            pack_n,
+            &explicit_align,
+            pragma_pack,
+        )
     };
 
-    apply_min_align(&mut layout, bf_align, pack_n);
+    apply_min_align(&mut layout, bf_align, pragma_pack);
     // Apply struct-level alignas: the struct's alignment requirement is at
     // least N; trailing padding may grow to satisfy the new alignment.
-    apply_min_align(&mut layout, struct_alignas.unwrap_or(1), pack_n);
+    // A type-level `aligned(N)` wins over `#pragma pack` (GCC/Clang).
+    apply_min_align(&mut layout, struct_alignas.unwrap_or(1), 0);
+    let bf_align = if pragma_pack > 0 {
+        bf_align.min(pragma_pack)
+    } else {
+        bf_align
+    };
     let forced = bf_align.max(struct_alignas.unwrap_or(1));
     layout.forced_align = (forced > 1).then_some(forced);
-    layout.pack_limit = (pack_n > 1).then_some(pack_n);
+    // Any `#pragma pack` (even 1) is recorded: it also caps explicit alignments.
+    layout.pack_limit = (pragma_pack > 0).then_some(pragma_pack);
 
     mark_uncertain_arrays(&mut layout);
     layout.uncertain_fields.extend(pp_labels);
@@ -2525,6 +2746,8 @@ fn parse_struct_or_union_specifier(
 /// Raise the struct's alignment to at least `align` (from `alignas` or a
 /// bit-field's declared type) and grow trailing padding to match.
 fn apply_min_align(layout: &mut StructLayout, align: usize, pack_n: usize) {
+    // Packing caps an implied alignment (a bit-field's type) as well.
+    let align = if pack_n > 0 { align.min(pack_n) } else { align };
     if align > layout.align {
         layout.align = align;
         if pack_n == 0 || pack_n >= align {
@@ -2975,6 +3198,16 @@ fn parse_anonymous_nested(
         }
 
         if !nested_raw.is_empty() {
+            if nested_is_union && let Some(name) = register_anonymous(source, child, arch, aliases)
+            {
+                return Some(vec![(
+                    "__anon_union".to_string(),
+                    name,
+                    None,
+                    None,
+                    nested_raw[0].4,
+                )]);
+            }
             if nested_is_union {
                 // All union variants overlap at offset 0.  Compute the union's
                 // total size (= max field size, rounded to max alignment) and
@@ -3010,6 +3243,38 @@ fn parse_anonymous_nested(
         }
     }
     None
+}
+
+/// Remember a finished record's size for later members of its type (by its full
+/// and its unqualified name).
+fn record_size(layout: &StructLayout) {
+    RECORD_SIZES.with(|r| {
+        let mut r = r.borrow_mut();
+        let sa = (layout.total_size, layout.align);
+        r.insert(layout.name.clone(), sa);
+        let short = split_scope(&layout.name).1;
+        r.entry(short.to_string()).or_insert(sa);
+    });
+}
+
+/// Lay out the anonymous struct/union `node` as a synthetic named layout (see
+/// [`ANON_PREFIX`]) and return its name, to be used as the member's type.
+fn register_anonymous(
+    source: &str,
+    node: Node<'_>,
+    arch: &'static ArchConfig,
+    aliases: &HashMap<String, String>,
+) -> Option<String> {
+    let is_union = node.kind() == "union_specifier";
+    let pack = CURRENT_PACK.with(|c| c.get());
+    let mut layout = parse_struct_or_union_specifier(source, node, arch, is_union, aliases, pack)?;
+    let kind = if is_union { "union" } else { "struct" };
+    // No `:N` suffix: that spelling marks a bit-field type.
+    layout.name = format!("{ANON_PREFIX}{kind}#{}", node.start_byte());
+    let name = layout.name.clone();
+    record_size(&layout);
+    PENDING_ANON.with(|p| p.borrow_mut().push(layout));
+    Some(name)
 }
 
 /// A declarator with its pointer / array / function wrappers peeled off.
@@ -3212,6 +3477,10 @@ fn parse_field_declarations(
                 }
                 if let Some(tag) = tag {
                     ty_parts.push(tag);
+                } else if has_body
+                    && let Some(name) = register_anonymous(source, child, arch, aliases)
+                {
+                    ty_parts.push(name);
                 } else if has_body {
                     let is_union = child.kind() == "union_specifier";
                     let (size, align) =
@@ -3674,6 +3943,7 @@ typedef struct {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         };
         assert!(padlock_core::analysis::false_sharing::has_false_sharing(
             &layout
@@ -3877,8 +4147,19 @@ struct Flags {
         let src = "struct S { int a : 3; int : 0; int b : 5; };";
         let layouts = parse_c(src, &X86_64_SYSV).unwrap();
         let l = layouts.iter().find(|l| l.name == "S").unwrap();
-        // a:3 in one int unit, b:5 in the next → two groups, each 4 bytes
-        assert_eq!(l.fields.len(), 2, "zero-width bitfield flushes → 2 groups");
+        // a:3 in one int unit, b:5 in the next (the bytes between are kept as an
+        // explicit `[__pad]`, since `T : 0` alone pushes b there) → 8 bytes.
+        let named: Vec<&str> = l
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|n| *n != "[__pad]")
+            .collect();
+        assert_eq!(
+            named,
+            ["[a:3]", "[b:5]"],
+            "zero-width bitfield flushes → 2 groups"
+        );
         assert_eq!(l.total_size, 8, "two int units → 8 bytes");
     }
 

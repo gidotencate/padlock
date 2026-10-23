@@ -470,6 +470,7 @@ impl<'a> BtfParser<'a> {
                     forced_align: None,
                     pack_limit: None,
                     cpp: None,
+                    explicit_align: Vec::new(),
                 });
 
                 let _ = idx;

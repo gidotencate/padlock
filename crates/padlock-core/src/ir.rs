@@ -158,6 +158,11 @@ pub struct StructLayout {
     /// subobjects, the vtable pointer and virtual bases once base sizes are known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpp: Option<CppClassInfo>,
+
+    /// Fields whose alignment was set explicitly (`alignas`, `__attribute__((aligned))`,
+    /// Zig `align(N)`). `packed` / `#pragma pack` do not lower it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explicit_align: Vec<String>,
 }
 
 /// A direct base class of a C++ class.
@@ -343,6 +348,7 @@ pub mod test_fixtures {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         }
     }
 
@@ -407,6 +413,7 @@ pub mod test_fixtures {
             forced_align: None,
             pack_limit: None,
             cpp: None,
+            explicit_align: Vec::new(),
         }
     }
 

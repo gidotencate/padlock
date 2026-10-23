@@ -1,9 +1,3 @@
 # Known layout gaps vs. the real compiler (see run.py). Remove entries as they are fixed.
-zig:Al
-zig:ArrExpr
-zig:ArrS
-zig:Enums
-zig:Pk
-zig:PkBits
 cpp:VD  # Itanium ABI reuses a non-POD base's tail padding; needs POD analysis of the base
 rust:TupNest  # tuple containing a local struct: its size is only known after the resolver runs, which does not look inside tuples

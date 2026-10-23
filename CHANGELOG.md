@@ -2,6 +2,18 @@
 
 All notable changes to padlock are documented here.
 
+## [0.28.0] — 2026-10-23
+
+Conformance harness against `zig run` (`@sizeOf` / `@offsetOf`, zig 0.15): Zig 12/18 → 43/43. Overall: Go 33/33, C 48/48, C++ 24/25, Rust 43/44, Zig 43/43.
+
+### Fixed
+- **Zig array lengths were only understood as integer literals** (`[N * 2 + 1]u8`, `[N]u8` with a `const N`, `[@sizeOf(u64)]u8` fell back to pointer size). Lengths are now evaluated (consts, arithmetic, `@sizeOf`); an unevaluable length keeps the field and lists it in `uncertain_fields`. Arrays of local structs are scaled by the nested-struct resolver.
+- **Enum-typed fields were sized as pointers.** Local `enum(u32)` / `enum` types now use their backing integer (default: the smallest `uN` holding every variant; a single-variant enum is zero-sized).
+- **`align(N)` on a field was ignored.**
+- **Packed struct size**: a packed struct is stored as one integer of its total bit count, so `packed struct { a: u8, b: u32 }` is a `u40` occupying **8** bytes, not 5 (alignment 8 too).
+- **Arbitrary-width integers** (`u24`, `u48`, `u65`, `u129`) now use their ABI size/alignment (power-of-two byte size up to 16, then multiples of 16): `u24` is 4 bytes, not 3.
+- **Error unions** were two words regardless of payload: `anyerror!u8` is 4 bytes, `anyerror!u32` 8, `anyerror!void` 2. `?[]T` carries no extra tag.
+
 ## [0.27.0] — 2026-10-23
 
 Conformance harness against `rustc` (`repr(C)` structs, `size_of`/`offset_of!`): Rust 22/33 → 43/44 (the remaining case is a tuple holding a local struct).

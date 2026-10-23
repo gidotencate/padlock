@@ -35,6 +35,39 @@ pub fn set_cpp_stdlib(stdlib: CppStdlib) {
     frontends::c_cpp::set_stdlib(stdlib);
 }
 
+// ── preprocessor defines ──────────────────────────────────────────────────────
+
+static DEFINES: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::new(Vec::new());
+
+/// Set the macros treated as defined when the C/C++ frontend chooses between
+/// `#if` / `#ifdef` branches inside struct bodies (like `-D` for a compiler).
+/// Each entry is `NAME` or `NAME=VALUE`; `NAME` alone means `NAME=1`.
+///
+/// Process-global (not thread-local), so it applies to every parallel parse.
+pub fn set_preprocessor_defines<S: AsRef<str>>(defines: &[S]) {
+    let parsed = defines
+        .iter()
+        .map(|d| match d.as_ref().split_once('=') {
+            Some((k, v)) => (k.trim().to_string(), v.trim().to_string()),
+            None => (d.as_ref().trim().to_string(), "1".to_string()),
+        })
+        .filter(|(k, _)| !k.is_empty())
+        .collect();
+    *DEFINES.write().unwrap_or_else(|e| e.into_inner()) = parsed;
+}
+
+/// The active defines as `NAME=VALUE` strings (for cache fingerprints).
+pub fn preprocessor_defines_fingerprint() -> Vec<String> {
+    preprocessor_defines()
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect()
+}
+
+pub(crate) fn preprocessor_defines() -> Vec<(String, String)> {
+    DEFINES.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 // ── skipped-struct side channel ───────────────────────────────────────────────
 //
 // Frontends call `record_skipped` (via `crate::record_skipped`) when they skip

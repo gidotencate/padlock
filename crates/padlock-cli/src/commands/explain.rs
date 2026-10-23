@@ -15,6 +15,10 @@ pub fn run(paths: &[PathBuf], filter: Option<&str>, no_cache: bool) -> anyhow::R
         .transpose()
         .map_err(|e| anyhow::anyhow!("invalid --filter pattern: {e}"))?;
 
+    if let Some(first) = paths.first() {
+        let cfg = padlock_core::config::Config::for_path(first);
+        padlock_source::set_preprocessor_defines(&cfg.defines);
+    }
     let (layouts, _, _skipped) = collect_layouts(paths, false, no_cache)?;
 
     let filtered: Vec<_> = layouts

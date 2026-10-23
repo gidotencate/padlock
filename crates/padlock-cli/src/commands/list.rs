@@ -88,6 +88,7 @@ mod tests {
 
     fn default_filter() -> FilterArgs {
         FilterArgs {
+            defines: Vec::new(),
             filter: None,
             exclude: None,
             min_holes: None,

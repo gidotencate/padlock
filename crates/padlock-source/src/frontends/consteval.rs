@@ -76,8 +76,10 @@ fn parse_number(lit: &str) -> Option<i64> {
 }
 
 fn tokenize(expr: &str) -> Option<Vec<Tok>> {
-    const OPS: [&str; 13] = [
-        "<<", ">>", "+", "-", "*", "/", "%", "&", "|", "^", "~", "(", ")",
+    // Longest first, so `<<` wins over `<` and `&&` over `&`.
+    const OPS: [&str; 23] = [
+        "<<", ">>", "&&", "||", "==", "!=", "<=", ">=", "<", ">", "+", "-", "*", "/", "%", "&",
+        "|", "^", "~", "!", "(", ")", ",",
     ];
     let b = expr.as_bytes();
     let mut toks = Vec::new();
@@ -171,14 +173,19 @@ impl Parser<'_> {
         }
     }
 
+    /// C precedence (higher binds tighter).
     fn prec(op: &str) -> Option<u8> {
         Some(match op {
-            "|" => 1,
-            "^" => 2,
-            "&" => 3,
-            "<<" | ">>" => 4,
-            "+" | "-" => 5,
-            "*" | "/" | "%" => 6,
+            "||" => 1,
+            "&&" => 2,
+            "|" => 3,
+            "^" => 4,
+            "&" => 5,
+            "==" | "!=" => 6,
+            "<" | ">" | "<=" | ">=" => 7,
+            "<<" | ">>" => 8,
+            "+" | "-" => 9,
+            "*" | "/" | "%" => 10,
             _ => return None,
         })
     }
@@ -193,6 +200,14 @@ impl Parser<'_> {
             self.pos += 1;
             let rhs = self.binary(p + 1)?;
             lhs = match op {
+                "||" => i64::from(lhs != 0 || rhs != 0),
+                "&&" => i64::from(lhs != 0 && rhs != 0),
+                "==" => i64::from(lhs == rhs),
+                "!=" => i64::from(lhs != rhs),
+                "<" => i64::from(lhs < rhs),
+                ">" => i64::from(lhs > rhs),
+                "<=" => i64::from(lhs <= rhs),
+                ">=" => i64::from(lhs >= rhs),
                 "|" => lhs | rhs,
                 "^" => lhs ^ rhs,
                 "&" => lhs & rhs,
@@ -217,6 +232,7 @@ impl Parser<'_> {
             Tok::Op("-") => self.unary().map(|v| -v),
             Tok::Op("+") => self.unary(),
             Tok::Op("~") => self.unary().map(|v| !v),
+            Tok::Op("!") => self.unary().map(|v| i64::from(v == 0)),
             Tok::Op("(") => {
                 let v = self.binary(1)?;
                 (self.peek_op() == Some(")")).then(|| self.pos += 1)?;
@@ -299,6 +315,15 @@ mod tests {
         assert_eq!(ev("@sizeOf(u64)"), Some(8));
         assert_eq!(ev("std::mem::size_of::<u64>() * 2"), Some(16));
         assert_eq!(ev("size_of::<u8>()"), Some(1));
+    }
+
+    #[test]
+    fn comparison_and_logical_operators() {
+        assert_eq!(ev("N > 4 && N < 10"), Some(1));
+        assert_eq!(ev("N == 8 || 0"), Some(1));
+        assert_eq!(ev("!N"), Some(0));
+        assert_eq!(ev("1 << 2 < 5"), Some(1));
+        assert_eq!(ev("N != 8"), Some(0));
     }
 
     #[test]

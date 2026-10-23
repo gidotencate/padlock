@@ -55,9 +55,36 @@ struct BfAnon { int :32; int a:4; char t; };
 struct BfZero { int a:3; int :0; int b:5; char t; };
 struct BfWide { char a; int b:30; char c; };
 struct BfPk { char a; int b:4; int c:6; char d; } __attribute__((packed));
+#define HAVE_WIDE 1
+#define LEVEL 3
+struct Pp {
+    char a;
+#ifdef HAVE_WIDE
+    long wide;
+#else
+    char narrow;
+#endif
+#if LEVEL > 2 && defined(HAVE_WIDE)
+    int lvl;
+#elif LEVEL > 1
+    short lvl2;
+#endif
+#ifndef NOT_DEFINED_ANYWHERE
+    short s;
+#endif
+#if 0
+    char dead[100];
+#endif
+    char c;
+};
+#if 0
+struct Dup { char a; long b; char c; };
+#else
+struct Dup { char a; char c; };
+#endif
 struct ZeroArr { char a; int z[0]; char c; };
 #define P(T,L) printf(#T " %zu %zu\n", sizeof(struct T), offsetof(struct T, L))
 int main(){
-P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,t);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);P(BfDiff,t);P(BfAnon,t);P(BfZero,t);P(BfWide,c);P(BfPk,d);
+P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,t);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);P(Pp,c);P(Dup,c);P(BfDiff,t);P(BfAnon,t);P(BfZero,t);P(BfWide,c);P(BfPk,d);
 printf("AlS %zu -1\nU %zu 0\n",sizeof(struct AlS),sizeof(union U));
 }

@@ -67,6 +67,12 @@ pub struct FilterArgs {
     #[arg(long, value_name = "N")]
     pub min_size: Option<usize>,
 
+    /// Treat a C/C++ macro as defined when choosing `#if`/`#ifdef` branches in
+    /// struct bodies, like a compiler's `-D` (repeatable: `-D BIG -D WORDS=4`).
+    /// Merged with `defines` from `.padlock.toml`.
+    #[arg(long = "define", short = 'D', value_name = "NAME[=VALUE]")]
+    pub defines: Vec<String>,
+
     /// Show only structs that have reorganizable padding (a reorder suggestion exists)
     #[arg(long)]
     pub packable: bool,
@@ -123,6 +129,11 @@ impl FilterArgs {
         // sort_by: apply config when the CLI value is still the default (Score).
         // We cannot distinguish "user said --sort-by score" from "not specified",
         // so config wins over the built-in default but loses to any explicit value.
+        // Config defines first, so a CLI `-D NAME=…` for the same macro wins.
+        let mut defines = cfg.defines.clone();
+        defines.append(&mut self.defines);
+        self.defines = defines;
+        padlock_source::set_preprocessor_defines(&self.defines);
         if matches!(self.sort_by, SortBy::Score)
             && let Some(ref s) = cfg.sort_by
         {
@@ -234,6 +245,7 @@ mod tests {
         sort_by: SortBy,
     ) -> FilterArgs {
         FilterArgs {
+            defines: Vec::new(),
             filter: filter.map(str::to_owned),
             exclude: exclude.map(str::to_owned),
             min_holes,

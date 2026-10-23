@@ -2,6 +2,13 @@
 
 All notable changes to padlock are documented here.
 
+## [0.33.0] — 2026-10-23
+
+Conformance: Rust 45/46 → 46/46.
+
+### Fixed
+- **A local struct inside a Rust tuple was pointer-sized** (`(In, u8)` where `In` is a local `repr(C)` struct). Local non-generic structs are now sized directly by the Rust frontend wherever they appear (tuples, arrays, fields), using the same layout padlock reports for them; the nested-struct resolver still cross-checks plain fields.
+
 ## [0.32.0] — 2026-10-23
 
 ### Fixed

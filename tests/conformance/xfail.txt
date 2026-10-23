@@ -1,2 +1,1 @@
 # Known layout gaps vs. the real compiler (see run.py). Remove entries as they are fixed.
-rust:TupNest  # tuple containing a local struct: its size is only known after the resolver runs, which does not look inside tuples

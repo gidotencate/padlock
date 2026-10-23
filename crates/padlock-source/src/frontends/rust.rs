@@ -50,6 +50,9 @@ pub fn extract_guard_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
 
 // ── file-level context ────────────────────────────────────────────────────────
 
+/// A local struct's fields, `repr(packed(N))` and `repr(align(N))`.
+type LocalStruct = (Vec<(String, Type)>, Option<usize>, Option<usize>);
+
 /// What a pre-pass over the file learns about its own items, so field types can be
 /// sized without a type checker.
 struct RustCtx {
@@ -65,6 +68,11 @@ struct RustCtx {
     uncertain: Cell<bool>,
     /// Alias / const recursion guard.
     depth: Cell<u8>,
+    /// Non-generic local structs: fields, `packed(N)` and `align(N)`, so a local
+    /// struct used inside a tuple or array can be sized directly.
+    local_structs: HashMap<String, LocalStruct>,
+    /// Sizes of local structs computed so far (`None` while in progress).
+    struct_sizes: std::cell::RefCell<HashMap<String, Option<(usize, usize)>>>,
 }
 
 impl RustCtx {
@@ -76,6 +84,8 @@ impl RustCtx {
             local_types: HashSet::new(),
             uncertain: Cell::new(false),
             depth: Cell::new(0),
+            local_structs: HashMap::new(),
+            struct_sizes: std::cell::RefCell::new(HashMap::new()),
         }
     }
 }
@@ -109,6 +119,27 @@ impl<'ast> Visit<'ast> for ItemCollector<'_> {
             .any(|p| matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_)));
         if !generic {
             self.ctx.local_types.insert(node.ident.to_string());
+            let fields = match &node.fields {
+                Fields::Named(nf) => nf
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let n = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                        (n, f.ty.clone())
+                    })
+                    .collect(),
+                Fields::Unnamed(uf) => uf
+                    .unnamed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (format!("_{i}"), f.ty.clone()))
+                    .collect(),
+                Fields::Unit => Vec::new(),
+            };
+            self.ctx.local_structs.insert(
+                node.ident.to_string(),
+                (fields, packed_limit(&node.attrs), repr_align(&node.attrs)),
+            );
         }
         syn::visit::visit_item_struct(self, node);
     }
@@ -124,6 +155,23 @@ impl<'ast> Visit<'ast> for ItemCollector<'_> {
         }
         syn::visit::visit_item_enum(self, node);
     }
+}
+
+/// `(size, align)` of a local non-generic struct, laid out the same way padlock
+/// lays it out on its own. `None` for unknown names and recursive types.
+fn local_struct_size(name: &str, ctx: &RustCtx) -> Option<(usize, usize)> {
+    if let Some(known) = ctx.struct_sizes.borrow().get(name) {
+        return *known;
+    }
+    let (fields, pack, align) = ctx.local_structs.get(name)?;
+    ctx.struct_sizes.borrow_mut().insert(name.to_string(), None);
+    let outer_uncertain = ctx.uncertain.get();
+    let layout = simulate_rust_layout(name.to_string(), fields, *pack, *align, ctx);
+    ctx.uncertain
+        .set(outer_uncertain || !layout.uncertain_fields.is_empty());
+    let sa = Some((layout.total_size, layout.align));
+    ctx.struct_sizes.borrow_mut().insert(name.to_string(), sa);
+    sa
 }
 
 /// Size of `fields` laid out the way rustc lays out a `repr(Rust)` aggregate
@@ -217,6 +265,15 @@ fn rust_type_size_align(ty: &Type, ctx: &RustCtx) -> (usize, usize, TypeInfo) {
                 let r = rust_type_size_align(target, ctx);
                 ctx.depth.set(ctx.depth.get() - 1);
                 return r;
+            }
+
+            // A local struct: size it directly (tuples and arrays need the number
+            // now; plain fields are also re-checked by the nested-struct resolver).
+            if tp.path.segments.len() == 1
+                && matches!(seg.map(|s| &s.arguments), Some(syn::PathArguments::None))
+                && let Some((size, align)) = local_struct_size(&name, ctx)
+            {
+                return (size, align, TypeInfo::Primitive { name, size, align });
             }
 
             // Mutex<T> / RwLock<T> / OnceLock<T>: std's futex-based implementation
@@ -422,13 +479,13 @@ fn rust_type_size_align(ty: &Type, ctx: &RustCtx) -> (usize, usize, TypeInfo) {
                 .elems
                 .iter()
                 .map(|e| {
-                    // A local struct's size is only known after the resolver runs.
+                    // A local enum's size is only known after the resolver runs
+                    // (local structs are sized directly).
                     if let Type::Path(tp) = e
-                        && tp
-                            .path
-                            .segments
-                            .last()
-                            .is_some_and(|s| ctx.local_types.contains(&s.ident.to_string()))
+                        && tp.path.segments.last().is_some_and(|s| {
+                            let n = s.ident.to_string();
+                            ctx.local_types.contains(&n) && !ctx.local_structs.contains_key(&n)
+                        })
                     {
                         ctx.uncertain.set(true);
                     }
@@ -2074,5 +2131,16 @@ struct Conn { port: u16, status: u32 }
         assert_eq!(by("B"), 4);
         assert_eq!(by("C"), 0);
         assert_eq!(by("D"), 1);
+    }
+
+    #[test]
+    fn tuple_holding_a_local_struct_is_sized() {
+        let l = rs(
+            "#[repr(C)] struct In { x: u8, y: u32 } #[repr(C)] struct S { a: u8, t: (In, u8), c: u8 }",
+            "S",
+        );
+        // (In, u8): In is 8 bytes / align 4 → tuple 12 bytes at offset 4 (rustc).
+        assert_eq!(off(&l, "c"), 16);
+        assert!(l.uncertain_fields.is_empty());
     }
 }

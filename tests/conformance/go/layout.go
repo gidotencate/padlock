@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql/driver"
 	"fmt"
+	"io"
 	"unsafe"
 	"sync"
 	"sync/atomic"
@@ -35,9 +37,31 @@ type MapT struct { a bool; m sync.Map; b bool }
 type Alias int16
 type UA struct { a bool; x Alias; b bool }
 type Const [4]int32
+const (
+	ca = iota
+	cb
+	cc
+)
+type Iota struct { x [cc + 1]byte; y int32 }
+type Hot struct { a atomic.Int64; b atomic.Uint64; _ [64 - unsafe.Sizeof(atomic.Int64{}) - unsafe.Sizeof(atomic.Uint64{})]byte; mu sync.Mutex; c int64 }
+type Inner struct { x bool; y int32 }
+type StArr struct { a bool; b [2]Inner; c bool }
+type ZeroTrail struct { a int64; z struct{} }
+type Ifaces struct { c driver.Connector; r io.Reader; x bool }
+type (
+	G1 struct { x int32; y bool }
+	G2 struct { y int64; x bool }
+)
 type UC struct { a bool; x Const; b bool }
 
 func main() {
+	var h1 Iota; fmt.Println("Iota", unsafe.Sizeof(h1), unsafe.Offsetof(h1.y))
+	var h2 Hot; fmt.Println("Hot", unsafe.Sizeof(h2), unsafe.Offsetof(h2.c))
+	var h3 StArr; fmt.Println("StArr", unsafe.Sizeof(h3), unsafe.Offsetof(h3.c))
+	var h4 ZeroTrail; fmt.Println("ZeroTrail", unsafe.Sizeof(h4), unsafe.Offsetof(h4.z))
+	var h5 Ifaces; fmt.Println("Ifaces", unsafe.Sizeof(h5), unsafe.Offsetof(h5.x))
+	var h6 G1; fmt.Println("G1", unsafe.Sizeof(h6), unsafe.Offsetof(h6.y))
+	var h7 G2; fmt.Println("G2", unsafe.Sizeof(h7), unsafe.Offsetof(h7.x))
 	var x Arr; fmt.Println("Arr", unsafe.Sizeof(x), unsafe.Offsetof(x.c))
 	var x2 Arr2; fmt.Println("Arr2", unsafe.Sizeof(x2), unsafe.Offsetof(x2.c))
 	var x3 Arr3; fmt.Println("Arr3", unsafe.Sizeof(x3), unsafe.Offsetof(x3.c))

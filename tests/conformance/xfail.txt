@@ -1,21 +1,4 @@
 # Known layout gaps vs. the real compiler (see run.py). Remove entries as they are fixed.
-go:Anon
-go:Arr
-go:Arr2
-go:Arr3
-go:ArrStr
-go:At
-go:Cond
-go:Cplx
-go:Emb2
-go:Fn
-go:Pool
-go:Rw
-go:Strct
-go:UA
-go:UC
-go:Wg
-go:Zero2
 rust:ArrConst
 rust:ArrExpr
 rust:ArrS

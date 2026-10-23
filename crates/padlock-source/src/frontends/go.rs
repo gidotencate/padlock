@@ -6,7 +6,7 @@
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Parser};
 
 // One parser per rayon thread — avoids re-allocating and re-validating the
@@ -29,8 +29,10 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "int8" | "uint8" | "byte" => (1, 1),
         "int16" | "uint16" => (2, 2),
         "int32" | "uint32" | "rune" | "float32" => (4, 4),
-        "int64" | "uint64" | "float64" | "complex64" => (8, 8),
-        "complex128" => (16, 16),
+        "int64" | "uint64" | "float64" => (8, 8),
+        // complex64 is two float32 (align 4); complex128 is two float64 (align 8).
+        "complex64" => (8, 4),
+        "complex128" => (16, 8),
         "int" | "uint" => (arch.pointer_size, arch.pointer_size),
         "uintptr" => (arch.pointer_size, arch.pointer_size),
         "string" => (arch.pointer_size * 2, arch.pointer_size), // ptr + len
@@ -63,8 +65,8 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         // sync.Mutex: { state int32; sema uint32 } = 8B
         "sync.Mutex" => (8, 4),
         // sync.RWMutex: { w Mutex; writerSem, readerSem uint32; readerCount,
-        //   readerWait int32/atomic.Int32 } = 24B (stable since Go 1.1)
-        "sync.RWMutex" => (24, 8),
+        //   readerWait atomic.Int32 } = 24B, align 4 (all members are 4-byte aligned).
+        "sync.RWMutex" => (24, 4),
         // sync.Once: { done uint32; m Mutex } = 12B
         "sync.Once" => (12, 4),
         // atomic.Bool / atomic.Int32 / atomic.Uint32: { _ noCopy; v uint32 } = 4B
@@ -76,8 +78,57 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         // atomic.Value: { v any } — `any` is two words (type ptr + data ptr)
         "atomic.Value" => (arch.pointer_size * 2, arch.pointer_size),
         // sync.WaitGroup: { noCopy (0B); state atomic.Uint64 (8B, align 8);
-        //   sema uint32 (4B) } = 12B, align 8. Stable since Go 1.
-        "sync.WaitGroup" => (12, 8),
+        //   sema uint32 (4B) } = 12B of fields, padded to 16B by its 8-byte alignment.
+        "sync.WaitGroup" => (16, 8),
+        // sync.Pool: { noCopy; local unsafe.Pointer; localSize uintptr;
+        //   victim unsafe.Pointer; victimSize uintptr; New func() } = 5 words.
+        "sync.Pool" => (arch.pointer_size * 5, arch.pointer_size),
+        // sync.Cond: { noCopy; L Locker (2 words); notify notifyList (4 words:
+        //   wait, notify uint32, lock uintptr, head, tail pointers); checker copyChecker (1 word) }
+        "sync.Cond" => (arch.pointer_size * 7, arch.pointer_size),
+        // atomic.Pointer[T]: { _ [0]*T; _ noCopy; v unsafe.Pointer } — one pointer.
+        "atomic.Pointer" => (arch.pointer_size, arch.pointer_size),
+        // Plain integer-backed stdlib types.
+        "time.Duration" | "time.Month" | "time.Weekday" => (8, 8),
+        "os.FileMode" | "fs.FileMode" => (4, 4),
+        // []byte-backed stdlib types.
+        "net.IP" | "json.RawMessage" | "net.HardwareAddr" => {
+            (arch.pointer_size * 3, arch.pointer_size)
+        }
+        // Widely used stdlib interfaces: two words (type/itab pointer + data pointer).
+        "io.Reader"
+        | "io.Writer"
+        | "io.Closer"
+        | "io.Seeker"
+        | "io.ReadWriter"
+        | "io.ReadCloser"
+        | "io.WriteCloser"
+        | "io.ReadWriteCloser"
+        | "io.ReaderAt"
+        | "io.WriterAt"
+        | "io.ByteReader"
+        | "io.ByteWriter"
+        | "io.RuneReader"
+        | "io.StringWriter"
+        | "fmt.Stringer"
+        | "sync.Locker"
+        | "context.Context"
+        | "net.Conn"
+        | "net.Listener"
+        | "net.Addr"
+        | "http.Handler"
+        | "http.ResponseWriter"
+        | "http.RoundTripper"
+        | "sort.Interface"
+        | "reflect.Type"
+        | "driver.Connector"
+        | "driver.Conn"
+        | "driver.Driver"
+        | "driver.Stmt"
+        | "driver.Tx"
+        | "driver.Rows"
+        | "driver.Result"
+        | "slog.Handler" => (arch.pointer_size * 2, arch.pointer_size),
         // sync.Map (Go 1.19+): { mu Mutex(8); read atomic.Pointer(8);
         //   dirty map(8); misses int(8) } = 4 words. Stable layout since 1.19.
         "sync.Map" => (arch.pointer_size * 4, arch.pointer_size),
@@ -110,6 +161,50 @@ fn is_known_external_go_type(ty: &str) -> bool {
             | "atomic.Uint64"
             | "atomic.Uintptr"
             | "atomic.Value"
+            | "atomic.Pointer"
+            | "sync.Pool"
+            | "sync.Cond"
+            | "time.Duration"
+            | "time.Month"
+            | "time.Weekday"
+            | "os.FileMode"
+            | "fs.FileMode"
+            | "net.IP"
+            | "json.RawMessage"
+            | "net.HardwareAddr"
+            | "io.Reader"
+            | "io.Writer"
+            | "io.Closer"
+            | "io.Seeker"
+            | "io.ReadWriter"
+            | "io.ReadCloser"
+            | "io.WriteCloser"
+            | "io.ReadWriteCloser"
+            | "io.ReaderAt"
+            | "io.WriterAt"
+            | "io.ByteReader"
+            | "io.ByteWriter"
+            | "io.RuneReader"
+            | "io.StringWriter"
+            | "fmt.Stringer"
+            | "sync.Locker"
+            | "context.Context"
+            | "net.Conn"
+            | "net.Listener"
+            | "net.Addr"
+            | "http.Handler"
+            | "http.ResponseWriter"
+            | "http.RoundTripper"
+            | "sort.Interface"
+            | "reflect.Type"
+            | "driver.Connector"
+            | "driver.Conn"
+            | "driver.Driver"
+            | "driver.Stmt"
+            | "driver.Tx"
+            | "driver.Rows"
+            | "driver.Result"
+            | "slog.Handler"
             | "time.Time"
             | "sync.Map"
             | "strings.Builder"
@@ -117,16 +212,41 @@ fn is_known_external_go_type(ty: &str) -> bool {
     )
 }
 
-// ── phase-1: local interface name collection ──────────────────────────────────
+// ── phase-1: declaration pre-scan ─────────────────────────────────────────────
 
-/// Scan a Go source tree for `type X interface { ... }` declarations and
-/// return the set of locally-defined interface names.
-///
-/// These names are used in `parse_struct_type` to size named-interface fields
-/// as two-word fat pointers (type-pointer + data-pointer, 16 bytes on 64-bit)
-/// instead of falling through to the generic pointer-sized unknown catch-all.
-fn collect_go_interface_names(source: &str, root: Node<'_>) -> HashSet<String> {
-    let mut names = HashSet::new();
+/// What a single walk over the file learns about its own declarations, so field
+/// types can be sized without a type checker.
+struct GoCtx {
+    arch: &'static ArchConfig,
+    /// `type X interface { … }` — a two-word fat pointer.
+    interfaces: HashSet<String>,
+    /// `type X struct { … }` — sized by the nested-struct resolver in `lib.rs`.
+    structs: HashSet<String>,
+    /// `type X int16`, `type X = Y`, `type X [4]int32`: name → underlying type text.
+    aliases: HashMap<String, String>,
+    /// `const N = 8` (and `iota` groups): name → defining expression text.
+    consts: HashMap<String, String>,
+}
+
+/// Result of sizing one field type.
+struct Sized {
+    size: usize,
+    align: usize,
+    /// Size is a best guess (unresolvable external type or array length).
+    uncertain: bool,
+    /// Array of a local struct: `(StructName, total element count)`. The element
+    /// size is unknown here; the nested-struct resolver scales it by name.
+    named_elem: Option<(String, usize)>,
+}
+
+fn collect_go_declarations(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> GoCtx {
+    let mut ctx = GoCtx {
+        arch,
+        interfaces: HashSet::new(),
+        structs: HashSet::new(),
+        aliases: HashMap::new(),
+        consts: HashMap::new(),
+    };
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         for i in (0..node.child_count()).rev() {
@@ -134,36 +254,232 @@ fn collect_go_interface_names(source: &str, root: Node<'_>) -> HashSet<String> {
                 stack.push(child);
             }
         }
-        if node.kind() != "type_spec" {
-            continue;
-        }
-        // type_spec: name=type_identifier, type=interface_type
-        let mut iface_name: Option<String> = None;
-        let mut is_interface = false;
-        for i in 0..node.child_count() {
-            let Some(child) = node.child(i) else { continue };
-            match child.kind() {
-                "type_identifier" => {
-                    iface_name = Some(source[child.byte_range()].to_string());
+        match node.kind() {
+            "type_spec" | "type_alias" => {
+                let (Some(name), Some(ty)) = (
+                    node.child_by_field_name("name"),
+                    node.child_by_field_name("type"),
+                ) else {
+                    continue;
+                };
+                // Generic types are skipped entirely elsewhere.
+                if node.child_by_field_name("type_parameters").is_some() {
+                    continue;
                 }
-                "interface_type" => {
-                    is_interface = true;
+                let name = source[name.byte_range()].to_string();
+                match ty.kind() {
+                    "interface_type" => {
+                        ctx.interfaces.insert(name);
+                    }
+                    "struct_type" => {
+                        ctx.structs.insert(name);
+                    }
+                    _ => {
+                        ctx.aliases
+                            .insert(name, source[ty.byte_range()].trim().to_string());
+                    }
                 }
-                _ => {}
             }
-        }
-        if is_interface && let Some(name) = iface_name {
-            names.insert(name);
+            "const_declaration" => collect_consts(source, node, &mut ctx.consts),
+            _ => {}
         }
     }
-    names
+    ctx
+}
+
+/// Record the constants of one `const (…)` / `const x = …` declaration,
+/// expanding `iota` and Go's implicit repetition of the previous expression.
+fn collect_consts(source: &str, decl: Node<'_>, consts: &mut HashMap<String, String>) {
+    let mut iota = 0usize;
+    let mut last_values: Vec<String> = Vec::new();
+    for i in 0..decl.named_child_count() {
+        let Some(spec) = decl.named_child(i as u32) else {
+            continue;
+        };
+        if spec.kind() != "const_spec" {
+            continue;
+        }
+        let mut names = Vec::new();
+        let mut cursor = spec.walk();
+        for n in spec.children_by_field_name("name", &mut cursor) {
+            names.push(source[n.byte_range()].to_string());
+        }
+        if let Some(list) = spec.child_by_field_name("value") {
+            last_values = (0..list.named_child_count())
+                .filter_map(|j| list.named_child(j as u32))
+                .map(|e| source[e.byte_range()].trim().to_string())
+                .collect();
+        }
+        for (name, value) in names.iter().zip(last_values.iter()) {
+            let expanded = replace_word(value, "iota", &iota.to_string());
+            consts.insert(name.clone(), expanded);
+        }
+        iota += 1;
+    }
+}
+
+/// Replace whole-word occurrences of `word` in `text`.
+fn replace_word(text: &str, word: &str, with: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(word) {
+        let before_ok = !rest[..pos]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let after = &rest[pos + word.len()..];
+        let after_ok = !after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        out.push_str(&rest[..pos]);
+        out.push_str(if before_ok && after_ok { with } else { word });
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+// ── field sizing ──────────────────────────────────────────────────────────────
+
+/// Split `[N]T` into (`N`, `T`). `[]T` (slice) and non-arrays give `None`.
+fn split_go_array(ty: &str) -> Option<(&str, &str)> {
+    let rest = ty.strip_prefix('[')?;
+    if rest.starts_with(']') {
+        return None;
+    }
+    let mut depth = 1;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&rest[..i], rest[i + 1..].trim()));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn eval_go_const(expr: &str, ctx: &GoCtx, depth: u8) -> Option<i64> {
+    let lookup = |id: &str| ctx.consts.get(id).cloned();
+    let sizeof = |operand: &str| {
+        // `unsafe.Sizeof(atomic.Int64{})`: size the composite literal's type.
+        let ty = operand.trim().strip_suffix("{}")?;
+        i64::try_from(go_field_size(ty, ctx, depth + 1).size).ok()
+    };
+    super::consteval::eval(
+        expr,
+        &super::consteval::Env {
+            lookup: &lookup,
+            sizeof: &sizeof,
+        },
+        0,
+    )
+}
+
+/// Size and alignment of a Go field type, resolving local aliases, constant
+/// array lengths, anonymous structs and local interfaces.
+fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
+    let ps = ctx.arch.pointer_size;
+    let ty = ty.trim();
+    let plain = |size, align| Sized {
+        size,
+        align,
+        uncertain: false,
+        named_elem: None,
+    };
+    if depth > 8 {
+        return Sized {
+            uncertain: true,
+            ..plain(ps, ps)
+        };
+    }
+    if let Some(inner) = ty.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        return go_field_size(inner, ctx, depth + 1);
+    }
+    if let Some((len_expr, elem)) = split_go_array(ty) {
+        let e = go_field_size(elem, ctx, depth + 1);
+        let (count, len_known) = match eval_go_const(len_expr, ctx, depth).filter(|n| *n >= 0) {
+            Some(n) => (n as usize, true),
+            None => (1, false),
+        };
+        // An array of a local struct: the element size is only known after
+        // the nested-struct resolver runs, so hand it the element name.
+        let elem_name = resolve_alias_chain(elem, ctx);
+        let named_elem = match e.named_elem {
+            Some((name, n)) => Some((name, n.saturating_mul(count))),
+            None if ctx.structs.contains(&elem_name) => Some((elem_name, count)),
+            None => None,
+        };
+        return Sized {
+            size: e.size.saturating_mul(count),
+            align: e.align,
+            uncertain: e.uncertain || !len_known,
+            named_elem,
+        };
+    }
+    if let Some(inner) = ty
+        .strip_prefix("__anon_struct<")
+        .and_then(|t| t.strip_suffix('>'))
+        && let Some((sz, al)) = inner.split_once(',')
+        && let (Ok(sz), Ok(al)) = (sz.trim().parse(), al.trim().parse())
+    {
+        return plain(sz, al);
+    }
+    if ctx.structs.contains(ty) {
+        return plain(ps, ps);
+    }
+    if let Some(target) = ctx.aliases.get(ty) {
+        return go_field_size(target, ctx, depth + 1);
+    }
+    if ctx.interfaces.contains(ty) {
+        return plain(ps * 2, ps);
+    }
+    // `func(...)` values are a single pointer.
+    if ty == "func" || ty.starts_with("func(") {
+        return plain(ps, ps);
+    }
+    // Instantiated generic stdlib types such as `atomic.Pointer[T]`.
+    let base = match ty.find('[') {
+        Some(i) if i > 0 && ty.ends_with(']') => ty[..i].trim_end(),
+        _ => ty,
+    };
+    let (size, align) = go_type_size_align(base, ctx.arch);
+    // Qualified types (e.g. `driver.Connector`, `io.Reader`) come from external
+    // packages. Without type information we cannot determine whether they are
+    // interfaces (16B fat pointer) or structs (arbitrary size). Flag them as
+    // uncertain so the output layer can warn the user.
+    // Exception: types in `is_known_external_go_type` have hardcoded accurate
+    // sizes in `go_type_size_align` and must not be marked uncertain.
+    let uncertain =
+        !base.starts_with('*') && base.contains('.') && !is_known_external_go_type(base);
+    Sized {
+        uncertain,
+        ..plain(size, align)
+    }
+}
+
+/// Follow `type A B` aliases to the final bare type name.
+fn resolve_alias_chain(ty: &str, ctx: &GoCtx) -> String {
+    let mut cur = ty.trim().to_string();
+    for _ in 0..8 {
+        match ctx.aliases.get(&cur) {
+            Some(next) => cur = next.trim().to_string(),
+            None => break,
+        }
+    }
+    cur
 }
 
 // ── tree-sitter walker ────────────────────────────────────────────────────────
 
 fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> Vec<StructLayout> {
-    // Phase 1: collect locally-defined interface names for accurate fat-pointer sizing.
-    let local_interfaces = collect_go_interface_names(source, root);
+    // Phase 1: learn the file's own interfaces, structs, aliases and constants.
+    let ctx = collect_go_declarations(source, root, arch);
 
     let mut layouts = Vec::new();
     let mut stack = vec![root];
@@ -175,48 +491,44 @@ fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> V
             }
         }
 
-        // type_declaration → type_spec → struct_type
-        if node.kind() == "type_declaration"
-            && let Some(layout) = parse_type_declaration(source, node, arch, &local_interfaces)
-        {
-            layouts.push(layout);
+        // type_declaration → type_spec(s) → struct_type. A grouped
+        // `type ( A struct{…}; B struct{…} )` holds several specs.
+        if node.kind() == "type_declaration" {
+            layouts.extend(parse_type_declaration(source, node, &ctx));
         }
     }
     layouts
 }
 
-fn parse_type_declaration(
-    source: &str,
-    node: Node<'_>,
-    arch: &'static ArchConfig,
-    local_interfaces: &HashSet<String>,
-) -> Option<StructLayout> {
-    let source_line = node.start_position().row as u32 + 1;
+fn parse_type_declaration(source: &str, node: Node<'_>, ctx: &GoCtx) -> Vec<StructLayout> {
     let decl_start_byte = node.start_byte();
-    // type_declaration has a type_spec child
+    let mut out = Vec::new();
     for i in 0..node.child_count() {
         let Some(child) = node.child(i) else { continue };
         if child.kind() == "type_spec" {
-            return parse_type_spec(
-                source,
-                child,
-                arch,
-                source_line,
-                decl_start_byte,
-                local_interfaces,
-            );
+            // A grouped spec's line is its own, not the `type (` line.
+            let source_line = if node.named_child_count() > 1 {
+                child.start_position().row as u32 + 1
+            } else {
+                node.start_position().row as u32 + 1
+            };
+            let start = if node.named_child_count() > 1 {
+                child.start_byte()
+            } else {
+                decl_start_byte
+            };
+            out.extend(parse_type_spec(source, child, ctx, source_line, start));
         }
     }
-    None
+    out
 }
 
 fn parse_type_spec(
     source: &str,
     node: Node<'_>,
-    arch: &'static ArchConfig,
+    ctx: &GoCtx,
     source_line: u32,
     decl_start_byte: usize,
-    local_interfaces: &HashSet<String>,
 ) -> Option<StructLayout> {
     let mut name: Option<String> = None;
     let mut struct_node: Option<Node> = None;
@@ -244,28 +556,14 @@ fn parse_type_spec(
     }
 
     let struct_node = struct_node?;
-    parse_struct_type(
-        source,
-        struct_node,
-        name,
-        arch,
-        source_line,
-        decl_start_byte,
-        local_interfaces,
-    )
+    parse_struct_type(source, struct_node, name, ctx, source_line, decl_start_byte)
 }
 
-fn parse_struct_type(
-    source: &str,
-    node: Node<'_>,
-    name: String,
-    arch: &'static ArchConfig,
-    source_line: u32,
-    decl_start_byte: usize,
-    local_interfaces: &HashSet<String>,
-) -> Option<StructLayout> {
-    let mut raw_fields: Vec<(String, String, Option<String>, u32)> = Vec::new();
+type RawGoField = (String, String, Option<String>, u32);
 
+/// Raw `(name, type text, guard, line)` entries for every field of a struct body.
+fn raw_struct_fields(source: &str, node: Node<'_>, ctx: &GoCtx) -> Vec<RawGoField> {
+    let mut raw_fields = Vec::new();
     for i in 0..node.child_count() {
         let Some(child) = node.child(i) else { continue };
         if child.kind() == "field_declaration_list" {
@@ -274,43 +572,37 @@ fn parse_struct_type(
                     continue;
                 };
                 if field_node.kind() == "field_declaration" {
-                    collect_field_declarations(source, field_node, &mut raw_fields);
+                    collect_field_declarations(source, field_node, ctx, &mut raw_fields);
                 }
             }
         }
     }
+    raw_fields
+}
 
-    if raw_fields.is_empty() {
-        return None;
-    }
-
-    // Simulate layout
+/// Lay out fields in declaration order. Returns the fields, total size,
+/// alignment and the names of fields whose size is a best guess.
+fn simulate_go_layout(
+    raw_fields: Vec<RawGoField>,
+    ctx: &GoCtx,
+) -> (Vec<Field>, usize, usize, Vec<String>) {
     let mut offset = 0usize;
     let mut struct_align = 1usize;
     let mut fields: Vec<Field> = Vec::new();
     let mut uncertain_fields: Vec<String> = Vec::new();
 
     for (fname, ty_name, guard, field_line) in raw_fields {
-        let (mut size, mut align) = go_type_size_align(&ty_name, arch);
-
-        // Override: a locally-declared interface type is a fat pointer (16B on 64-bit).
-        // go_type_size_align does not know about local names, so we patch here.
-        if local_interfaces.contains(ty_name.as_str()) {
-            size = arch.pointer_size * 2;
-            align = arch.pointer_size;
-        }
-
-        // Qualified types (e.g. `driver.Connector`, `io.Reader`) come from external
-        // packages. Without type information we cannot determine whether they are
-        // interfaces (16B fat pointer) or structs (arbitrary size). Flag them as
-        // uncertain so the output layer can warn the user.
-        // Exception: types in `is_known_external_go_type` have hardcoded accurate
-        // sizes in `go_type_size_align` and must not be marked uncertain.
-        let is_pointer = ty_name.starts_with('*');
-        let base_ty = ty_name.trim_start_matches('*');
-        if !is_pointer && base_ty.contains('.') && !is_known_external_go_type(base_ty) {
+        let sized = go_field_size(&ty_name, ctx, 0);
+        let (size, align) = (sized.size, sized.align);
+        if sized.uncertain {
             uncertain_fields.push(fname.clone());
         }
+        // An array of a local struct is renamed `Name[count]` so the nested-struct
+        // resolver can substitute the real element size.
+        let ty_name = match &sized.named_elem {
+            Some((elem, count)) => format!("{elem}[{count}]"),
+            None => ty_name,
+        };
 
         if align > 0 {
             offset = offset.next_multiple_of(align);
@@ -341,18 +633,39 @@ fn parse_struct_type(
         });
         offset += size;
     }
+    // Go pads a struct that ends in a zero-size field so a pointer to that
+    // field cannot point past the object.
+    if offset > 0 && fields.last().is_some_and(|f| f.size == 0) {
+        offset += 1;
+    }
     if struct_align > 0 {
         offset = offset.next_multiple_of(struct_align);
     }
+    (fields, offset, struct_align, uncertain_fields)
+}
+
+fn parse_struct_type(
+    source: &str,
+    node: Node<'_>,
+    name: String,
+    ctx: &GoCtx,
+    source_line: u32,
+    decl_start_byte: usize,
+) -> Option<StructLayout> {
+    let raw_fields = raw_struct_fields(source, node, ctx);
+    if raw_fields.is_empty() {
+        return None;
+    }
+    let (fields, total_size, align, uncertain_fields) = simulate_go_layout(raw_fields, ctx);
 
     Some(StructLayout {
         name,
-        total_size: offset,
-        align: struct_align,
+        total_size,
+        align,
         fields,
         source_file: None,
         source_line: Some(source_line),
-        arch,
+        arch: ctx.arch,
         is_packed: false,
         is_union: false,
         is_repr_rust: false,
@@ -420,26 +733,36 @@ fn trailing_comment_on_line(source: &str, node: Node<'_>) -> Option<String> {
 fn collect_field_declarations(
     source: &str,
     node: Node<'_>,
-    out: &mut Vec<(String, String, Option<String>, u32)>,
+    ctx: &GoCtx,
+    out: &mut Vec<RawGoField>,
 ) {
-    // field_declaration: field_identifier+ type [comment]
-    // OR embedded type (anonymous field): TypeName [comment]
+    // field_declaration: field_identifier+ type [tag] [comment]
+    // OR embedded type (anonymous field): [*]TypeName [tag] [comment]
     let mut field_names: Vec<String> = Vec::new();
-    let mut ty_text: Option<String> = None;
+    let mut is_pointer_embed = false;
     let field_line = node.start_position().row as u32 + 1;
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             match child.kind() {
                 "field_identifier" => field_names.push(source[child.byte_range()].to_string()),
-                "type_identifier" | "pointer_type" | "qualified_type" | "slice_type"
-                | "map_type" | "channel_type" | "array_type" | "interface_type" => {
-                    ty_text = Some(source[child.byte_range()].trim().to_string());
-                }
+                // `*Base` embeds: the `*` is a bare token, not a pointer_type node.
+                "*" => is_pointer_embed = true,
                 _ => {}
             }
         }
     }
+
+    let ty_text = node.child_by_field_name("type").map(|t| {
+        if t.kind() == "struct_type" {
+            // `inner struct{ … }`: lay it out and encode its size/alignment.
+            let raw = raw_struct_fields(source, t, ctx);
+            let (_, size, align, _) = simulate_go_layout(raw, ctx);
+            format!("__anon_struct<{size},{align}>")
+        } else {
+            source[t.byte_range()].trim().to_string()
+        }
+    });
 
     let guard =
         trailing_comment_on_line(source, node).and_then(|c| extract_guard_from_go_comment(&c));
@@ -455,7 +778,12 @@ fn collect_field_declarations(
         // Embedded (anonymous) field: `sync.Mutex`, `Base`, or `*Base`.
         // Go field name is the unqualified type name WITHOUT the pointer `*`
         // (Go spec: for `*T`, the implicit field name is `T`, not `*T`).
-        // The type string retains `*` so go_type_size_align returns pointer size.
+        // The type string keeps `*` so sizing sees a pointer.
+        let ty = if is_pointer_embed && !ty.starts_with('*') {
+            format!("*{ty}")
+        } else {
+            ty
+        };
         let simple_name = ty
             .trim_start_matches('*')
             .split('.')
@@ -666,7 +994,7 @@ type Safe struct {
         // struct, so they fall back to pointer_size (8B on x86-64) — the same as an
         // opaque pointer.  This is a known source-analysis limitation; binary (DWARF)
         // analysis always returns the correct compiler layout.
-        let src = "package p\ntype DB struct { connector driver.Connector }";
+        let src = "package p\ntype DB struct { connector foo.Connector }";
         let layouts = parse_go(src, &X86_64_SYSV).unwrap();
         // Known limitation: reports 8B, not the actual 16B.
         assert_eq!(
@@ -726,7 +1054,7 @@ type File struct { C Closer }
     fn qualified_type_field_marked_uncertain() {
         // A qualified type (e.g. `io.Reader`) from an external package cannot be
         // resolved without go/types; the field must appear in uncertain_fields.
-        let src = "package p\ntype S struct { R io.Reader; N int32 }";
+        let src = "package p\ntype S struct { R foo.Reader; N int32 }";
         let layouts = parse_go(src, &X86_64_SYSV).unwrap();
         let l = &layouts[0];
         assert!(
@@ -1016,12 +1344,13 @@ type Outer struct {
     #[test]
     fn sync_waitgroup_sized_correctly() {
         // sync.WaitGroup: { noCopy (0B); state atomic.Uint64 (8B); sema uint32 (4B) }
-        // = 12B, align 8. Common in concurrent Go code.
+        // = 12B of fields, padded to 16B by its 8-byte alignment (verified with
+        // unsafe.Sizeof on go1.22). Common in concurrent Go code.
         let src = "package p\nimport \"sync\"\ntype S struct { wg sync.WaitGroup; x int32 }";
         let layouts = parse_go(src, &X86_64_SYSV).unwrap();
         let l = layouts.iter().find(|l| l.name == "S").expect("S");
         let wg = l.fields.iter().find(|f| f.name == "wg").expect("wg");
-        assert_eq!(wg.size, 12, "sync.WaitGroup must be 12B");
+        assert_eq!(wg.size, 16, "sync.WaitGroup must be 16B");
         assert_eq!(wg.align, 8);
         assert!(
             !l.uncertain_fields.contains(&"wg".to_string()),
@@ -1042,5 +1371,129 @@ type Outer struct {
             !l.uncertain_fields.contains(&"ts".to_string()),
             "time.Time must not be in uncertain_fields"
         );
+    }
+
+    // ── field shapes (verified against `go run` with unsafe.Sizeof/Offsetof) ───
+
+    fn go_layout(src: &str, name: &str) -> StructLayout {
+        crate::parse_source_str(src, &crate::SourceLanguage::Go, &X86_64_SYSV)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.name == name)
+            .unwrap_or_else(|| panic!("{name} not parsed"))
+    }
+
+    fn go_offset(l: &StructLayout, field: &str) -> usize {
+        l.fields.iter().find(|f| f.name == field).unwrap().offset
+    }
+
+    #[test]
+    fn arrays_are_sized_by_length_and_element() {
+        let l = go_layout(
+            "package p\nconst N = 4\ntype S struct { a byte; b [48]byte; c int64; d [N * 2]int16; e [2][3]int16; f byte }",
+            "S",
+        );
+        assert_eq!(go_offset(&l, "c"), 56);
+        assert_eq!(go_offset(&l, "d"), 64);
+        assert_eq!(go_offset(&l, "e"), 80);
+        assert_eq!(go_offset(&l, "f"), 92);
+    }
+
+    #[test]
+    fn array_length_may_use_unsafe_sizeof() {
+        let src = "package p\nimport (\"sync/atomic\"; \"unsafe\")\ntype S struct { a atomic.Int64; b atomic.Uint64; _ [64 - unsafe.Sizeof(atomic.Int64{}) - unsafe.Sizeof(atomic.Uint64{})]byte; mu int64 }";
+        let l = go_layout(src, "S");
+        assert_eq!(go_offset(&l, "mu"), 64);
+        assert!(l.uncertain_fields.is_empty());
+    }
+
+    #[test]
+    fn iota_constants_feed_array_lengths() {
+        let src =
+            "package p\nconst (\n A = iota\n B\n C\n)\ntype S struct { x [C + 1]byte; y int32 }";
+        let l = go_layout(src, "S");
+        assert_eq!(go_offset(&l, "y"), 4);
+    }
+
+    #[test]
+    fn unevaluable_array_length_is_uncertain() {
+        let l = go_layout("package p\ntype S struct { x [cpu.Pad]byte; y int64 }", "S");
+        assert_eq!(l.uncertain_fields, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn local_type_aliases_are_resolved() {
+        let l = go_layout(
+            "package p\ntype Alias int16\ntype Vec [4]int32\ntype S struct { a bool; x Alias; b bool; v Vec; c bool }",
+            "S",
+        );
+        assert_eq!(go_offset(&l, "x"), 2);
+        assert_eq!(go_offset(&l, "b"), 4);
+        assert_eq!(go_offset(&l, "v"), 8);
+        assert_eq!(go_offset(&l, "c"), 24);
+    }
+
+    #[test]
+    fn array_of_local_structs_is_scaled_by_the_resolver() {
+        let src = "package p\ntype In struct { x bool; y int32 }\ntype S struct { a bool; b [2]In; c bool }";
+        let l = go_layout(src, "S");
+        assert_eq!(go_offset(&l, "c"), 20);
+        assert_eq!(l.total_size, 24);
+    }
+
+    #[test]
+    fn inline_struct_func_and_generic_fields_are_kept() {
+        let src = "package p\nimport \"sync/atomic\"\ntype S struct { a bool; in struct{ x bool; y int64 }; f func(int); p atomic.Pointer[int]; z bool }";
+        let l = go_layout(src, "S");
+        assert_eq!(go_offset(&l, "in"), 8);
+        assert_eq!(go_offset(&l, "f"), 24);
+        assert_eq!(go_offset(&l, "p"), 32);
+        assert_eq!(go_offset(&l, "z"), 40);
+    }
+
+    #[test]
+    fn embedded_pointer_is_one_word() {
+        let src =
+            "package p\ntype Big struct { a [64]byte }\ntype S struct { a bool; *Big; b bool }";
+        let l = go_layout(src, "S");
+        assert_eq!(l.total_size, 24);
+    }
+
+    #[test]
+    fn grouped_type_declarations_yield_every_struct() {
+        let src = "package p\ntype (\n A struct { x int32 }\n B struct { y int64 }\n)";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        assert_eq!(layouts.len(), 2);
+    }
+
+    #[test]
+    fn complex_and_sync_types_have_their_real_alignment() {
+        let l = go_layout(
+            "package p\ntype S struct { a bool; c complex64; b bool }",
+            "S",
+        );
+        assert_eq!(go_offset(&l, "c"), 4);
+        let l = go_layout(
+            "package p\ntype S struct { a bool; r sync.RWMutex; b bool }",
+            "S",
+        );
+        assert_eq!(go_offset(&l, "r"), 4);
+        assert_eq!(go_offset(&l, "b"), 28);
+    }
+
+    #[test]
+    fn known_stdlib_interfaces_are_two_words_and_certain() {
+        let l = go_layout(
+            "package p\ntype DB struct { c driver.Connector; r io.Reader }",
+            "DB",
+        );
+        assert_eq!(l.total_size, 32);
+        assert!(l.uncertain_fields.is_empty());
+    }
+
+    #[test]
+    fn trailing_zero_size_field_adds_a_padding_byte() {
+        let l = go_layout("package p\ntype S struct { a int64; z struct{} }", "S");
+        assert_eq!(l.total_size, 16);
     }
 }

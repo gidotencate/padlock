@@ -3,6 +3,8 @@
 // Provides:
 //   #[padlock::assert_no_padding]   — fails to compile if the struct has padding
 //   #[padlock::assert_size(N)]      — fails to compile if size_of != N
+//   #[padlock::assert_align(N)]     — fails to compile if align_of != N
+//   #[padlock::assert_offsets(a = 0, b = 8)] — fails to compile if a field moves
 
 extern crate proc_macro;
 
@@ -160,6 +162,116 @@ pub fn assert_size(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+// ── #[padlock::assert_align(N)] ───────────────────────────────────────────────
+
+/// Attribute macro that causes a **compile-time error** if the struct's
+/// `align_of` is not exactly `N` bytes (e.g. to pin a cache-line alignment).
+///
+/// ```rust,ignore
+/// #[padlock::assert_align(64)]
+/// #[repr(C, align(64))]
+/// struct Counter { hits: u64 }
+/// ```
+#[proc_macro_attribute]
+pub fn assert_align(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemStruct);
+    let expected: syn::LitInt = match syn::parse(attr) {
+        Ok(n) => n,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let struct_name = &input.ident;
+    let const_ident = format_ident!(
+        "_PADLOCK_ASSERT_ALIGN_{}",
+        struct_name.to_string().to_uppercase()
+    );
+    TokenStream::from(quote! {
+        #input
+
+        const #const_ident: () = {
+            let actual = ::core::mem::align_of::<#struct_name>();
+            let expected: usize = #expected;
+            assert!(
+                actual == expected,
+                concat!("padlock: struct `", stringify!(#struct_name), "` has unexpected alignment.")
+            );
+        };
+    })
+}
+
+// ── #[padlock::assert_offsets(field = N, …)] ──────────────────────────────────
+
+/// Attribute macro that causes a **compile-time error** if any listed field is
+/// not at the given byte offset (`core::mem::offset_of!`, Rust 1.77+).
+///
+/// Pins an FFI or on-disk layout, or the result of a `padlock fix` reorder,
+/// against silent drift. Fields not listed are not checked.
+///
+/// ```rust,ignore
+/// #[padlock::assert_offsets(len = 0, cap = 8, flags = 16)]
+/// #[repr(C)]
+/// struct Header { len: u64, cap: u64, flags: u8 }
+/// ```
+#[proc_macro_attribute]
+pub fn assert_offsets(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemStruct);
+    let parser =
+        syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated;
+    let pairs = match syn::parse::Parser::parse(parser, attr) {
+        Ok(p) => p,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    match emit_offset_assertions(&input, &pairs) {
+        Ok(checks) => TokenStream::from(quote! {
+            #input
+            #checks
+        }),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn emit_offset_assertions(
+    input: &ItemStruct,
+    pairs: &syn::punctuated::Punctuated<syn::MetaNameValue, syn::Token![,]>,
+) -> syn::Result<TokenStream2> {
+    let struct_name = &input.ident;
+    let const_ident = format_ident!(
+        "_PADLOCK_ASSERT_OFFSETS_{}",
+        struct_name.to_string().to_uppercase()
+    );
+    let mut checks = Vec::new();
+    for pair in pairs {
+        let field = pair
+            .path
+            .get_ident()
+            .ok_or_else(|| syn::Error::new_spanned(&pair.path, "expected a field name"))?;
+        let known = match &input.fields {
+            Fields::Named(nf) => nf.named.iter().any(|f| f.ident.as_ref() == Some(field)),
+            _ => false,
+        };
+        if !known {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!("`{struct_name}` has no named field `{field}`"),
+            ));
+        }
+        let expected = &pair.value;
+        checks.push(quote! {
+            assert!(
+                ::core::mem::offset_of!(#struct_name, #field) == #expected,
+                concat!(
+                    "padlock: field `", stringify!(#struct_name), ".", stringify!(#field),
+                    "` is not at offset ", stringify!(#expected)
+                )
+            );
+        });
+    }
+    Ok(quote! {
+        const #const_ident: () = {
+            #( #checks )*
+        };
+    })
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -230,6 +342,24 @@ mod tests {
         let s = ts.to_string();
         // The generated const ident should be FOOBAR (uppercase of struct name)
         assert!(s.contains("FOOBAR"), "expected FOOBAR in const name: {s}");
+    }
+
+    #[test]
+    fn offset_assertions_name_each_field() {
+        let item: ItemStruct = parse_quote! { struct H { len: u64, flags: u8 } };
+        let pairs: syn::punctuated::Punctuated<syn::MetaNameValue, syn::Token![,]> =
+            parse_quote! { len = 0, flags = 8 };
+        let s = emit_offset_assertions(&item, &pairs).unwrap().to_string();
+        assert!(s.contains("offset_of"), "{s}");
+        assert!(s.contains("len") && s.contains("flags"), "{s}");
+    }
+
+    #[test]
+    fn offset_assertion_rejects_unknown_field() {
+        let item: ItemStruct = parse_quote! { struct H { len: u64 } };
+        let pairs: syn::punctuated::Punctuated<syn::MetaNameValue, syn::Token![,]> =
+            parse_quote! { nope = 0 };
+        assert!(emit_offset_assertions(&item, &pairs).is_err());
     }
 
     #[test]

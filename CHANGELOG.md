@@ -2,6 +2,12 @@
 
 All notable changes to padlock are documented here.
 
+## [0.47.0] — 2026-10-23
+
+### Added
+- **`#[padlock::assert_offsets(field = N, …)]`** — compile-time error if a listed field is not at the given offset (`core::mem::offset_of!`, Rust 1.77+); unknown field names are a compile error too. Pins FFI/on-disk layouts or a `padlock fix` reorder against drift.
+- **`#[padlock::assert_align(N)]`** — compile-time error if `align_of` is not exactly `N`.
+
 ## [0.46.0] — 2026-10-23
 
 ### Added

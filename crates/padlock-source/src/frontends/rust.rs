@@ -228,6 +228,12 @@ fn local_struct_size(name: &str, ctx: &RustCtx) -> Option<(usize, usize)> {
     sa
 }
 
+/// Whether std's synchronisation primitives are the futex-based ones on this
+/// target (Linux, Android, the BSDs). Apple and Windows targets use others.
+fn futex_std(arch: &ArchConfig) -> bool {
+    !(arch.name.contains("apple") || arch.name.contains("msvc"))
+}
+
 /// Size of `fields` laid out the way rustc lays out a `repr(Rust)` aggregate
 /// (tuples, std structs): largest alignment first.
 fn reordered_layout(fields: &[(usize, usize)]) -> (usize, usize) {
@@ -364,6 +370,11 @@ fn rust_type_size_align(ty: &Type, ctx: &RustCtx) -> (usize, usize, TypeInfo) {
                 && let Some(inner_ty) = first_type_arg(seg)
             {
                 let (is, ia, _) = rust_type_size_align(inner_ty, ctx);
+                // The futex layout is the Linux/Android/BSD one; macOS and Windows
+                // std use other primitives, so the size there is a guess.
+                if !futex_std(arch) {
+                    ctx.uncertain.set(true);
+                }
                 let parts: Vec<(usize, usize)> = match name.as_str() {
                     "Mutex" => vec![(4, 4), (1, 1), (is, ia)],
                     "RwLock" => vec![(8, 4), (1, 1), (is, ia)],
@@ -499,6 +510,9 @@ fn rust_type_size_align(ty: &Type, ctx: &RustCtx) -> (usize, usize, TypeInfo) {
             let (size, align) = if is_fat {
                 (arch.pointer_size * 2, arch.pointer_size)
             } else {
+                if matches!(name.as_str(), "Condvar" | "Once" | "Barrier") && !futex_std(arch) {
+                    ctx.uncertain.set(true);
+                }
                 primitive_size_align(&name, arch)
             };
             // Arc<T>/Rc<T> record only the outer "Arc"/"Rc" name below — the
@@ -2378,5 +2392,16 @@ struct Conn { port: u16, status: u32 }
         // repr(C) keeps declaration order.
         let l = rs("#[repr(C)] struct S { a: u8, b: u64, c: u8 }", "S");
         assert_eq!(l.total_size, 24);
+    }
+
+    #[test]
+    fn std_sync_sizes_are_uncertain_off_linux() {
+        let src = "#[repr(C)] struct S { m: Mutex<u32>, c: Condvar }";
+        let linux = parse_rust(src, &X86_64_SYSV).unwrap().remove(0);
+        assert!(linux.uncertain_fields.is_empty());
+        let mac = parse_rust(src, &padlock_core::arch::AARCH64_APPLE)
+            .unwrap()
+            .remove(0);
+        assert_eq!(mac.uncertain_fields, vec!["m".to_string(), "c".to_string()]);
     }
 }

@@ -846,3 +846,38 @@ fn go_exact_uses_the_go_toolchain_layout() {
         before_files.len()
     );
 }
+
+#[test]
+fn rust_exact_uses_rustc_field_order() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n",
+    )
+    .unwrap();
+    // Option<Vec<u8>> (niche), a tuple and a char: rustc decides.
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "pub struct S { pub a: u8, pub v: Option<Vec<u8>>, pub t: (u8, u32), pub c: char }\n\
+         pub fn make() -> S { S { a: 1, v: None, t: (2, 3), c: 'x' } }\n",
+    )
+    .unwrap();
+    let out = padlock()
+        .args(["analyze", "--json", "--no-cache", "--rust-exact"])
+        .arg(dir.path().join("lib.rs"))
+        .output()
+        .unwrap();
+    // rustc: Option<Vec<u8>> 24 + (u8, u32) 8 + char 4 + u8 1 → 40 (align 8).
+    assert_eq!(
+        struct_size(&out.stdout, "S"),
+        Some(40),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // rustc really ran (into its own target directory).
+    assert!(
+        dir.path().join("target/padlock-rust-exact").is_dir(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

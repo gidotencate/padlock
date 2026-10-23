@@ -7,6 +7,7 @@ pub mod compile_commands;
 pub mod filter;
 pub mod go_exact;
 pub mod paths;
+pub mod rust_exact;
 
 mod commands {
     pub mod analyze;

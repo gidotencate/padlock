@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.37.0] — 2026-10-23
+
+### Changed
+- CI lints test code too (`cargo clippy --workspace --all-targets -- -D warnings`); fixed the two lint failures that had accumulated in test code (`padlock-dwarf` BTF test, an unused `padlock-cli` test helper).
+
 ## [0.36.0] — 2026-10-23
 
 ### Fixed

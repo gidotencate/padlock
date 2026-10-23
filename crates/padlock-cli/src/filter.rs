@@ -272,10 +272,6 @@ mod tests {
         }
     }
 
-    fn default_args() -> FilterArgs {
-        args(None, None, None, None, false, SortBy::Score)
-    }
-
     #[test]
     fn filter_keeps_matching_name() {
         let mut layouts = vec![connection_layout(), packed_layout()];

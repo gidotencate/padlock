@@ -629,7 +629,7 @@ mod tests {
         type_data.extend_from_slice(&struct_info.to_le_bytes());
         type_data.extend_from_slice(&4u32.to_le_bytes()); // size=4
         // member: flags, type=1, offset encoding = (bitfield_size=3 << 24) | bit_offset=0
-        let m_offset: u32 = (3u32 << 24) | 0u32; // 3-bit bitfield at bit 0
+        let m_offset: u32 = 3u32 << 24; // 3-bit bitfield at bit 0
         type_data.extend_from_slice(&flags_name_off.to_le_bytes());
         type_data.extend_from_slice(&1u32.to_le_bytes()); // type_id=1
         type_data.extend_from_slice(&m_offset.to_le_bytes());

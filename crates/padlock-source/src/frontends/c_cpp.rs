@@ -1182,6 +1182,7 @@ fn simulate_layout(
         uncertain_fields: Vec::new(),
         forced_align: None,
         pack_limit: None,
+        cpp: None,
     }
 }
 
@@ -1219,6 +1220,7 @@ fn simulate_union_layout(
         uncertain_fields: Vec::new(),
         forced_align: None,
         pack_limit: None,
+        cpp: None,
     }
 }
 
@@ -1343,10 +1345,6 @@ fn parse_class_specifier(
             .map(|raw| make_field(raw, aliases, arch)),
     );
 
-    if fields.is_empty() {
-        return None;
-    }
-
     let line = node.start_position().row as u32 + 1;
     let mut layout = simulate_layout(&mut fields, class_name, arch, Some(line), pack_n);
 
@@ -1358,6 +1356,14 @@ fn parse_class_specifier(
 
     mark_uncertain_arrays(&mut layout);
     layout.uncertain_fields.extend(pp_labels);
+    if aliases.contains_key(CPP_KEY) {
+        let is_class = node.kind() == "class_specifier";
+        layout.cpp = Some(cpp_class_info(source, node, body, aliases, is_class));
+        // C++ objects are never zero-sized.
+        if layout.total_size == 0 {
+            layout.total_size = 1;
+        }
+    }
 
     layout.suppressed_findings =
         super::suppress::suppressed_from_preceding_source(source, node.start_byte());
@@ -1512,11 +1518,15 @@ fn collect_instantiate_annotations(source: &str, tpl_decl: Node<'_>) -> Vec<Vec<
     lines
 }
 
+/// Key in the alias map marking a C++ (rather than C) translation unit.
+const CPP_KEY: &str = "$lang:cpp";
+
 fn extract_structs_from_tree(
     source: &str,
     root: Node<'_>,
     arch: &'static ArchConfig,
     layouts: &mut Vec<StructLayout>,
+    cpp: bool,
 ) {
     // Phase 0: collect within-file typedef scalar aliases for field type resolution.
     let mut aliases = collect_typedef_aliases(source, root);
@@ -1524,6 +1534,9 @@ fn extract_structs_from_tree(
     collect_int_constants(source, root, arch, &mut aliases);
     // …and where macros are defined, to resolve `#if` branches.
     collect_pp_defines(source, root, &mut aliases);
+    if cpp {
+        aliases.insert(CPP_KEY.to_string(), String::new());
+    }
 
     // Phase 1: extract struct/union/class layouts.
     // We do a single linear pass ordered by byte offset so that `#pragma pack`
@@ -1839,9 +1852,8 @@ fn parse_struct_or_union_specifier(
 
     // A struct with only virtual methods and no data members still needs a
     // layout if it has virtual dispatch (the __vptr field will be inserted below).
-    if raw_fields.is_empty() && !has_virtual && base_names.is_empty() {
-        return None;
-    }
+    // An empty `struct E {};` is still a type others embed or derive from
+    // (0 bytes in GNU C, 1 byte in C++ — adjusted below), so it gets a layout.
 
     // `__attribute__((packed))` forces pack_n=1; `#pragma pack(N)` caps at N.
     // When both apply, the more restrictive (smaller) wins.
@@ -1903,6 +1915,14 @@ fn parse_struct_or_union_specifier(
 
     mark_uncertain_arrays(&mut layout);
     layout.uncertain_fields.extend(pp_labels);
+    if aliases.contains_key(CPP_KEY) {
+        let is_class = node.kind() == "class_specifier";
+        layout.cpp = Some(cpp_class_info(source, node, body, aliases, is_class));
+        // C++ objects are never zero-sized.
+        if layout.total_size == 0 {
+            layout.total_size = 1;
+        }
+    }
     layout.suppressed_findings =
         super::suppress::suppressed_from_preceding_source(source, node.start_byte());
 
@@ -1930,6 +1950,128 @@ fn mark_uncertain_arrays(layout: &mut StructLayout) {
         {
             layout.uncertain_fields.push(f.name.clone());
         }
+    }
+}
+
+/// Direct bases of a `struct`/`class` specifier, with their `virtual` flag.
+fn collect_cpp_bases(source: &str, node: Node<'_>) -> Vec<padlock_core::ir::CppBase> {
+    let mut bases = Vec::new();
+    for i in 0..node.child_count() {
+        let Some(clause) = node.child(i) else {
+            continue;
+        };
+        if clause.kind() != "base_class_clause" {
+            continue;
+        }
+        let mut is_virtual = false;
+        for j in 0..clause.child_count() {
+            let Some(c) = clause.child(j) else { continue };
+            match c.kind() {
+                "virtual" => is_virtual = true,
+                "," => is_virtual = false,
+                "type_identifier" | "qualified_identifier" | "template_type" => {
+                    bases.push(padlock_core::ir::CppBase {
+                        name: source[c.byte_range()].trim().to_string(),
+                        is_virtual,
+                    });
+                    is_virtual = false;
+                }
+                _ => {}
+            }
+        }
+    }
+    bases
+}
+
+/// Name of the function a member declaration declares, if it declares one.
+fn declared_function_name(source: &str, node: Node<'_>) -> Option<String> {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "function_declarator" {
+            return n
+                .child_by_field_name("declarator")
+                .map(|d| source[d.byte_range()].trim().to_string());
+        }
+        // Don't descend into bodies or nested types.
+        if matches!(
+            n.kind(),
+            "compound_statement" | "field_declaration_list" | "parameter_list"
+        ) {
+            continue;
+        }
+        for i in (0..n.child_count()).rev() {
+            if let Some(c) = n.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    None
+}
+
+/// Facts the Itanium layout of derived classes depends on (see `CppClassInfo`).
+fn cpp_class_info(
+    source: &str,
+    node: Node<'_>,
+    body: Node<'_>,
+    aliases: &HashMap<String, String>,
+    is_class: bool,
+) -> padlock_core::ir::CppClassInfo {
+    let name = (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .find(|c| c.kind() == "type_identifier")
+        .map(|c| source[c.byte_range()].to_string())
+        .unwrap_or_default();
+    let mut public = !is_class;
+    let mut non_pod = false;
+    let mut nua = Vec::new();
+    for m in body_members(source, body, aliases).0 {
+        match m.kind() {
+            "access_specifier" => public = source[m.byte_range()].trim().starts_with("public"),
+            "field_declaration" | "declaration" | "function_definition" => {
+                if let Some(f) = declared_function_name(source, m) {
+                    // `= default` / `= delete` on the first declaration is not
+                    // user-provided: the class stays POD for layout (C++17 rules).
+                    let text = source[m.byte_range()].trim_end_matches(';').trim_end();
+                    if text.ends_with("= default") || text.ends_with("= delete") {
+                        continue;
+                    }
+                    let f = f.trim_start_matches(&format!("{name}::"));
+                    if f == name || f == format!("~{name}") || f.starts_with("operator=") {
+                        non_pod = true;
+                    }
+                    continue;
+                }
+                if m.kind() != "field_declaration" {
+                    continue;
+                }
+                let text = &source[m.byte_range()];
+                let is_static = (0..m.child_count())
+                    .filter_map(|i| m.child(i))
+                    .any(|c| c.kind() == "storage_class_specifier");
+                if is_static {
+                    continue;
+                }
+                if !public || m.child_by_field_name("default_value").is_some() {
+                    non_pod = true;
+                }
+                if text.contains("no_unique_address") {
+                    let mut cursor = m.walk();
+                    for d in m.children_by_field_name("declarator", &mut cursor) {
+                        let mut attrs = String::new();
+                        if let Some(info) = decl_info(source, d, &mut attrs) {
+                            nua.push(info.name);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    padlock_core::ir::CppClassInfo {
+        bases: collect_cpp_bases(source, node),
+        has_virtual_methods: contains_virtual_keyword(source, body),
+        non_pod,
+        no_unique_address: nua,
     }
 }
 
@@ -2592,7 +2734,7 @@ pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<St
         .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
     let mut layouts = Vec::new();
-    extract_structs_from_tree(source, tree.root_node(), arch, &mut layouts);
+    extract_structs_from_tree(source, tree.root_node(), arch, &mut layouts, false);
     Ok(layouts)
 }
 
@@ -2601,7 +2743,7 @@ pub fn parse_cpp(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<
         .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
     let mut layouts = Vec::new();
-    extract_structs_from_tree(source, tree.root_node(), arch, &mut layouts);
+    extract_structs_from_tree(source, tree.root_node(), arch, &mut layouts, true);
     Ok(layouts)
 }
 
@@ -2858,6 +3000,7 @@ typedef struct {
             uncertain_fields: Vec::new(),
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         };
         assert!(padlock_core::analysis::false_sharing::has_false_sharing(
             &layout

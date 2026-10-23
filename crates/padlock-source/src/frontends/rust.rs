@@ -829,6 +829,7 @@ fn simulate_rust_layout(
         uncertain_fields,
         forced_align,
         pack_limit: pack.filter(|n| *n > 1),
+        cpp: None,
     }
 }
 
@@ -1011,6 +1012,7 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
                 uncertain_fields: Vec::new(),
                 forced_align: None,
                 pack_limit: None,
+                cpp: None,
             };
             self.layouts.push(layout);
             return;
@@ -1109,6 +1111,7 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
             uncertain_fields: Vec::new(),
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         });
     }
 }

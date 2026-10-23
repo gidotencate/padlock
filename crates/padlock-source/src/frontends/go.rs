@@ -676,6 +676,7 @@ fn parse_struct_type(
         uncertain_fields,
         forced_align: None,
         pack_limit: None,
+        cpp: None,
     })
 }
 

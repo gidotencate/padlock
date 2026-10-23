@@ -203,6 +203,7 @@ mod tests {
             uncertain_fields: Vec::new(),
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         }
     }
 

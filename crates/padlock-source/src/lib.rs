@@ -201,10 +201,232 @@ fn is_known_primitive(name: &str) -> bool {
     )
 }
 
-/// Resolve fields whose type name matches another parsed struct.
-///
-/// Runs in a loop until stable to handle transitive nesting (struct A contains
-/// B which contains C). In practice, 2–3 iterations suffice for typical code.
+// ── C++ inheritance (Itanium C++ ABI) ─────────────────────────────────────────
+
+/// Snapshot of one class as the Itanium layout of its derived classes sees it.
+#[derive(Clone)]
+struct CppView {
+    size: usize,
+    align: usize,
+    /// Size without virtual-base subobjects (`nvsize`), also the data size
+    /// (`dsize`) a non-POD base contributes before tail-padding reuse.
+    nvsize: usize,
+    nvalign: usize,
+    info: Option<padlock_core::ir::CppClassInfo>,
+    has_members: bool,
+}
+
+fn is_cpp_slot(name: &str) -> bool {
+    name == "__vptr" || name.starts_with("__base_") || name.starts_with("__vbase_")
+}
+
+fn cpp_views(layouts: &[StructLayout]) -> HashMap<String, CppView> {
+    layouts
+        .iter()
+        .map(|l| {
+            let nv = l.fields.iter().filter(|f| !f.name.starts_with("__vbase_"));
+            let nvsize = nv.clone().map(|f| f.offset + f.size).max().unwrap_or(0);
+            let nvalign = nv.map(|f| f.align).max().unwrap_or(1).max(1);
+            (
+                l.name.clone(),
+                CppView {
+                    size: l.total_size,
+                    align: l.align,
+                    nvsize,
+                    nvalign,
+                    info: l.cpp.clone(),
+                    has_members: l.fields.iter().any(|f| !is_cpp_slot(&f.name)),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Has a vtable pointer somewhere: virtual functions or a virtual base, itself or
+/// through any base.
+fn cpp_dynamic(name: &str, views: &HashMap<String, CppView>, depth: u8) -> bool {
+    let Some(info) = views.get(name).and_then(|v| v.info.as_ref()) else {
+        return false;
+    };
+    depth < 16
+        && (info.has_virtual_methods
+            || info
+                .bases
+                .iter()
+                .any(|b| b.is_virtual || cpp_dynamic(&b.name, views, depth + 1)))
+}
+
+/// No data at all: an empty base occupies no space in a derived class.
+fn cpp_empty(name: &str, views: &HashMap<String, CppView>, depth: u8) -> bool {
+    let Some(v) = views.get(name) else {
+        return false;
+    };
+    depth < 16
+        && !v.has_members
+        && !cpp_dynamic(name, views, 0)
+        && v.info.as_ref().is_none_or(|i| {
+            i.bases
+                .iter()
+                .all(|b| !b.is_virtual && cpp_empty(&b.name, views, depth + 1))
+        })
+}
+
+/// Virtual bases reachable from `name`, in depth-first declaration order.
+fn cpp_virtual_bases(
+    name: &str,
+    views: &HashMap<String, CppView>,
+    out: &mut Vec<String>,
+    depth: u8,
+) {
+    let Some(info) = views.get(name).and_then(|v| v.info.as_ref()) else {
+        return;
+    };
+    if depth > 16 {
+        return;
+    }
+    for b in &info.bases {
+        if b.is_virtual && !out.contains(&b.name) {
+            out.push(b.name.clone());
+        }
+        cpp_virtual_bases(&b.name, views, out, depth + 1);
+    }
+}
+
+/// `(size, align)` a subobject of class `name` occupies inside another class:
+/// nothing when empty; `nvsize` for a non-POD class (its tail padding is
+/// reusable); the full size otherwise. Unknown classes keep a pointer-sized
+/// placeholder.
+fn cpp_subobject(name: &str, views: &HashMap<String, CppView>, ps: usize) -> (usize, usize, bool) {
+    let Some(v) = views.get(name) else {
+        return (ps, ps, false);
+    };
+    if cpp_empty(name, views, 0) {
+        return (0, 1, true);
+    }
+    let non_pod = v
+        .info
+        .as_ref()
+        .is_some_and(|i| i.non_pod || !i.bases.is_empty())
+        || cpp_dynamic(name, views, 0);
+    if non_pod {
+        (v.nvsize, v.nvalign, true)
+    } else {
+        (v.size, v.align, true)
+    }
+}
+
+fn cpp_slot(name: String, ty: &str, size: usize, align: usize) -> padlock_core::ir::Field {
+    padlock_core::ir::Field {
+        name,
+        ty: if ty == "__vptr" {
+            TypeInfo::Pointer { size, align }
+        } else {
+            TypeInfo::Opaque {
+                name: ty.to_string(),
+                size,
+                align,
+            }
+        },
+        offset: 0,
+        size,
+        align,
+        source_file: None,
+        source_line: None,
+        access: padlock_core::ir::AccessPattern::Unknown,
+    }
+}
+
+/// Rebuild every C++ class's base, vtable-pointer and virtual-base slots from the
+/// current sizes of the classes it derives from, following the Itanium ABI:
+/// the primary base (first non-virtual dynamic base) or else the vptr at offset 0,
+/// then the other non-virtual bases, the data members, and finally each virtual
+/// base once. Empty bases and `[[no_unique_address]]` members of empty type take
+/// no space; members may start inside a non-POD base's tail padding. Returns
+/// whether anything changed.
+fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
+    let views = cpp_views(layouts);
+    let mut changed_any = false;
+    for layout in layouts.iter_mut() {
+        let Some(info) = layout.cpp.clone() else {
+            continue;
+        };
+        let ps = layout.arch.pointer_size;
+        let mut slots = Vec::new();
+        let non_virtual: Vec<&padlock_core::ir::CppBase> =
+            info.bases.iter().filter(|b| !b.is_virtual).collect();
+        let primary = non_virtual
+            .iter()
+            .position(|b| cpp_dynamic(&b.name, &views, 0));
+        if let Some(p) = primary {
+            let (sz, al, _) = cpp_subobject(&non_virtual[p].name, &views, ps);
+            slots.push(cpp_slot(
+                format!("__base_{}", non_virtual[p].name),
+                &non_virtual[p].name,
+                sz,
+                al,
+            ));
+        } else if cpp_dynamic(&layout.name, &views, 0) {
+            slots.push(cpp_slot("__vptr".to_string(), "__vptr", ps, ps));
+        }
+        for (i, b) in non_virtual.iter().enumerate() {
+            if Some(i) == primary {
+                continue;
+            }
+            let (sz, al, _) = cpp_subobject(&b.name, &views, ps);
+            slots.push(cpp_slot(format!("__base_{}", b.name), &b.name, sz, al));
+        }
+        let mut members: Vec<padlock_core::ir::Field> = layout
+            .fields
+            .iter()
+            .filter(|f| !is_cpp_slot(&f.name))
+            .cloned()
+            .collect();
+        for m in members.iter_mut() {
+            if !info.no_unique_address.contains(&m.name) {
+                continue;
+            }
+            let ty_name = match &m.ty {
+                TypeInfo::Primitive { name, .. } | TypeInfo::Opaque { name, .. } => name.clone(),
+                _ => continue,
+            };
+            if let (sz, al, true) = cpp_subobject(&ty_name, &views, ps) {
+                m.size = sz;
+                m.align = al;
+            }
+        }
+        let mut vbases = Vec::new();
+        cpp_virtual_bases(&layout.name, &views, &mut vbases, 0);
+        let mut tail = Vec::new();
+        for vb in vbases {
+            let (sz, al) = match views.get(&vb) {
+                Some(_) if cpp_empty(&vb, &views, 0) => (0, 1),
+                Some(v) => (v.nvsize, v.nvalign),
+                None => (ps, ps),
+            };
+            tail.push(cpp_slot(format!("__vbase_{vb}"), &vb, sz, al));
+        }
+
+        let rebuilt: Vec<padlock_core::ir::Field> =
+            slots.into_iter().chain(members).chain(tail).collect();
+        let same = rebuilt.len() == layout.fields.len()
+            && rebuilt
+                .iter()
+                .zip(&layout.fields)
+                .all(|(a, b)| a.name == b.name && a.size == b.size && a.align == b.align);
+        if same {
+            continue;
+        }
+        layout.fields = rebuilt;
+        resimulate_layout(layout);
+        if layout.total_size == 0 {
+            // C++ objects are never zero-sized.
+            layout.total_size = 1;
+        }
+        changed_any = true;
+    }
+    changed_any
+}
+
 /// Split `Name[2][3]` into (`Name`, 6). `[]` counts as 0 elements and an
 /// unevaluated `[?]` as 1; a name without a suffix is (`Name`, 1).
 fn split_c_array_suffix(ty: &str) -> (&str, usize) {
@@ -222,6 +444,10 @@ fn split_c_array_suffix(ty: &str) -> (&str, usize) {
     (ty[..open].trim_end(), count)
 }
 
+/// Resolve fields whose type name matches another parsed struct.
+///
+/// Runs in a loop until stable to handle transitive nesting (struct A contains
+/// B which contains C). In practice, 2–3 iterations suffice for typical code.
 fn resolve_nested_structs(layouts: &mut [StructLayout]) {
     // Bound iterations to guard against size oscillation from parse-error trees.
     // Real transitive nesting resolves in ≤ depth iterations; depth is bounded by
@@ -239,7 +465,7 @@ fn resolve_nested_structs(layouts: &mut [StructLayout]) {
             .map(|l| (l.name.clone(), (l.total_size, l.align)))
             .collect();
 
-        let mut changed_any = false;
+        let mut changed_any = apply_cpp_inheritance(layouts);
 
         for layout in layouts.iter_mut() {
             let mut changed = false;
@@ -253,6 +479,16 @@ fn resolve_nested_structs(layouts: &mut [StructLayout]) {
                     }
                     _ => continue,
                 };
+
+                // C++ base/virtual-base slots and `[[no_unique_address]]` members are
+                // sized by `apply_cpp_inheritance`, not as whole embedded objects.
+                if let Some(info) = &layout.cpp
+                    && (field.name.starts_with("__base_")
+                        || field.name.starts_with("__vbase_")
+                        || info.no_unique_address.contains(&field.name))
+                {
+                    continue;
+                }
 
                 // `Inner[2][3]` is an array of a named struct: resolve the element
                 // type and scale by the element count.
@@ -920,5 +1156,62 @@ const P = packed struct { x: In, y: u8, z: In };";
             parse_source_str(src, &SourceLanguage::Zig, &padlock_core::arch::X86_64_SYSV).unwrap();
         // 5 + 8 + 5 = 18 bits → u18 → 4 bytes (zig @sizeOf)
         assert_eq!(find(&ls, "P").total_size, 4);
+    }
+
+    // ── C++ inheritance (values from g++ -std=c++17) ──────────────────────────
+
+    fn cpp(src: &str) -> Vec<StructLayout> {
+        parse_source_str(src, &SourceLanguage::Cpp, &padlock_core::arch::X86_64_SYSV).unwrap()
+    }
+
+    fn field_off(l: &StructLayout, name: &str) -> usize {
+        l.fields.iter().find(|f| f.name == name).unwrap().offset
+    }
+
+    #[test]
+    fn non_pod_base_tail_padding_is_reused() {
+        let ls = cpp("struct Pod { int a; char b; }; struct D1 : Pod { char c; };
+class Priv { int a; char b; public: int get(); }; struct D2 : Priv { char c; };
+struct Ctor { int a; char b; Ctor(); }; struct D3 : Ctor { char c; };");
+        assert_eq!(find(&ls, "D1").total_size, 12);
+        assert_eq!(find(&ls, "D2").total_size, 8);
+        assert_eq!(field_off(find(&ls, "D2"), "c"), 5);
+        assert_eq!(find(&ls, "D3").total_size, 8);
+    }
+
+    #[test]
+    fn empty_bases_and_no_unique_address_take_no_space() {
+        let ls = cpp("struct Empty {};
+struct E1 : Empty { int x; };
+struct E2 : Empty {};
+struct N { char a; [[no_unique_address]] Empty e; int x; };");
+        assert_eq!(find(&ls, "Empty").total_size, 1);
+        assert_eq!(find(&ls, "E1").total_size, 4);
+        assert_eq!(find(&ls, "E2").total_size, 1);
+        assert_eq!(find(&ls, "N").total_size, 8);
+    }
+
+    #[test]
+    fn virtual_bases_are_placed_once_after_the_non_virtual_part() {
+        let ls = cpp("struct A { int a; };
+struct B : virtual A { int b; };
+struct C : virtual A { int c; };
+struct D : B, C { int d; };");
+        assert_eq!(find(&ls, "B").total_size, 16);
+        let d = find(&ls, "D");
+        assert_eq!(d.total_size, 40);
+        assert_eq!(field_off(d, "d"), 28);
+        assert_eq!(field_off(d, "__vbase_A"), 32);
+    }
+
+    #[test]
+    fn primary_base_is_the_first_dynamic_base() {
+        let ls = cpp("struct NonDyn { char z; };
+struct Vf { virtual void f(); char b; };
+struct P : NonDyn, Vf { char q; };");
+        let p = find(&ls, "P");
+        assert_eq!(field_off(p, "__base_Vf"), 0);
+        assert_eq!(field_off(p, "__base_NonDyn"), 9);
+        assert_eq!(p.total_size, 16);
     }
 }

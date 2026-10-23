@@ -45,7 +45,32 @@ struct alignas(64) AlNest { In i; char c; };
 struct PkNest { char a; In i; long l; };
 #pragma pack(pop)
 struct BfNest { unsigned a:3; In i; char t; };
-#define P(T,L) printf(#T " %zu %zu\n", sizeof(T), offsetof(T, L))
+struct Pod { int a; char b; };
+struct TP1 : Pod { char c; };
+class Priv { int a; char b; public: int get(); };
+struct TP2 : Priv { char c; };
+struct Ctor { int a; char b; Ctor(); };
+struct TP3 : Ctor { char c; };
+struct Nsdmi { int a = 0; char b; };
+struct TP4 : Nsdmi { char c; };
+struct Dtor { int a; char b; ~Dtor(); };
+struct TP5 : Dtor { char c; };
+struct DefC { int a; char b; DefC() = default; };
+struct TP6 : DefC { char c; };
+struct Empty {};
+struct EB1 : Empty { int x; };
+struct EB2 : Empty { };
+struct EB3 : Empty, Pod { char t; };
+struct Nua { char a; [[no_unique_address]] Empty e; int x; };
+struct VA { int a; };
+struct VBb : virtual VA { int b; };
+struct VCc : virtual VA { int c; };
+struct VDd : VBb, VCc { int d; };
+struct NonDyn { char z; };
+struct PrimLater : NonDyn, Vb { char q; };
+struct OnlyVirtualBase : virtual Empty { char k; };
+#define P(T,L) printf(#T " %zu %zu " #L "\n", sizeof(T), offsetof(T, L))
 int main(){
-P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);P(AlNest,c);P(PkNest,l);P(BfNest,t);
+P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);P(AlNest,c);P(PkNest,l);P(BfNest,t);P(TP1,c);P(TP2,c);P(TP3,c);P(TP4,c);P(TP5,c);P(TP6,c);P(EB1,x);P(EB3,t);P(Nua,x);P(VDd,d);P(PrimLater,q);P(OnlyVirtualBase,k);
+printf("EB2 %zu -1\nVBb %zu -1\n", sizeof(EB2), sizeof(VBb));
 }

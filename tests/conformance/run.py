@@ -39,8 +39,10 @@ def truth(lang, src, tmp):
     out = {}
     for line in r.stdout.splitlines():
         p = line.split()
-        if len(p) == 3:
-            out[p[0]] = (int(p[1]), int(p[2]))
+        # `Name size offset [field]` — with a field name the offset is compared
+        # against that field's row, otherwise against the last row.
+        if len(p) in (3, 4):
+            out[p[0]] = (int(p[1]), int(p[2]), p[3] if len(p) == 4 else None)
     return out
 
 def padlock_layouts(padlock, src):
@@ -55,7 +57,7 @@ def padlock_layouts(padlock, src):
             got[cur]["size"] = int(m.group(1)); continue
         m = re.match(r"^│\s+(\d+)\s+│\s+(\d+)\s+│.*│\s+(.+?)\s*│$", l)
         if m and cur and "<padding>" not in l:
-            got[cur]["rows"].append(int(m.group(1)))
+            got[cur]["rows"].append((int(m.group(1)), m.group(3).split(":")[0].strip()))
     return got
 
 def have(lang):
@@ -84,9 +86,13 @@ def main():
             t = truth(lang, src, tmp)
         got = padlock_layouts(a.padlock, src)
         bad = 0
-        for name, (sz, off) in t.items():
+        for name, (sz, off, field) in t.items():
             g = got.get(name)
-            last = g["rows"][-1] if g and g["rows"] else None
+            rows = g["rows"] if g else []
+            if field is not None:
+                last = next((o for o, n in rows if n == field), None)
+            else:
+                last = rows[-1][0] if rows else None
             ok = bool(g) and g.get("size") == sz and (off < 0 or last == off)
             key = f"{lang}:{name}"
             if ok and key in xfail:

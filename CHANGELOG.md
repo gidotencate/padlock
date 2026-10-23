@@ -2,6 +2,22 @@
 
 All notable changes to padlock are documented here.
 
+## [0.31.0] — 2026-10-23
+
+Conformance (`g++ -std=c++17`): C++ 27/28 → 42/42.
+
+### Fixed
+- **C++ inheritance is now laid out by the Itanium C++ ABI**, after base sizes are known, instead of a fixed "vptr, then bases, then members" guess:
+  - **Tail-padding reuse**: members of a derived class start inside a non-POD base's tail padding (`class B { int a; char b; public: … }; struct D : B { char c; }` is 8 bytes, not 12). A base is non-POD when it has a user-declared constructor/destructor/copy assignment (not `= default`/`= delete`), a private/protected data member, a default member initializer, a base class, or a vtable.
+  - **Empty base optimisation** and **`[[no_unique_address]]`**: empty bases and empty members marked `[[no_unique_address]]` take no space. Previously an empty base was an 8-byte placeholder (`struct D : Empty { int x; }` was 16 bytes, not 4).
+  - **Virtual bases** (`struct B : virtual A`): the class gets a vtable pointer and each virtual base is placed once, after the non-virtual part of the most-derived class (diamonds included). Previously virtual bases were dropped.
+  - **Primary base**: the first non-virtual *dynamic* base goes to offset 0 and shares its vptr, even when it is not declared first.
+  - Empty classes are 1 byte in C++ (and 0 in GNU C) and are now emitted as layouts, so fields and bases of empty type resolve.
+- The conformance harness can compare the offset of a named probe field instead of the last row.
+
+### Known limitations
+- `-std=c++20` treats a class with a defaulted constructor as non-POD for layout; padlock uses the C++17 rule.
+
 ## [0.30.0] — 2026-10-23
 
 ### Fixed

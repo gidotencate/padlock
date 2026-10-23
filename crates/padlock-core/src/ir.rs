@@ -152,6 +152,35 @@ pub struct StructLayout {
     /// `N == 1` is `is_packed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack_limit: Option<usize>,
+
+    /// C++ class facts needed to lay out inheritance (Itanium C++ ABI). Set by the
+    /// C++ source frontend; the nested-struct resolver uses it to place base
+    /// subobjects, the vtable pointer and virtual bases once base sizes are known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpp: Option<CppClassInfo>,
+}
+
+/// A direct base class of a C++ class.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CppBase {
+    pub name: String,
+    pub is_virtual: bool,
+}
+
+/// What the Itanium C++ ABI layout algorithm needs to know about a class beyond
+/// its data members.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct CppClassInfo {
+    /// Direct bases in declaration order.
+    pub bases: Vec<CppBase>,
+    /// Declares at least one virtual member function.
+    pub has_virtual_methods: bool,
+    /// Not "POD for the purpose of layout": has a user-declared constructor,
+    /// destructor or copy assignment, a private/protected data member, or a
+    /// default member initializer. A derived class may then reuse its tail padding.
+    pub non_pod: bool,
+    /// Members declared `[[no_unique_address]]`.
+    pub no_unique_address: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -313,6 +342,7 @@ pub mod test_fixtures {
             uncertain_fields: Vec::new(),
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         }
     }
 
@@ -376,6 +406,7 @@ pub mod test_fixtures {
             uncertain_fields: Vec::new(),
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         }
     }
 

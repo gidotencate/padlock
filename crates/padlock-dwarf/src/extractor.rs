@@ -346,6 +346,7 @@ impl<'a, R: Reader> Extractor<'a, R> {
             uncertain_fields,
             forced_align: None,
             pack_limit: None,
+            cpp: None,
         }))
     }
 

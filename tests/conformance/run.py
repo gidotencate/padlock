@@ -38,18 +38,19 @@ def truth(lang, src, tmp):
         sys.exit(f"{lang}: ground-truth probe failed:\n{r.stdout}{r.stderr}")
     out = {}
     for line in r.stdout.splitlines():
-        p = line.split()
         # `Name size offset [field]` — with a field name the offset is compared
-        # against that field's row, otherwise against the last row.
-        if len(p) in (3, 4):
-            out[p[0]] = (int(p[1]), int(p[2]), p[3] if len(p) == 4 else None)
+        # against that field's row, otherwise against the last row. `Name` may
+        # contain spaces (`Buf<char, 8>`), so parse from the right.
+        m = re.match(r"^(.+?) (\d+) (-?\d+)(?: (\w+))?$", line.strip())
+        if m:
+            out[m.group(1)] = (int(m.group(2)), int(m.group(3)), m.group(4))
     return out
 
 def padlock_layouts(padlock, src):
     out = sh([padlock, "explain", "--no-cache", src]).stdout
     cur, got = None, {}
     for l in out.splitlines():
-        m = re.match(r"^(\S+)\s+\(.*:\d+\)$", l)
+        m = re.match(r"^(.+?)\s+\(.*:\d+\)$", l)
         if m:
             cur = m.group(1); got[cur] = {"rows": []}; continue
         m = re.match(r"^(\d+) bytes\s+align", l)

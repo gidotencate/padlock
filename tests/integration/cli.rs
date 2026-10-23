@@ -533,3 +533,87 @@ fn repr_rust_struct_is_shown_in_compiler_order_unless_declared_order() {
     assert_eq!(total_sizes(&out.stdout), vec![24]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("ReorderSuggestion"));
 }
+
+#[test]
+fn template_instantiated_by_another_file_is_analyzed() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("buf.hpp"),
+        "template<typename T, int N> struct Buf { char head; T data[N]; };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("user.cpp"),
+        "struct User { Buf<long, 2> b; Buf<char, 3> c; };\n",
+    )
+    .unwrap();
+    let out = padlock()
+        .args(["analyze", "--json", "--no-cache"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let size_of = |name: &str| {
+        v["structs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["struct_name"] == name)
+            .map(|s| s["total_size"].as_u64().unwrap())
+    };
+    // g++: sizeof(Buf<long, 2>) == 24, sizeof(Buf<char, 3>) == 4
+    assert_eq!(size_of("Buf<long, 2>"), Some(24));
+    assert_eq!(size_of("Buf<char, 3>"), Some(4));
+}
+
+#[test]
+fn template_instantiation_from_config() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join(".padlock.toml"),
+        "[instantiate]\nPair = [\"char, double\"]\n",
+    )
+    .unwrap();
+    let file = dir.path().join("p.hpp");
+    std::fs::write(
+        &file,
+        "template<class A, class B> struct Pair { A a; B b; };\n",
+    )
+    .unwrap();
+    let out = padlock()
+        .args(["analyze", "--json", "--no-cache"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Pair<char, double>"));
+    assert_eq!(total_sizes(&out.stdout), vec![16]);
+}
+
+#[test]
+fn rust_go_zig_generics_are_instantiated_from_uses() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "#[repr(C)] struct Pair<A, B> { a: A, b: B }\n#[repr(C)] struct U { p: Pair<u8, u64> }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.go"),
+        "package p\ntype Box[T any] struct { ok bool; v T }\ntype U struct { b Box[int64] }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("c.zig"),
+        "fn List(comptime T: type) type {\n    return struct { len: usize, first: T };\n}\nconst L = List(u8);\n",
+    )
+    .unwrap();
+    let out = padlock()
+        .args(["analyze", "--json", "--no-cache"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    for name in ["Pair<u8, u64>", "Box[int64]", "List(u8)"] {
+        assert!(text.contains(name), "{name} must be instantiated: {text}");
+    }
+}

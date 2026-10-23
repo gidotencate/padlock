@@ -800,7 +800,7 @@ checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
 
 [[package]]
 name = "padlock-cli"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-core"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "glob",
  "rayon",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-dwarf"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "gimli",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-lsp"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "lsp-server",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-macros"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -870,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-output"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "padlock-core",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "padlock-source"
-version = "0.34.0"
+version = "0.35.0"
 dependencies = [
  "anyhow",
  "padlock-core",

@@ -216,6 +216,7 @@ fn is_known_external_go_type(ty: &str) -> bool {
 
 /// What a single walk over the file learns about its own declarations, so field
 /// types can be sized without a type checker.
+#[derive(Clone)]
 struct GoCtx {
     arch: &'static ArchConfig,
     /// `type X interface { … }` — a two-word fat pointer.
@@ -226,6 +227,10 @@ struct GoCtx {
     aliases: HashMap<String, String>,
     /// `const N = 8` (and `iota` groups): name → defining expression text.
     consts: HashMap<String, String>,
+    /// Generic structs (`type Pair[K comparable, V any] struct {…}`) → parameter names.
+    generics: HashMap<String, Vec<String>>,
+    /// Concrete uses `Name[args]` anywhere in the file.
+    uses: Vec<(String, Vec<String>)>,
 }
 
 /// Result of sizing one field type.
@@ -246,7 +251,10 @@ fn collect_go_declarations(source: &str, root: Node<'_>, arch: &'static ArchConf
         structs: HashSet::new(),
         aliases: HashMap::new(),
         consts: HashMap::new(),
+        generics: HashMap::new(),
+        uses: Vec::new(),
     };
+    let mut all_params: Vec<String> = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         for i in (0..node.child_count()).rev() {
@@ -262,8 +270,22 @@ fn collect_go_declarations(source: &str, root: Node<'_>, arch: &'static ArchConf
                 ) else {
                     continue;
                 };
-                // Generic types are skipped entirely elsewhere.
-                if node.child_by_field_name("type_parameters").is_some() {
+                if let Some(tp) = node.child_by_field_name("type_parameters") {
+                    let mut params = Vec::new();
+                    for i in 0..tp.named_child_count() {
+                        let Some(decl) = tp.named_child(i as u32) else {
+                            continue;
+                        };
+                        let mut cursor = decl.walk();
+                        for n in decl.children_by_field_name("name", &mut cursor) {
+                            params.push(source[n.byte_range()].to_string());
+                        }
+                    }
+                    all_params.extend(params.iter().cloned());
+                    if ty.kind() == "struct_type" {
+                        ctx.generics
+                            .insert(source[name.byte_range()].to_string(), params);
+                    }
                     continue;
                 }
                 let name = source[name.byte_range()].to_string();
@@ -281,10 +303,42 @@ fn collect_go_declarations(source: &str, root: Node<'_>, arch: &'static ArchConf
                 }
             }
             "const_declaration" => collect_consts(source, node, &mut ctx.consts),
+            "generic_type" => {
+                if let (Some(t), Some(args)) = (
+                    node.child_by_field_name("type"),
+                    node.child_by_field_name("type_arguments"),
+                ) {
+                    let args: Vec<String> = (0..args.named_child_count())
+                        .filter_map(|i| args.named_child(i as u32))
+                        .map(|a| super::c_cpp::normalize_type_text(&source[a.byte_range()]))
+                        .collect();
+                    let entry = (source[t.byte_range()].to_string(), args);
+                    if !ctx.uses.contains(&entry) {
+                        ctx.uses.push(entry);
+                    }
+                }
+            }
             _ => {}
         }
     }
+    // A use whose arguments mention a type parameter is not concrete.
+    ctx.uses.retain(|(_, args)| {
+        !args.iter().any(|a| {
+            a.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|w| all_params.iter().any(|p| p == w))
+        })
+    });
     ctx
+}
+
+/// Concrete uses of generic types (`Pair[int, string]`) in a Go source text.
+pub fn generic_uses(source: &str) -> Vec<(String, Vec<String>)> {
+    PARSER
+        .with(|p| p.borrow_mut().parse(source, None))
+        .map(|t| {
+            collect_go_declarations(source, t.root_node(), &padlock_core::arch::X86_64_SYSV).uses
+        })
+        .unwrap_or_default()
 }
 
 /// Record the constants of one `const (…)` / `const x = …` declaration,
@@ -529,7 +583,7 @@ fn parse_type_spec(
     ctx: &GoCtx,
     source_line: u32,
     decl_start_byte: usize,
-) -> Option<StructLayout> {
+) -> Vec<StructLayout> {
     let mut name: Option<String> = None;
     let mut struct_node: Option<Node> = None;
     let mut is_generic = false;
@@ -544,19 +598,79 @@ fn parse_type_spec(
         }
     }
 
-    let name = name?;
+    let Some(name) = name else {
+        return Vec::new();
+    };
 
+    let Some(struct_node) = struct_node else {
+        return Vec::new();
+    };
     if is_generic {
+        return instantiate_generic(source, struct_node, name, ctx, source_line, decl_start_byte);
+    }
+    parse_struct_type(source, struct_node, name, ctx, source_line, decl_start_byte)
+        .into_iter()
+        .collect()
+}
+
+/// Lay out a generic struct once per concrete instantiation (`Pair[int, string]`)
+/// found in this file, configured, or found in other files; skip it when there is
+/// none.
+fn instantiate_generic(
+    source: &str,
+    struct_node: Node<'_>,
+    name: String,
+    ctx: &GoCtx,
+    source_line: u32,
+    decl_start_byte: usize,
+) -> Vec<StructLayout> {
+    let params = ctx.generics.get(&name).cloned().unwrap_or_default();
+    let mut arg_lists = crate::extra_instantiations(&name);
+    arg_lists.extend(
+        ctx.uses
+            .iter()
+            .filter(|(n, _)| *n == name)
+            .map(|(_, a)| a.clone()),
+    );
+    let mut out: Vec<StructLayout> = Vec::new();
+    for args in arg_lists {
+        let args: Vec<String> = args
+            .iter()
+            .map(|a| super::c_cpp::normalize_type_text(a))
+            .collect();
+        if args.len() != params.len() {
+            continue;
+        }
+        let inst_name = format!("{name}[{}]", args.join(", "));
+        if out.iter().any(|l| l.name == inst_name) {
+            continue;
+        }
+        let mut inst = ctx.clone();
+        for (p, a) in params.iter().zip(&args) {
+            inst.aliases.insert(p.clone(), a.clone());
+        }
+        if let Some(layout) = parse_struct_type(
+            source,
+            struct_node,
+            inst_name,
+            &inst,
+            source_line,
+            decl_start_byte,
+        ) {
+            out.push(layout);
+        }
+    }
+    if out.is_empty() {
         crate::record_skipped(
             &name,
-            "generic struct — layout depends on type arguments; \
-             use binary analysis for accurate results",
+            &format!(
+                "generic struct — {} in the analyzed files; add an `[instantiate]` \
+                 entry in .padlock.toml or use binary analysis",
+                crate::INSTANTIATION_HINT
+            ),
         );
-        return None;
     }
-
-    let struct_node = struct_node?;
-    parse_struct_type(source, struct_node, name, ctx, source_line, decl_start_byte)
+    out
 }
 
 type RawGoField = (String, String, Option<String>, u32);
@@ -598,9 +712,16 @@ fn simulate_go_layout(
             uncertain_fields.push(fname.clone());
         }
         // An array of a local struct is renamed `Name[count]` so the nested-struct
-        // resolver can substitute the real element size.
+        // resolver can substitute the real element size; a generic instantiation
+        // `Pair[int, string]` is spelled canonically so it matches its layout.
         let ty_name = match &sized.named_elem {
             Some((elem, count)) => format!("{elem}[{count}]"),
+            None if ty_name
+                .find('[')
+                .is_some_and(|i| i > 0 && ctx.generics.contains_key(&ty_name[..i])) =>
+            {
+                super::c_cpp::normalize_type_text(&ty_name)
+            }
             None => ty_name,
         };
 

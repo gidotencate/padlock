@@ -937,7 +937,20 @@ fn resolve_field_type(
         }
         rest = s[end + 1..].trim_start();
     }
-    (format!("{resolved_base}{dims}"), format!("{base}{dims}"))
+    // Show (and let the nested-struct resolver match) the target type when the
+    // alias names a template parameter, a template instantiation or a record —
+    // `Tag` bound to `Empty`, `TB2` for `TBuf<short, 2>` — and keep the alias
+    // spelling for plain scalar typedefs (`u32_alias`).
+    let shown = if aliases.contains_key(&format!("{TPARAM_KEY}{base}"))
+        || (resolved_base != base
+            && (resolved_base.contains('<')
+                || aliases.contains_key(&format!("{REC_KEY}{resolved_base}"))))
+    {
+        resolved_base
+    } else {
+        base
+    };
+    (format!("{resolved_base}{dims}"), format!("{shown}{dims}"))
 }
 
 /// Build a laid-out-later `Field` from a parsed field declaration.
@@ -1477,27 +1490,210 @@ fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, Stri
     aliases
 }
 
-/// Extract the ordered type-parameter names from a `template_declaration`
-/// node, e.g. `template<typename T, typename U>` → `["T", "U"]`.
-///
-/// Only plain `typename T` / `class T` parameters are handled; defaulted and
-/// variadic parameters are not matched by `type_parameter_declaration` and so
-/// are silently omitted, which surfaces as an arg-count mismatch (and a
-/// skipped-instantiation note) rather than a silent miscount.
-fn template_param_names(source: &str, tpl_decl: Node<'_>) -> Vec<String> {
-    let Some(param_list) = tpl_decl.child_by_field_name("parameters") else {
-        return Vec::new();
+/// Record C++ `using Name = Type;` aliases (scalar types and template
+/// instantiations alike) in the same map as C `typedef`s.
+fn collect_cpp_using_aliases(source: &str, root: Node<'_>, aliases: &mut HashMap<String, String>) {
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        for i in (0..n.child_count()).rev() {
+            if let Some(c) = n.child(i) {
+                stack.push(c);
+            }
+        }
+        // Inside a template the aliased type may depend on its parameters.
+        if n.kind() != "alias_declaration" || !enclosing_template_params(source, n).is_empty() {
+            continue;
+        }
+        if let (Some(name), Some(ty)) =
+            (n.child_by_field_name("name"), n.child_by_field_name("type"))
+        {
+            aliases
+                .entry(source[name.byte_range()].trim().to_string())
+                .or_insert_with(|| normalize_type_text(&source[ty.byte_range()]));
+        }
+    }
+}
+
+/// One template parameter: `typename T`, `class A = Alloc<T>`, `int N = 4`.
+struct TplParam {
+    name: String,
+    /// Non-type (value) parameter, substituted as an integer constant.
+    is_value: bool,
+    default: Option<String>,
+}
+
+/// The template's parameters in order, or `None` when it has a parameter kind
+/// padlock cannot substitute (variadic packs, template template parameters).
+fn template_params(source: &str, tpl_decl: Node<'_>) -> Option<Vec<TplParam>> {
+    let list = tpl_decl.child_by_field_name("parameters")?;
+    let mut out = Vec::new();
+    for i in 0..list.named_child_count() {
+        let Some(p) = list.named_child(i as u32) else {
+            continue;
+        };
+        let text = |n: Node<'_>| source[n.byte_range()].trim().to_string();
+        let param = match p.kind() {
+            "type_parameter_declaration" => TplParam {
+                name: (0..p.named_child_count())
+                    .filter_map(|j| p.named_child(j as u32))
+                    .find(|c| c.kind() == "type_identifier")
+                    .map(text)?,
+                is_value: false,
+                default: None,
+            },
+            "optional_type_parameter_declaration" => TplParam {
+                name: p.child_by_field_name("name").map(text)?,
+                is_value: false,
+                default: p.child_by_field_name("default_type").map(text),
+            },
+            "parameter_declaration" => TplParam {
+                name: p.child_by_field_name("declarator").map(text)?,
+                is_value: true,
+                default: None,
+            },
+            "optional_parameter_declaration" => TplParam {
+                name: p.child_by_field_name("declarator").map(text)?,
+                is_value: true,
+                default: p.child_by_field_name("default_value").map(text),
+            },
+            _ => return None,
+        };
+        out.push(param);
+    }
+    Some(out)
+}
+
+/// Canonical spelling of a type or template argument list, so `Buf<char,8>`,
+/// `Buf< char, 8 >` and `ns::Buf<char, 8>` name the same instantiation.
+pub(crate) fn normalize_type_text(text: &str) -> String {
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(collapsed.len());
+    let chars: Vec<char> = collapsed.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c == ' ' {
+            let prev = chars[..i].last().copied().unwrap_or(' ');
+            let next = chars.get(i + 1).copied().unwrap_or(' ');
+            if "<>,*&()[]".contains(prev) || "<>,*&()[]".contains(next) {
+                continue;
+            }
+        }
+        out.push(c);
+        if c == ',' {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+/// Replace whole-word `from` with `to` (template parameter substitution in a
+/// default argument such as `Alloc<T>`).
+fn substitute_word(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::new();
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        out.push_str(if word == from { to } else { word });
+        word.clear();
     };
-    (0..param_list.child_count())
-        .filter_map(|i| param_list.child(i))
-        .filter(|c| c.kind() == "type_parameter_declaration")
-        .filter_map(|c| {
-            (0..c.child_count())
-                .filter_map(|j| c.child(j))
-                .find(|gc| gc.kind() == "type_identifier")
-                .map(|gc| source[gc.byte_range()].to_string())
-        })
-        .collect()
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// Fill defaults and bind each parameter of `params` to an argument. `None` when
+/// the arguments do not fit the parameter list.
+fn bind_template_args(params: &[TplParam], args: &[String]) -> Option<Vec<(String, String, bool)>> {
+    if args.len() > params.len() {
+        return None;
+    }
+    let mut bound: Vec<(String, String, bool)> = Vec::new();
+    for (i, p) in params.iter().enumerate() {
+        let arg = match args.get(i) {
+            Some(a) => a.clone(),
+            None => {
+                let mut d = p.default.clone()?;
+                for (name, value, _) in &bound {
+                    d = substitute_word(&d, name, value);
+                }
+                d
+            }
+        };
+        bound.push((p.name.clone(), arg, p.is_value));
+    }
+    Some(bound)
+}
+
+/// The template parameter names of every `template_declaration` enclosing `node`.
+fn enclosing_template_params(source: &str, node: Node<'_>) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        if n.kind() == "template_declaration"
+            && let Some(ps) = template_params(source, n)
+        {
+            names.extend(ps.into_iter().map(|p| p.name));
+        }
+        cur = n.parent();
+    }
+    names
+}
+
+/// Concrete uses of class templates in `root`: every `Name<Args…>` whose
+/// arguments do not mention a template parameter of an enclosing template
+/// (those are not concrete yet). Names are not filtered; callers match them
+/// against the templates they define.
+pub(crate) fn collect_template_uses(source: &str, root: Node<'_>) -> Vec<(String, Vec<String>)> {
+    let mut uses: Vec<(String, Vec<String>)> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        for i in (0..node.child_count()).rev() {
+            if let Some(c) = node.child(i) {
+                stack.push(c);
+            }
+        }
+        if node.kind() != "template_type" {
+            continue;
+        }
+        // `template<> struct Node<int> {…}` defines a specialization; it is not a use.
+        if node.parent().is_some_and(|p| {
+            matches!(
+                p.kind(),
+                "struct_specifier" | "class_specifier" | "union_specifier"
+            ) && p.child_by_field_name("name") == Some(node)
+                && p.child_by_field_name("body").is_some()
+        }) {
+            continue;
+        }
+        let (Some(name), Some(arg_list)) = (
+            node.child_by_field_name("name"),
+            node.child_by_field_name("arguments"),
+        ) else {
+            continue;
+        };
+        let args: Vec<String> = (0..arg_list.named_child_count())
+            .filter_map(|i| arg_list.named_child(i as u32))
+            .filter(|c| c.kind() != "comment")
+            .map(|c| normalize_type_text(&source[c.byte_range()]))
+            .collect();
+        let open = enclosing_template_params(source, node);
+        let mentions_param = args
+            .iter()
+            .any(|a| open.iter().any(|p| substitute_word(a, p, "\u{0}") != *a));
+        if mentions_param {
+            continue;
+        }
+        let entry = (source[name.byte_range()].trim().to_string(), args);
+        if !uses.contains(&entry) {
+            uses.push(entry);
+        }
+    }
+    uses
 }
 
 /// Collect `// padlock:instantiate(Arg1, Arg2, ...)` annotation comments
@@ -1532,6 +1728,12 @@ fn collect_instantiate_annotations(source: &str, tpl_decl: Node<'_>) -> Vec<Vec<
 
 /// Key in the alias map marking a C++ (rather than C) translation unit.
 const CPP_KEY: &str = "$lang:cpp";
+/// Key prefix marking a class template defined in this file.
+const TPL_KEY: &str = "$tpl:";
+/// Key prefix marking a template parameter bound for the current instantiation.
+const TPARAM_KEY: &str = "$tparam:";
+/// Key prefix marking a struct/class/union name defined in this file.
+const REC_KEY: &str = "$rec:";
 
 fn extract_structs_from_tree(
     source: &str,
@@ -1546,8 +1748,58 @@ fn extract_structs_from_tree(
     collect_int_constants(source, root, arch, &mut aliases);
     // …and where macros are defined, to resolve `#if` branches.
     collect_pp_defines(source, root, &mut aliases);
+    {
+        let mut stack = vec![root];
+        while let Some(n) = stack.pop() {
+            for i in (0..n.child_count()).rev() {
+                if let Some(c) = n.child(i) {
+                    stack.push(c);
+                }
+            }
+            if matches!(
+                n.kind(),
+                "struct_specifier" | "class_specifier" | "union_specifier"
+            ) && n.child_by_field_name("body").is_some()
+                && let Some(name) = n.child_by_field_name("name")
+            {
+                aliases.insert(
+                    format!(
+                        "{REC_KEY}{}",
+                        normalize_type_text(&source[name.byte_range()])
+                    ),
+                    String::new(),
+                );
+            }
+        }
+    }
     if cpp {
         aliases.insert(CPP_KEY.to_string(), String::new());
+        collect_cpp_using_aliases(source, root, &mut aliases);
+        let mut stack = vec![root];
+        while let Some(n) = stack.pop() {
+            for i in (0..n.child_count()).rev() {
+                if let Some(c) = n.child(i) {
+                    stack.push(c);
+                }
+            }
+            if n.kind() == "template_declaration" {
+                for i in 0..n.named_child_count() {
+                    if let Some(rec) = n.named_child(i as u32)
+                        && matches!(
+                            rec.kind(),
+                            "struct_specifier" | "class_specifier" | "union_specifier"
+                        )
+                        && let Some(name) = rec.child_by_field_name("name")
+                        && name.kind() == "type_identifier"
+                    {
+                        aliases.insert(
+                            format!("{TPL_KEY}{}", &source[name.byte_range()]),
+                            String::new(),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Phase 1: extract struct/union/class layouts.
@@ -1559,6 +1811,17 @@ fn extract_structs_from_tree(
     // alignment); `current_pack = N > 0` means cap field alignment at N bytes.
     let mut pack_stack: Vec<usize> = Vec::new();
     let mut current_pack: usize = 0;
+
+    // Concrete template uses in this file, and bookkeeping for specializations.
+    let template_uses = if cpp {
+        collect_template_uses(source, root)
+    } else {
+        Vec::new()
+    };
+    let mut specializations: Vec<String> = Vec::new();
+    let mut partially_specialized: Vec<String> = Vec::new();
+    // (index in `layouts`, instantiation name, template name)
+    let mut instantiated: Vec<(usize, String, String)> = Vec::new();
 
     let cursor = root.walk();
     let mut stack = vec![root];
@@ -1606,56 +1869,111 @@ fn extract_structs_from_tree(
             .parent()
             .filter(|p| is_record_specifier && p.kind() == "template_declaration");
         if let Some(tpl_decl) = template_decl {
-            let tpl_name = (0..node.child_count())
-                .filter_map(|i| node.child(i))
-                .find(|c| c.kind() == "type_identifier")
-                .map(|c| source[c.byte_range()].to_string())
-                .unwrap_or_else(|| "(unknown)".to_string());
-
-            let param_names = template_param_names(source, tpl_decl);
-            let instantiations = collect_instantiate_annotations(source, tpl_decl);
-
-            if instantiations.is_empty() {
-                crate::record_skipped(
-                    &tpl_name,
-                    "C++ template — layout depends on type arguments; \
-                     use binary analysis for accurate results",
-                );
-                continue;
-            }
-
             let is_union = node.kind() == "union_specifier";
-            for args in instantiations {
-                if args.len() != param_names.len() {
-                    eprintln!(
-                        "padlock: note: skipping 'padlock:instantiate({})' for '{tpl_name}' \
-                         — expected {} type argument(s), got {}",
-                        args.join(", "),
-                        param_names.len(),
-                        args.len()
-                    );
-                    continue;
-                }
-                let mut inst_aliases = aliases.clone();
-                for (param, arg) in param_names.iter().zip(args.iter()) {
-                    inst_aliases.insert(param.clone(), arg.clone());
-                }
-                let parsed = if node.kind() == "class_specifier" {
-                    parse_class_specifier(source, node, arch, &inst_aliases, current_pack)
+            let parse_with = |inst_aliases: &HashMap<String, String>| {
+                if node.kind() == "class_specifier" {
+                    parse_class_specifier(source, node, arch, inst_aliases, current_pack)
                 } else {
                     parse_struct_or_union_specifier(
                         source,
                         node,
                         arch,
                         is_union,
-                        &inst_aliases,
+                        inst_aliases,
                         current_pack,
                     )
-                };
-                if let Some(mut layout) = parsed {
-                    layout.name = format!("{tpl_name}<{}>", args.join(", "));
+                }
+            };
+            let name_node = node.child_by_field_name("name");
+
+            // `template<> struct Node<int> {…}` — an explicit (full) specialization
+            // is an ordinary concrete type named `Node<int>`.
+            let params = template_params(source, tpl_decl);
+            if params.as_ref().is_some_and(|p| p.is_empty()) {
+                if let Some(n) = name_node.filter(|n| n.kind() == "template_type")
+                    && let Some(mut layout) = parse_with(&aliases)
+                {
+                    layout.name = normalize_type_text(&source[n.byte_range()]);
+                    specializations.push(layout.name.clone());
                     layouts.push(layout);
                 }
+                continue;
+            }
+            // `template<class T> struct Node<T*> {…}` — a partial specialization.
+            if name_node.is_some_and(|n| n.kind() == "template_type") {
+                if let Some(n) = name_node.and_then(|n| n.child_by_field_name("name")) {
+                    partially_specialized.push(source[n.byte_range()].trim().to_string());
+                }
+                continue;
+            }
+
+            let tpl_name = name_node
+                .map(|c| source[c.byte_range()].to_string())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            let Some(params) = params else {
+                crate::record_skipped(
+                    &tpl_name,
+                    "C++ template with a variadic or template-template parameter — \
+                     use binary analysis for accurate results",
+                );
+                continue;
+            };
+
+            // Instantiations: explicit `padlock:instantiate` annotations, then
+            // configured / cross-file ones, then every concrete use in this file
+            // (`Buf<char, 8> b;`, `using B = Buf<int>;`, `template struct Buf<long>;`).
+            let mut instantiations = collect_instantiate_annotations(source, tpl_decl);
+            instantiations.extend(crate::extra_instantiations(&tpl_name));
+            instantiations.extend(
+                template_uses
+                    .iter()
+                    .filter(|(n, _)| *n == tpl_name)
+                    .map(|(_, a)| a.clone()),
+            );
+            let mut seen: Vec<String> = Vec::new();
+            let mut produced = 0;
+            for args in instantiations {
+                let args: Vec<String> = args.iter().map(|a| normalize_type_text(a)).collect();
+                let inst_name = format!("{tpl_name}<{}>", args.join(", "));
+                if seen.contains(&inst_name) {
+                    continue;
+                }
+                seen.push(inst_name.clone());
+                let Some(bound) = bind_template_args(&params, &args) else {
+                    eprintln!(
+                        "padlock: note: skipping instantiation '{inst_name}' \
+                         — expected {} template argument(s), got {}",
+                        params.len(),
+                        args.len()
+                    );
+                    continue;
+                };
+                let mut inst_aliases = aliases.clone();
+                for (param, arg, is_value) in &bound {
+                    if *is_value {
+                        inst_aliases.insert(format!("{CONST_KEY}{param}"), arg.clone());
+                    } else {
+                        inst_aliases.insert(param.clone(), arg.clone());
+                        inst_aliases.insert(format!("{TPARAM_KEY}{param}"), String::new());
+                    }
+                }
+                if let Some(mut layout) = parse_with(&inst_aliases) {
+                    layout.name = inst_name;
+                    instantiated.push((layouts.len(), layout.name.clone(), tpl_name.clone()));
+                    layouts.push(layout);
+                    produced += 1;
+                }
+            }
+            if produced == 0 {
+                crate::record_skipped(
+                    &tpl_name,
+                    &format!(
+                        "C++ template — {} in the analyzed files; add \
+                         `template struct {tpl_name}<Args>;` or an `[instantiate]` entry \
+                         in .padlock.toml, or use binary analysis",
+                        crate::INSTANTIATION_HINT
+                    ),
+                );
             }
             continue;
         }
@@ -1693,6 +2011,26 @@ fn extract_structs_from_tree(
                 }
             }
             _ => {}
+        }
+    }
+
+    // An explicit specialization replaces the primary template's layout for the
+    // same arguments; with a partial specialization in the file the primary may
+    // not be the template that actually applies, so say so.
+    let mut index = 0;
+    layouts.retain(|l| {
+        let primary_instance = instantiated.iter().any(|(i, _, _)| *i == index);
+        index += 1;
+        !(primary_instance && specializations.contains(&l.name))
+    });
+    for l in layouts.iter_mut() {
+        if let Some((_, _, tpl)) = instantiated.iter().find(|(_, n, _)| *n == l.name)
+            && partially_specialized.contains(tpl)
+            && !specializations.contains(&l.name)
+        {
+            l.uncertain_fields.push(format!(
+                "whole layout: `{tpl}` has a partial specialization that may apply"
+            ));
         }
     }
 
@@ -2558,7 +2896,17 @@ fn parse_field_declarations(
             // C++ qualified types: std::mutex, ns::Type, etc.
             // C++ template types:  std::atomic<uint64_t>, std::vector<int>, etc.
             "qualified_identifier" | "template_type" => {
-                ty_parts.push(source[child.byte_range()].trim().to_string());
+                let mut ty = normalize_type_text(&source[child.byte_range()]);
+                // `ns::Buf<int>` naming a template defined in this file is the same
+                // type as `Buf<int>` (padlock does not model namespaces).
+                if child.kind() == "qualified_identifier"
+                    && let Some(open) = ty.find('<')
+                    && let Some(sep) = ty[..open].rfind("::")
+                    && aliases.contains_key(&format!("{TPL_KEY}{}", &ty[sep + 2..open]))
+                {
+                    ty = ty[sep + 2..].to_string();
+                }
+                ty_parts.push(ty);
             }
             // C11 _Atomic(T) type-specifier form: tree-sitter produces an `atomic_type`
             // node wrapping the inner type in parentheses.  Extract the inner type so
@@ -2740,6 +3088,14 @@ fn parse_field_declarations(
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
+
+/// Concrete class-template uses in a C++ source text (see `collect_template_uses`).
+pub fn template_uses(source: &str) -> Vec<(String, Vec<String>)> {
+    CPP_PARSER
+        .with(|p| p.borrow_mut().parse(source, None))
+        .map(|t| collect_template_uses(source, t.root_node()))
+        .unwrap_or_default()
+}
 
 pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let tree = C_PARSER

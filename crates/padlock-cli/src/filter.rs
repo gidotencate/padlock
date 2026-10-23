@@ -146,6 +146,7 @@ impl FilterArgs {
         padlock_source::set_preprocessor_defines(&self.defines);
         self.declared_order |= cfg.declared_order;
         padlock_source::set_declared_order(self.declared_order);
+        crate::paths::apply_configured_instantiations(cfg);
         if matches!(self.sort_by, SortBy::Score)
             && let Some(ref s) = cfg.sort_by
         {

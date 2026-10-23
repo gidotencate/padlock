@@ -43,6 +43,11 @@ const ZD = struct { a: [3]u8, b: u32, c: u16 };
 const ZE = struct { a: u8, b: u24, c: u16 };
 const ZF = struct { a: u8, inner: ZA, z: u8 };
 const ZG = extern struct { a: u8, inner: In, z: u8 };
+fn GPair(comptime A: type, comptime n: usize) type {
+    return struct { a: A, b: [n]u8 };
+}
+const GP = GPair(u16, 3);
+const GUser = struct { p: GPair(u64, 2), q: GP };
 const PkInner = packed struct { a: u3, b: u2 };
 const PkNest = packed struct { x: PkInner, y: u8, z: PkInner };
 const PkA = packed struct { a: u8, b: u32 };
@@ -102,6 +107,9 @@ pub fn main() void {
     w(ZD);
     w(ZE);
     w(ZF);
+    w(GUser);
+    std.debug.print("GPair(u64, 2) {d} -1\n", .{@sizeOf(GPair(u64, 2))});
+    std.debug.print("GPair(u16, 3) {d} -1\n", .{@sizeOf(GP)});
     w(PkNest);
     w(PkA);
     w(PkOdd);

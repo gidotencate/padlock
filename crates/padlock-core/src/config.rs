@@ -19,6 +19,10 @@
 //   ignore         = ["GeneratedStruct", "FfiLayout"]  # suppress by name
 //   defines        = ["CONFIG_SMP", "WORD_BITS=64"]   # C/C++ `-D` for #if branches
 //
+//   [instantiate]                # generic types to analyze with these arguments
+//   Buf  = ["char, 8", "int"]    # C++ Buf<char, 8>, Buf<int>
+//   Pair = ["u32, String"]       # Rust Pair<u32, String> / Go Pair[…]
+//
 //   [arch]
 //   override = "aarch64"         # force a specific arch (x86_64|aarch64|aarch64_apple|wasm32|riscv64)
 //
@@ -92,6 +96,9 @@ pub struct Config {
     /// Show Rust `repr(Rust)` / plain Zig structs in declaration order rather than
     /// the compiler's order (`--declared-order`).
     pub declared_order: bool,
+    /// Extra instantiations of generic types to analyze, from `[instantiate]`
+    /// (`Buf = ["char, 8", "int"]`): `(TypeName, argument list text)`.
+    pub instantiate: Vec<(String, String)>,
 }
 
 impl Default for Config {
@@ -112,6 +119,7 @@ impl Default for Config {
             custom_sync_types: Vec::new(),
             defines: Vec::new(),
             declared_order: false,
+            instantiate: Vec::new(),
         }
     }
 }
@@ -261,6 +269,28 @@ impl Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // `[instantiate]` (any language) or `[cpp.instantiate]`.
+        let mut instantiate = Vec::new();
+        for table in [
+            doc.get("instantiate"),
+            doc.get("cpp").and_then(|c| c.get("instantiate")),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.as_table())
+        {
+            for (name, v) in table {
+                for args in v
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str())
+                {
+                    instantiate.push((name.clone(), args.to_string()));
+                }
+            }
+        }
+
         Some(Self {
             min_severity,
             fail_below,
@@ -277,6 +307,7 @@ impl Config {
             custom_sync_types,
             defines,
             declared_order,
+            instantiate,
         })
     }
 

@@ -19,6 +19,7 @@ pub fn run(paths: &[PathBuf], filter: Option<&str>, no_cache: bool) -> anyhow::R
         let cfg = padlock_core::config::Config::for_path(first);
         padlock_source::set_preprocessor_defines(&cfg.defines);
         padlock_source::set_declared_order(cfg.declared_order);
+        crate::paths::apply_configured_instantiations(&cfg);
     }
     let (layouts, _, _skipped) = collect_layouts(paths, false, no_cache)?;
 

@@ -40,9 +40,23 @@ const TEMPLATE: &str = r#"# .padlock.toml — padlock project configuration
 # Exit non-zero if any finding meets this severity: "high" | "medium" | "low"
 # fail_on_severity = "high"
 
+# ── Parsing ────────────────────────────────────────────────────────────────────
+
+# C/C++ macros treated as defined when choosing #if/#ifdef branches (like -D).
+# defines = ["CONFIG_SMP", "WORD_BITS=64"]
+
+# Show repr(Rust) / plain Zig structs in source order instead of compiler order.
+# declared_order = false
+
+# [instantiate]
+# Generic types to analyze with these arguments, besides those used in the code.
+# Buf  = ["char, 8", "int"]       # C++ Buf<char, 8>, Buf<int>
+# Pair = ["u32, String"]          # Rust Pair<u32, String> / Go Pair[...]
+
 [arch]
-# Force a specific architecture for layout simulation.
-# Options: x86_64 (default) | aarch64 | aarch64_apple | wasm32 | riscv64
+# Lay out source files for this target instead of the host.
+# Options: x86_64 | x86_64-msvc | x86 | aarch64 | aarch64_apple | wasm32 |
+#          riscv64 | cortex_m | cortex_m4 | avr, or a Rust target triple
 # override = "x86_64"
 
 # ── Per-struct overrides ───────────────────────────────────────────────────────

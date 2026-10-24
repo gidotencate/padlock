@@ -684,13 +684,13 @@ Source analysis never invokes a compiler — field sizes come from a built-in ty
 | C | **Accurate** — struct layout is ABI-fixed in declaration order | ✓ |
 | Go | **Accurate** — the language spec guarantees declaration-order layout, never reordered by the compiler | ✓ |
 | Zig (`extern`/`packed`) | **Accurate** — ABI-defined layout | via DWARF |
-| Zig (plain struct) | Approximate — field order is implementation-defined, the compiler may reorder freely; findings are severity-downgraded, same as Rust `repr(Rust)` | via DWARF |
+| Zig (plain struct) | **Sizes match the compiler** — laid out in the order zig uses (largest alignment first); field order is still implementation-defined, so findings are severity-downgraded, same as Rust `repr(Rust)` | via DWARF |
 | Rust (`repr(C)`/`packed`/`transparent`) | **Accurate** | ✓ |
-| Rust (`repr(Rust)`, the default) | Approximate — no layout guarantee at all; useful for finding issues, not for ABI verification | ✓ |
-| C++ | Approximate — templates are skipped entirely (no monomorphisation from source alone), and even ordinary structs aren't compiler-verified; vtable/inheritance/bitfield layout is modeled but not guaranteed to match a specific compiler | ✓ |
+| Rust (`repr(Rust)`, the default) | **Sizes match the compiler** for the probed cases — laid out in rustc's order (largest alignment first); offsets are an estimate since rustc may move a niche field first, and there is no layout guarantee; `--rust-exact` gives rustc's own answer | ✓ |
+| C++ | **Accurate** for the conformance suite — Itanium inheritance (primary base, tail-padding reuse, empty bases, virtual bases), vtables, bit-fields, namespaces, and templates once per concrete instantiation; STL internals depend on `--stdlib`, and `--compile-commands` gives the compiler's own answer | ✓ |
 | eBPF (BTF) | — | ✓ (`.BTF` ELF section) |
 
-So: if you only ever pass source files (no `padlock analyze <binary>`), C, Go, and `extern`/`packed` Zig give you compiler-grade accuracy for free. Plain Zig structs and Rust's default `repr(Rust)` carry the same "compiler may reorder" caveat — real, not a padlock limitation, since there genuinely is no fixed layout to report. C++ is the one language where source analysis has a hard structural ceiling (templates, STL internals) regardless of how carefully it's modeled — binary (DWARF) analysis is the only way to get a compiler-verified answer there.
+So: if you only ever pass source files (no `padlock analyze <binary>`), every language gives compiler-matching sizes for the constructs the conformance suite covers. Plain Zig structs and Rust's default `repr(Rust)` still carry the "compiler may reorder" caveat — real, not a padlock limitation, since there is no fixed layout to promise. What source alone cannot see (types from unanalyzed headers or other packages, macro-generated members, template arguments never used in the analyzed files) is reported as `uncertain` or skipped; the exact modes in [How exact is it?](#how-exact-is-it) cover those.
 
 - C++ `alignas(N)` field and struct-level annotations are extracted from source and applied to field alignment and struct trailing padding. For the most precise layout (e.g. complex template instantiations), binary (DWARF) analysis remains the authoritative path.
 
@@ -700,12 +700,12 @@ Rust's memory layout depends on which `repr` is in effect. padlock handles each 
 
 | repr | Layout guarantee | padlock accuracy | Notes |
 |---|---|---|---|
-| `repr(Rust)` (default) | None — compiler may reorder | Approximate | Analyzes declaration order; output includes a caveat note. Use for finding issues to fix, not ABI verification |
+| `repr(Rust)` (default) | None — compiler may reorder | Sizes match rustc | Laid out in rustc's order (largest alignment first); `--declared-order` shows the source order instead. Findings are severity-downgraded |
 | `repr(C)` | C-compatible, declaration order | **Accurate** | Full analysis; best candidate for padding fixes |
 | `repr(packed)` / `repr(packed(n))` | No padding, fields may be unaligned | Accurate for waste | Reorder suggestions suppressed — packing is intentional; note that unaligned field references can cause UB |
-| `repr(align(n))` | Minimum alignment forced | Partial | Source frontend infers standard field sizes; struct-level forced alignment not modeled — use binary analysis |
+| `repr(align(n))` | Minimum alignment forced | Accurate | Struct alignment and trailing padding raised to `n`, also when the struct is nested in another |
 | `repr(transparent)` | Same as inner field | Accurate | Single-field wrapper; padding findings correctly suppressed |
-| `repr(u*)` / `repr(i*)` | Enum discriminant size | Approximate | Applies to enums; padlock models the discriminant size and (for data enums) a synthetic payload field; exact niched layouts are not modeled |
+| `repr(u*)` / `repr(i*)` | Enum discriminant size | Accurate | Discriminant sized from the repr (or widened by explicit discriminant values); data enums get a synthetic payload field, and enums whose payload has spare bit patterns (`enum { A(Box<T>), B }`) are sized as the payload alone |
 
 **Key points for Rust:**
 
@@ -745,7 +745,9 @@ For exact compiler-verified layout of any repr, use `padlock analyze target/debu
 | `aarch64` | 8 bytes | 64 bytes | Linux/Android |
 | `aarch64_apple` | 8 bytes | 128 bytes | M-series Mac |
 | `wasm32` | 4 bytes | 64 bytes | WebAssembly |
+| `x86_64-msvc` | 8 bytes | 64 bytes | Windows x64 (LLP64 `long`, 2-byte `wchar_t`, MSVC bit-fields); also `msvc`, `windows` |
 | `riscv64` | 8 bytes | 64 bytes | RISC-V 64-bit |
+| `x86` | 4 bytes | 64 bytes | 32-bit x86 (i386 SysV: 8-byte types 4-byte aligned in structs); also `i686` |
 | `cortex_m` | 4 bytes | — | Cortex-M0/M0+/M3/M23 — no cache; false-sharing suppressed |
 | `cortex_m4` | 4 bytes | 32 bytes | Cortex-M4/M7/M33 — optional L1 cache |
 | `avr` | 2 bytes | — | AVR 8-bit (ATmega etc.) — no cache, 1-byte alignment |
@@ -1005,7 +1007,7 @@ Unions are parsed and simulated correctly — all fields at offset 0, total size
 
 Structs containing bit-field members are parsed using GCC/Clang ABI rules: consecutive bitfields of the same storage-unit type are grouped into a single synthetic field (e.g. `[a:3|b:5]`), and the group is sized and aligned to the storage unit (`int` → 4 bytes, `uint8_t` → 1 byte). A change in storage-unit size, overflow of the current unit, or a zero-width flush (`int : 0`) starts a new group. Anonymous padding bits (`int : 3` with no name) consume bits within the current unit but are omitted from the label; all-anonymous groups emit a `[__pad]` placeholder so that the total size remains correct.
 
-**Limitations:** MSVC uses different rules for mixed-type bitfield packing. `#pragma pack` affects whole-unit alignment but not intra-unit bit order. For compiler-accurate bit-level offsets, use binary analysis (`padlock analyze target/debug/myapp`); the compiler encodes real offsets in DWARF/PDB. In binary mode (DWARF, PDB, BTF), bitfield members are grouped into synthetic `[a:3|b:5]` storage-unit fields using the same rules; groups where the storage-unit size cannot be determined are flagged as uncertain fields.
+Bits are placed one by one under the GCC/Clang SysV rules (a field never straddles its own type's alignment boundary unless packed; `T : 0` aligns to `T`; `packed` and `#pragma pack` are honoured). The `x86_64-msvc` target uses MSVC's rules instead (a new unit whenever the declared type changes). For compiler-accurate bit-level offsets you can also use binary analysis (`padlock analyze target/debug/myapp`); the compiler encodes real offsets in DWARF/PDB. In binary mode (DWARF, PDB, BTF), bitfield members are grouped into synthetic `[a:3|b:5]` storage-unit fields using the same rules; groups where the storage-unit size cannot be determined are flagged as uncertain fields.
 
 ---
 
@@ -1025,7 +1027,7 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | C / C++ | Windows SDK: `BYTE`, `WORD`, `DWORD`, `QWORD`, `BOOL`, `HANDLE`, `LPVOID`, `UINT8`–`UINT64`, `INT8`–`INT64` and pointer aliases | |
 | C / C++ | GCC/Clang extensions: `__int128`, `_Float16`, `__fp16`, `__bf16`, `_Float128` | |
 | C / C++ | Character types: `wchar_t` (4B on POSIX), `char8_t`, `char16_t`, `char32_t` | |
-| C++ | vtable pointer injection for `virtual` classes, single/multiple inheritance base slots, `alignas(N)` on fields and structs | virtual base class offsets cannot be statically modelled (vbtable thunks) — use binary analysis |
+| C++ | vtable pointers, single/multiple inheritance per the Itanium ABI (primary base, tail-padding reuse, empty-base optimisation, virtual bases placed last), `[[no_unique_address]]`, `alignas(N)` on fields and structs, namespace/class-qualified names | on `x86_64-msvc`, bases never share tail padding (MSVC rule); MSVC virtual-base (vbptr) layout is approximate |
 | C++ (binary/DWARF) | Base-class subobjects extracted from `DW_TAG_inheritance` as synthetic `[BaseName]` fields at correct byte offsets; virtual bases skipped | — |
 | C++ stdlib | `std::string`/`std::string_view`, `std::vector<T>`/`std::deque<T>`/`std::list<T>`, `std::map`/`std::set`/unordered variants, `std::unique_ptr`/`std::shared_ptr`/`std::weak_ptr`, `std::optional<T>` (recursive), `std::function`, `std::any`, `std::span<T>`, `std::error_code`, `std::atomic_flag`, `std::variant<T...>`, `std::pair<T1,T2>`, `std::tuple<T...>`, `std::array<T,N>`, `std::complex<T>`, `std::bitset<N>`, `std::chrono::duration`/`time_point`, `std::initializer_list<T>`, `std::filesystem::path` (32B), `std::thread` (8 words), `std::jthread` (9 words) | sizes vary by stdlib; use `--stdlib libstdc++\|libc++\|msvc` to select the correct variant (default: libstdc++) |
 | C / C++ | `__attribute__((packed))` structs and classes; `#pragma pack(N)` / `#pragma pack(push, N)` / `#pragma pack(pop)` | no inter-field padding inserted (packed); `#pragma pack(N)` caps field alignment at N |
@@ -1043,16 +1045,14 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 
 | Case | Action | Accurate alternative |
 |---|---|---|
-| C/C++ structs with bit-field members | Parsed — consecutive bitfields of the same storage-unit type are grouped into a synthetic field (`[a:3\|b:5]`); MSVC mixed-type packing not modelled | Binary (DWARF) analysis for compiler-accurate bit offsets |
-| C++ template structs/classes/unions (`template<typename T> struct Foo`) | Skipped — note printed to stderr, unless a `// padlock:instantiate(Args...)` annotation names concrete type arguments (see below) | Binary analysis; or analyse concrete instantiations |
-| Rust generic struct definitions (`struct Foo<T>`) | Skipped — note printed to stderr | Binary analysis; or analyse concrete monomorphizations |
+| C/C++ structs with bit-field members | Parsed — bits placed per the target ABI and grouped into synthetic fields (`[a:3\|b:5]`) | Binary (DWARF) analysis for compiler-accurate bit offsets |
+| C++ templates, Rust/Go generic structs, Zig `fn(comptime T: type) type` with no concrete use in the analyzed files | Skipped — note printed to stderr. Each concrete use (`Foo<int>`, `Pair[int, string]`, `List(u8)`) found in any analyzed file is analyzed as its own struct | List the arguments under `[instantiate]` in `.padlock.toml`, add a `// padlock:instantiate(Args...)` comment (C++), or use binary analysis |
 | Rust structs with only lifetime parameters (`struct Cache<'a>`) | Analyzed normally — lifetime params do not affect layout | — |
-| Go generic structs (`type Pair[T any] struct`) | Skipped — note printed to stderr | Binary analysis |
 | Forward-declared / incomplete structs | Skipped | Binary analysis |
 
 ### Analyzing specific C++ template instantiations
 
-A bare `template<typename T> struct Foo { T x; };` can't be sized — `T`'s size is unknown until it's instantiated. For a known, fixed set of instantiations (the common case for perf-sensitive template value types: SIMD/math vector types, intrusive container nodes, fixed-point types), name the concrete type arguments directly above the template with a `// padlock:instantiate(...)` comment — one line per desired instantiation:
+A bare `template<typename T> struct Foo { T x; };` can't be sized — `T`'s size is unknown until it's instantiated. padlock analyzes every instantiation it sees used in the analyzed files, plus those listed under `[instantiate]` in `.padlock.toml`. To name instantiations next to the template itself, for a known, fixed set (the common case for perf-sensitive template value types: SIMD/math vector types, intrusive container nodes, fixed-point types), name the concrete type arguments directly above the template with a `// padlock:instantiate(...)` comment — one line per desired instantiation:
 
 ```cpp
 // padlock:instantiate(float)
@@ -1069,12 +1069,11 @@ This substitution is textual, not a real template instantiator: it does not unde
 
 ### Known remaining limitations (source analysis)
 
-- **Rust enums** — data enums are modeled with a synthetic `__payload` field (sized to the largest variant) and a `__discriminant` field. Common niche types (`Option<NonZeroXxx>`, `Option<&T>`, `Option<Box<T>>`) are now sized correctly; custom niche enums (e.g. `Option<MyNonNull>`) still use approximate sizes — use binary analysis for unusual niches.
+- **Rust enums** — data enums are modeled with a synthetic `__payload` field (sized to the largest variant) and a `__discriminant` field; niche-filled enums and common niche types (`Option<NonZeroXxx>`, `Option<&T>`, `Option<Box<T>>`) are sized correctly. Unusual niches may still be approximate — use `--rust-exact` or binary analysis.
+- **Rust std sync types on macOS/Windows** — `Mutex`/`RwLock`/`Condvar` sizes differ per OS; on Apple and MSVC targets these fields are flagged as `uncertain`. Rust on 32-bit targets is not yet covered by the conformance suite.
 - **Go qualified interface fields** (`io.Reader`, `driver.Connector`, etc.) — cross-package interface types cannot be resolved from source alone; these fields are flagged as `uncertain` in output and sized as 2 words (the correct runtime representation). Use binary analysis for certainty.
-- **Go generics** (Go 1.18+) — generic type parameters (`type Pair[T any] struct { ... }`) cannot be sized from source without instantiation; generic structs are skipped. Use binary analysis for concrete instantiations.
-- **`wchar_t` on Windows** — padlock treats `wchar_t` as 4 bytes (POSIX/GCC). On MSVC Windows targets it is 2 bytes. Use binary analysis for Windows builds.
-- **Rust const-expression padding** (`[u8; 64 - size_of::<Mutex<u64>>()]`) — the expression is not evaluated; the field gets pointer-size as a default.
-- **`repr(Rust)` reordering** — the compiler may reorder fields and eliminate padding automatically; padlock analyzes declaration order, which is what developers read and control.
+- **C++ `packed` combined with inheritance** — differential fuzzing still finds rare mismatches against g++ for packed classes with bases; use `--compile-commands` or binary analysis for those.
+- **`repr(Rust)` reordering** — sizes follow rustc's order, but individual field offsets are an estimate (rustc may place a large-niche field first). `--rust-exact` reports rustc's own order.
 
 ---
 
@@ -1082,11 +1081,12 @@ This substitution is textual, not a real template instantiator: it does not unde
 
 ```
 padlock-cli       — padlock binary + cargo-padlock subcommand; watch mode
-├── padlock-source  — source frontend: tree-sitter (C/C++/Go), syn (Rust)
+├── padlock-source  — source frontend: tree-sitter (C/C++/Go/Zig), syn (Rust)
 │                     explicit guard annotation: #[lock_protected_by], GUARDED_BY(), // padlock:guard=
 ├── padlock-dwarf   — binary frontend: DWARF via gimli+object, BTF via custom reader
 ├── padlock-output  — formatters: terminal, JSON, SARIF, diff
-├── padlock-macros  — proc macros: #[assert_no_padding], #[assert_size(N)]
+├── padlock-macros  — proc macros: #[assert_no_padding], #[assert_size(N)],
+│                     #[assert_align(N)], #[assert_offsets(..)]
 └── padlock-core    — IR types, analysis passes, findings, scoring
 
 padlock-lsp        — standalone language server (lsp-server/lsp-types) for

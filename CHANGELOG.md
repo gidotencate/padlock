@@ -2,6 +2,12 @@
 
 All notable changes to padlock are documented here.
 
+## [0.60.0] — 2026-10-25
+
+### Changed
+- Dependency updates: `comfy-table` 7.2.2 → 8.0.1, `syn` 3.0.6 → 3.0.9, `serde_json` 1.0.151 → 1.0.154, `anyhow` 1.0.102 → 1.0.104, `glob` 0.3.3 → 0.3.4; VS Code extension `@types/node` 26.6.4 → 26.6.5.
+- CI/actions: `actions/cache` 4 → 6 (composite action), `actions/setup-node` 4 → 7 (release workflow), `dependabot/fetch-metadata` 2 → 3, example workflow pins `gidotencate/padlock@v0.12.0`.
+
 ## [0.59.0] — 2026-10-25
 
 ### Fixed

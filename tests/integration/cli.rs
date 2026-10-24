@@ -501,13 +501,14 @@ fn define_flag_selects_ifdef_branch() {
     )
     .unwrap();
     let out = padlock()
-        .args(["analyze", "--json"])
+        .args(["analyze", "--json", "--target", "x86_64"])
         .arg(&file)
         .output()
         .unwrap();
     assert_eq!(total_sizes(&out.stdout), vec![1]);
+    // Pinned to x86_64 SysV: on a Windows host `long` is 4 bytes (LLP64).
     let out = padlock()
-        .args(["analyze", "--json", "-D", "WIDE"])
+        .args(["analyze", "--json", "--target", "x86_64", "-D", "WIDE"])
         .arg(&file)
         .output()
         .unwrap();
@@ -547,8 +548,9 @@ fn template_instantiated_by_another_file_is_analyzed() {
         "struct User { Buf<long, 2> b; Buf<char, 3> c; };\n",
     )
     .unwrap();
+    // Pinned to x86_64 SysV (LP64 `long`), independent of the host.
     let out = padlock()
-        .args(["analyze", "--json", "--no-cache"])
+        .args(["analyze", "--json", "--no-cache", "--target", "x86_64"])
         .arg(dir.path())
         .output()
         .unwrap();
@@ -930,14 +932,22 @@ fn perf_data_types_mark_measured_hot_fields() {
          \x20   35.00%  struct conn  struct conn +128 (misses)\n",
     )
     .unwrap();
+    // Pinned to x86_64 SysV so `misses` is at +128 (LP64 `long`).
     let plain = padlock()
-        .args(["analyze", "--json", "--no-cache"])
+        .args(["analyze", "--json", "--no-cache", "--target", "x86_64"])
         .arg(&file)
         .output()
         .unwrap();
     assert!(!String::from_utf8_lossy(&plain.stdout).contains("LocalityIssue"));
     let measured = padlock()
-        .args(["analyze", "--json", "--no-cache", "--perf-types"])
+        .args([
+            "analyze",
+            "--json",
+            "--no-cache",
+            "--target",
+            "x86_64",
+            "--perf-types",
+        ])
         .arg(&perf)
         .arg(&file)
         .output()

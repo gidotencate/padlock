@@ -8,7 +8,7 @@ All notable changes to padlock are documented here.
 - **`padlock-lsp` analysis could race on its parse settings**: `analyze_text` sets the preprocessor defines, declared-order flag and configured instantiations process-wide, so two concurrent calls (seen in parallel tests) could parse with each other's settings. The settings are now held under a lock for the whole parse.
 
 ### Changed
-- The integration tests that build with the host `gcc`/`g++` (DWARF input variants, `verify`, `--compile-commands`) now run on Linux only: they assume ELF output and an 8-byte `long`, which MinGW (LLP64, `.exe` output) and macOS (`gcc` is clang, DWARF left in the object files) do not give.
+- The integration tests that build with the host `gcc`/`g++` (DWARF input variants, `verify`, `--compile-commands`) now run on Linux only: they assume ELF output and an 8-byte `long`, which MinGW (LLP64, `.exe` output) and macOS (`gcc` is clang, DWARF left in the object files) do not give. `define_flag_selects_ifdef_branch`, `template_instantiated_by_another_file_is_analyzed` and `perf_data_types_mark_measured_hot_fields` pin `--target x86_64`, since on a Windows host `long` is correctly 4 bytes.
 
 ### Documentation
 - README accuracy tables, Rust `repr` table, bit-field notes, "skips" table, known limitations and architecture table brought up to date with 0.25–0.57 (compiler-order layout, per-instantiation generics, Itanium inheritance, `repr(align)`, enum niches, MSVC and 32-bit x86 targets, new macros). CLAUDE.md generics and bit-field notes likewise.

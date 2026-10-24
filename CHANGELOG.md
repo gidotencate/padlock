@@ -2,6 +2,12 @@
 
 All notable changes to padlock are documented here.
 
+## [0.59.0] — 2026-10-25
+
+### Fixed
+- **`--go-exact` silently did nothing on Windows**: the package directory was passed to `go test -overlay` in verbatim form (`\\?\D:\...`), which `go` does not match against its own path, so the probe never ran and the source-level layouts were kept without a note. The prefix is now dropped, and a probe that prints nothing is reported (`padlock: note: --go-exact skipped ...`) instead of being accepted.
+- `detect_arch_from_host_returns_valid_config` now accepts the `x86_64-msvc` host config added in 0.43.0.
+
 ## [0.58.0] — 2026-10-25
 
 ### Fixed

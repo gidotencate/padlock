@@ -75,11 +75,17 @@ type GP2 = GPair<u32, u8>;
 // `keep::<T>()` holds a `MaybeUninit<T>` local so the debug build describes `T`
 // (rustc emits debuginfo only for types that values have).
 fn keep<T>() { let k = std::mem::MaybeUninit::<T>::uninit(); std::hint::black_box(&k); }
+enum EnNiche { X(Box<u8>), Y }
+enum EnBig { X = 1000, Y }
+enum EnTag { X(u32), Y(u8) }
+enum EnBool { X(bool), Y, Z }
+enum EnNeg { X = -1, Y = 200 }
+enum EnPair { X(u32, bool), Y }
 macro_rules! ps { ($($t:ident),*) => { $(keep::<$t>(); println!("{} {} -1", stringify!($t), size_of::<$t>());)* } }
 macro_rules! p { ($t:ident, $f:ident) => { keep::<$t>(); println!("{} {} {} {}", stringify!($t), size_of::<$t>(), offset_of!($t, $f), stringify!($f)); } }
 fn main() {
 p!(Arr,c);p!(ArrConst,c);p!(ArrExpr,c);p!(ArrArr,c);p!(ArrS,c);p!(Tup,c);p!(Unit,c);p!(Str,c);p!(Opt,c);p!(Atom,c);p!(Sync,c);p!(Ptrs,c);p!(Maps,c);p!(Cells,c);p!(Fns,c);p!(Num,c);p!(Us,c);p!(Pk,c);p!(Pk2,c);p!(AlO,c);p!(Nested,c);p!(Pd,c);p!(WE,c);p!(Dur,c);p!(NZ,c);p!(Raw,c);p!(Wrap,c);p!(Pin,c);p!(PS,c);p!(Bs,c);p!(Ty,c);p!(Rg,c);
-p!(Opts,c);p!(Unsz,g);p!(Alias,c);p!(Lens,d);p!(NestArr,c);p!(Pk4,c);p!(SyncMore,c);p!(Ranges,c);p!(EnumF,c);p!(CStr,c);p!(TupNest,c);p!(AlNest,c);ps!(RA, RB, RC, RD, RE, RF, RG, RH);p!(RI,z);p!(GUser,z);
+p!(Opts,c);p!(Unsz,g);p!(Alias,c);p!(Lens,d);p!(NestArr,c);p!(Pk4,c);p!(SyncMore,c);p!(Ranges,c);p!(EnumF,c);p!(CStr,c);p!(TupNest,c);p!(AlNest,c);ps!(RA, RB, RC, RD, RE, RF, RG, RH, EnNiche, EnBig, EnTag, EnBool, EnNeg, EnPair);p!(RI,z);p!(GUser,z);
     keep::<GPair<u8, u64>>(); keep::<GBuf<u16, 3>>(); keep::<GBuf<u32>>(); keep::<GP2>();
     println!("GPair<u8, u64> {} -1", size_of::<GPair<u8, u64>>());
     println!("GBuf<u16, 3> {} -1", size_of::<GBuf<u16, 3>>());

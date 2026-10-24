@@ -3,3 +3,5 @@ dwarf-cpp:TBuf<long>  # DWARF names the instantiation with defaults spelled out 
 dwarf-cpp:TBuf<char, 8>  # same: `TBuf<char, 8, Empty>`
 dwarf-cpp:TBuf<short, 2>  # same: `TBuf<short int, 2, Empty>`
 dwarf-rust:GBuf<u32>  # DWARF names it `GBuf<u32, 4>` (default const argument spelled out); sizes agree
+dwarf-rust:EnBig  # binary analysis reports structs and unions; a fieldless enum is a DWARF enumeration type
+dwarf-rust:EnNeg  # same

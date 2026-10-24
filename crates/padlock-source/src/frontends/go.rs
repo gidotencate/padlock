@@ -13,6 +13,9 @@ use tree_sitter::{Node, Parser};
 // grammar on every file.  Parser::parse with old_tree=None always does a full
 // fresh parse, so no reset is needed between files.
 thread_local! {
+    /// Anonymous struct types laid out while parsing the current file (sized by
+    /// the nested-struct resolver, then hidden — see `c_cpp::ANON_PREFIX`).
+    static PENDING_ANON: RefCell<Vec<StructLayout>> = const { RefCell::new(Vec::new()) };
     static PARSER: RefCell<Parser> = RefCell::new({
         let mut p = Parser::new();
         p.set_language(&tree_sitter_go::LANGUAGE.into())
@@ -471,7 +474,11 @@ fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
         let elem_name = resolve_alias_chain(elem, ctx);
         let named_elem = match e.named_elem {
             Some((name, n)) => Some((name, n.saturating_mul(count))),
-            None if ctx.structs.contains(&elem_name) => Some((elem_name, count)),
+            None if ctx.structs.contains(&elem_name)
+                || elem_name.starts_with(super::c_cpp::ANON_PREFIX) =>
+            {
+                Some((elem_name, count))
+            }
             None => None,
         };
         return Sized {
@@ -489,7 +496,7 @@ fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
     {
         return plain(sz, al);
     }
-    if ctx.structs.contains(ty) {
+    if ctx.structs.contains(ty) || ty.starts_with(super::c_cpp::ANON_PREFIX) {
         return plain(ps, ps);
     }
     if let Some(target) = ctx.aliases.get(ty) {
@@ -537,6 +544,7 @@ fn resolve_alias_chain(ty: &str, ctx: &GoCtx) -> String {
 // ── tree-sitter walker ────────────────────────────────────────────────────────
 
 fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> Vec<StructLayout> {
+    PENDING_ANON.with(|p| p.borrow_mut().clear());
     // Phase 1: learn the file's own interfaces, structs, aliases and constants.
     let ctx = collect_go_declarations(source, root, arch);
 
@@ -556,6 +564,7 @@ fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> V
             layouts.extend(parse_type_declaration(source, node, &ctx));
         }
     }
+    layouts.extend(PENDING_ANON.with(|p| std::mem::take(&mut *p.borrow_mut())));
     layouts
 }
 
@@ -860,6 +869,67 @@ fn trailing_comment_on_line(source: &str, node: Node<'_>) -> Option<String> {
     line.find("//").map(|pos| line[pos..].to_string())
 }
 
+/// The source text of a field type, with every inline `struct { … }` in it
+/// (`struct{…}`, `[2]struct{…}`, `*struct{…}`) replaced by a synthetic layout the
+/// nested-struct resolver sizes like any struct — so local structs inside it are
+/// sized right. An empty `struct{}` stays an encoded zero-size type.
+fn type_text_with_anon(source: &str, t: Node<'_>, ctx: &GoCtx) -> String {
+    let mut anon: Vec<(usize, usize, String)> = Vec::new();
+    let mut stack = vec![t];
+    while let Some(n) = stack.pop() {
+        if n.kind() != "struct_type" {
+            for i in (0..n.child_count()).rev() {
+                if let Some(c) = n.child(i) {
+                    stack.push(c);
+                }
+            }
+            continue;
+        }
+        let raw = raw_struct_fields(source, n, ctx);
+        if raw.is_empty() {
+            anon.push((
+                n.start_byte(),
+                n.end_byte(),
+                "__anon_struct<0,1>".to_string(),
+            ));
+            continue;
+        }
+        let (fields, size, align, uncertain) = simulate_go_layout(raw, ctx);
+        let name = format!("{}struct#{}", super::c_cpp::ANON_PREFIX, n.start_byte());
+        PENDING_ANON.with(|p| {
+            p.borrow_mut().push(StructLayout {
+                name: name.clone(),
+                total_size: size,
+                align,
+                fields,
+                source_file: None,
+                source_line: Some(n.start_position().row as u32 + 1),
+                arch: ctx.arch,
+                is_packed: false,
+                is_union: false,
+                is_repr_rust: false,
+                suppressed_findings: Vec::new(),
+                uncertain_fields: uncertain,
+                forced_align: None,
+                pack_limit: None,
+                cpp: None,
+                explicit_align: Vec::new(),
+            })
+        });
+        anon.push((n.start_byte(), n.end_byte(), name));
+    }
+    let mut out = String::new();
+    let mut pos = t.start_byte();
+    anon.sort_by_key(|a| a.0);
+    for (start, end, name) in anon {
+        out.push_str(&source[pos..start]);
+        out.push_str(&name);
+        pos = end;
+    }
+    out.push_str(&source[pos..t.end_byte()]);
+    out.trim().to_string()
+}
+
 fn collect_field_declarations(
     source: &str,
     node: Node<'_>,
@@ -883,16 +953,9 @@ fn collect_field_declarations(
         }
     }
 
-    let ty_text = node.child_by_field_name("type").map(|t| {
-        if t.kind() == "struct_type" {
-            // `inner struct{ … }`: lay it out and encode its size/alignment.
-            let raw = raw_struct_fields(source, t, ctx);
-            let (_, size, align, _) = simulate_go_layout(raw, ctx);
-            format!("__anon_struct<{size},{align}>")
-        } else {
-            source[t.byte_range()].trim().to_string()
-        }
-    });
+    let ty_text = node
+        .child_by_field_name("type")
+        .map(|t| type_text_with_anon(source, t, ctx));
 
     let guard =
         trailing_comment_on_line(source, node).and_then(|c| extract_guard_from_go_comment(&c));

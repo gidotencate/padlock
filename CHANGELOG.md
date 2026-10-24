@@ -10,6 +10,9 @@ All notable changes to padlock are documented here.
 ### Changed
 - The integration tests that build with the host `gcc`/`g++` (DWARF input variants, `verify`, `--compile-commands`) now run on Linux only: they assume ELF output and an 8-byte `long`, which MinGW (LLP64, `.exe` output) and macOS (`gcc` is clang, DWARF left in the object files) do not give.
 
+### Documentation
+- README accuracy tables, Rust `repr` table, bit-field notes, "skips" table, known limitations and architecture table brought up to date with 0.25–0.57 (compiler-order layout, per-instantiation generics, Itanium inheritance, `repr(align)`, enum niches, MSVC and 32-bit x86 targets, new macros). CLAUDE.md generics and bit-field notes likewise.
+
 ## [0.57.0] — 2026-10-23
 
 ### Fixed

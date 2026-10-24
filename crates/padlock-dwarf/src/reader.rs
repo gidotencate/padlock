@@ -303,7 +303,10 @@ mod tests {
     fn detect_arch_from_host_returns_valid_config() {
         let arch = detect_arch_from_host();
         // Must be one of the known configs
-        assert!(matches!(arch.name, "x86_64" | "aarch64" | "aarch64-apple"));
+        assert!(matches!(
+            arch.name,
+            "x86_64" | "x86_64-msvc" | "aarch64" | "aarch64-apple"
+        ));
         assert!(arch.pointer_size == 4 || arch.pointer_size == 8);
         assert!(arch.cache_line_size > 0);
     }

@@ -34,8 +34,8 @@ fn run_probe(
     package: &str,
     types: &[String],
 ) -> anyhow::Result<HashMap<String, Probe>> {
-    // `-overlay` needs absolute paths.
-    let dir = &std::fs::canonicalize(dir)?;
+    // `-overlay` needs absolute paths, spelled the way `go` spells them.
+    let dir = &plain_absolute(&std::fs::canonicalize(dir)?);
     let scratch = std::env::temp_dir().join(format!(
         "padlock-go-{}-{}",
         std::process::id(),
@@ -93,6 +93,7 @@ fn run_probe(
     }
     let mut probes: HashMap<String, Probe> = HashMap::new();
     for line in stdout.lines() {
+        let line = line.trim_end_matches('\r');
         let parts: Vec<&str> = line.split('\t').collect();
         match parts.as_slice() {
             ["PADLOCK", name, size, align] => {
@@ -113,7 +114,22 @@ fn run_probe(
             _ => {}
         }
     }
+    if probes.is_empty() {
+        anyhow::bail!("the layout probe did not run (overlay not applied?)");
+    }
     Ok(probes)
+}
+
+/// `canonicalize` on Windows returns a verbatim path (`\\?\C:\...`), which
+/// `go` does not match against its own spelling of the package directory, so
+/// an overlay keyed on it is silently ignored. Drop the prefix for ordinary
+/// drive paths.
+fn plain_absolute(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Replace the layouts of Go structs with what the Go toolchain reports.
@@ -165,5 +181,27 @@ pub fn refine(layouts: &mut [StructLayout]) {
             l.align = p.align;
             l.uncertain_fields.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbatim_drive_paths_lose_their_prefix() {
+        assert_eq!(
+            plain_absolute(Path::new(r"\\?\D:\a\pkg")),
+            PathBuf::from(r"D:\a\pkg")
+        );
+        // UNC verbatim paths and ordinary paths are left alone.
+        assert_eq!(
+            plain_absolute(Path::new(r"\\?\UNC\srv\share")),
+            PathBuf::from(r"\\?\UNC\srv\share")
+        );
+        assert_eq!(
+            plain_absolute(Path::new("/tmp/pkg")),
+            PathBuf::from("/tmp/pkg")
+        );
     }
 }

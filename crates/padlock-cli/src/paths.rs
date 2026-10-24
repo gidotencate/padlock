@@ -127,6 +127,17 @@ pub fn collect_layouts(
                 None
             };
 
+            // Go files are laid out per package: build each package once, in
+            // parallel across packages, before the per-file pass looks them up.
+            let go_dirs: std::collections::BTreeSet<&Path> = misses
+                .iter()
+                .filter(|f| f.extension().is_some_and(|e| e == "go"))
+                .filter_map(|f| f.parent())
+                .collect();
+            go_dirs
+                .into_par_iter()
+                .for_each(|d| padlock_source::prepare_go_packages(d, arch));
+
             let counter_ref = parsed_count.clone();
             let miss_results: Vec<_> = misses
                 .par_iter()
@@ -375,6 +386,17 @@ fn instantiate_across_files(
     }
     padlock_source::set_discovered_instantiations(uses);
     let arch = source_arch();
+    // The new instantiations invalidate cached Go packages; rebuild the ones
+    // needed in parallel rather than one by one in the loop below.
+    let go_dirs: std::collections::BTreeSet<&Path> = pending
+        .keys()
+        .map(Path::new)
+        .filter(|f| f.extension().is_some_and(|e| e == "go"))
+        .filter_map(|f| f.parent())
+        .collect();
+    go_dirs
+        .into_par_iter()
+        .for_each(|d| padlock_source::prepare_go_packages(d, arch));
     for file in pending.keys() {
         let Ok(output) = padlock_source::parse_source(Path::new(file), arch) else {
             continue;

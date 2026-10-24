@@ -3,6 +3,7 @@
 pub mod concurrency;
 pub mod fixgen;
 pub mod frontends;
+mod go_package;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -26,12 +27,32 @@ pub enum CppStdlib {
     Msvc,
 }
 
+/// Bumped whenever a process-global parse setting changes, so caches of parsed
+/// results (the Go package cache) know to rebuild.
+static SETTINGS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn bump_settings_generation() {
+    SETTINGS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn settings_generation() -> u64 {
+    SETTINGS_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Parse every Go package in `dir` ahead of its files, so callers that parse
+/// many files in parallel find each package ready instead of waiting on one
+/// another. Optional: `parse_source` builds a package on first use anyway.
+pub fn prepare_go_packages(dir: &Path, arch: &'static ArchConfig) {
+    go_package::prepare(dir, arch);
+}
+
 /// Set the C++ stdlib variant used for type-size lookups during source analysis.
 ///
 /// Process-global: it takes effect for all subsequent calls to `parse_source` /
 /// `parse_source_str` on every thread (including rayon workers). The default is
 /// `CppStdlib::LibStdCpp`. Call this from the CLI before invoking analysis.
 pub fn set_cpp_stdlib(stdlib: CppStdlib) {
+    bump_settings_generation();
     frontends::c_cpp::set_stdlib(stdlib);
 }
 
@@ -48,6 +69,7 @@ static DECLARED_ORDER: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 /// structs in source declaration order instead of the order the compiler picks.
 /// Off by default. Process-global.
 pub fn set_declared_order(on: bool) {
+    bump_settings_generation();
     DECLARED_ORDER.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -99,6 +121,7 @@ pub fn split_type_args(text: &str) -> Vec<String> {
 /// the source itself, as `(TypeName, [arg, …])`. Typically from `[instantiate]`
 /// in `.padlock.toml`. Process-global; replaces the previous list.
 pub fn set_configured_instantiations(list: Vec<(String, Vec<String>)>) {
+    bump_settings_generation();
     *CONFIG_INSTANTIATIONS
         .write()
         .unwrap_or_else(|e| e.into_inner()) = list;
@@ -108,6 +131,7 @@ pub fn set_configured_instantiations(list: Vec<(String, Vec<String>)>) {
 /// Additionally analyze these instantiations (e.g. uses found in other files of
 /// the same run), on top of the configured ones.
 pub fn set_discovered_instantiations(list: Vec<(String, Vec<String>)>) {
+    bump_settings_generation();
     publish_instantiations(list);
 }
 
@@ -179,6 +203,7 @@ static DEFINES: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::ne
 ///
 /// Process-global (not thread-local), so it applies to every parallel parse.
 pub fn set_preprocessor_defines<S: AsRef<str>>(defines: &[S]) {
+    bump_settings_generation();
     let parsed = defines
         .iter()
         .map(|d| match d.as_ref().split_once('=') {
@@ -228,8 +253,13 @@ pub fn record_skipped(name: &str, reason: &str) {
     });
 }
 
-fn take_skipped() -> Vec<SkippedStruct> {
+pub(crate) fn take_skipped() -> Vec<SkippedStruct> {
     SKIPPED_COLLECTOR.with(|c| c.take())
+}
+
+/// Put skipped entries back into the collector (after a nested collection).
+pub(crate) fn restore_skipped(items: Vec<SkippedStruct>) {
+    SKIPPED_COLLECTOR.with(|c| c.borrow_mut().extend(items));
 }
 
 /// Output from a single source-file parse: the extracted layouts plus any
@@ -303,7 +333,15 @@ pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<Pa
         .ok_or_else(|| anyhow::anyhow!("unsupported file type: {}", path.display()))?;
     // Clear any leftover thread-local state from previous direct parse_source_str calls.
     let _ = take_skipped();
-    let mut layouts = parse_source_str(&source, &lang, arch)?;
+    // A Go file is laid out together with the other files of its package.
+    let package = match lang {
+        SourceLanguage::Go => go_package::parse_in_package(path, &source, arch),
+        _ => None,
+    };
+    let mut layouts = match package {
+        Some(layouts) => finish_layouts(&source, &lang, layouts),
+        None => parse_source_str(&source, &lang, arch)?,
+    };
     let mut skipped = take_skipped();
     let file_str = path.to_string_lossy().into_owned();
     for layout in &mut layouts {
@@ -331,6 +369,16 @@ pub fn parse_source_str(
     // Resolve fields whose type names match other structs in this file.
     // This makes nested struct sizes accurate (instead of defaulting to pointer size).
     resolve_nested_structs(&mut layouts);
+    Ok(finish_layouts(source, lang, layouts))
+}
+
+/// The steps after nested-struct resolution: hide anonymous aggregates,
+/// annotate concurrency, drop `// padlock:ignore`d structs.
+fn finish_layouts(
+    source: &str,
+    lang: &SourceLanguage,
+    mut layouts: Vec<StructLayout>,
+) -> Vec<StructLayout> {
     hide_anonymous_aggregates(&mut layouts);
 
     // Annotate concurrency patterns
@@ -342,8 +390,7 @@ pub fn parse_source_str(
     // Pre-scan the source once instead of rescanning per struct (O(M) vs O(N×M)).
     let ignored = collect_padlock_ignored_names(source);
     layouts.retain(|layout| !ignored.contains(&layout.name));
-
-    Ok(layouts)
+    layouts
 }
 
 // ── nested struct resolution ──────────────────────────────────────────────────
@@ -667,7 +714,7 @@ fn split_c_array_suffix(ty: &str) -> (&str, usize) {
 ///
 /// Runs in a loop until stable to handle transitive nesting (struct A contains
 /// B which contains C). In practice, 2–3 iterations suffice for typical code.
-fn resolve_nested_structs(layouts: &mut [StructLayout]) {
+pub(crate) fn resolve_nested_structs(layouts: &mut [StructLayout]) {
     // Bound iterations to guard against size oscillation from parse-error trees.
     // Real transitive nesting resolves in ≤ depth iterations; depth is bounded by
     // the number of distinct struct types in the file.
@@ -838,6 +885,36 @@ fn resolve_nested_structs(layouts: &mut [StructLayout]) {
                     layout.uncertain_fields.push(field.name.clone());
                 }
             }
+        }
+    }
+
+    // A member whose own type has an uncertain size is uncertain too, however
+    // deeply nested (e.g. a struct holding a struct with an external field).
+    loop {
+        let uncertain_types: std::collections::HashSet<String> = layouts
+            .iter()
+            .filter(|l| !l.uncertain_fields.is_empty())
+            .map(|l| l.name.clone())
+            .collect();
+        let mut changed = false;
+        for layout in layouts.iter_mut() {
+            for field in &layout.fields {
+                let (TypeInfo::Primitive { name, .. } | TypeInfo::Opaque { name, .. }) = &field.ty
+                else {
+                    continue;
+                };
+                let elem = split_c_array_suffix(name).0;
+                if elem != layout.name
+                    && uncertain_types.contains(elem)
+                    && !layout.uncertain_fields.contains(&field.name)
+                {
+                    layout.uncertain_fields.push(field.name.clone());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
         }
     }
 }

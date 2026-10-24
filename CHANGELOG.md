@@ -2,6 +2,13 @@
 
 All notable changes to padlock are documented here.
 
+## [0.56.0] — 2026-10-23
+
+### Fixed
+- **Rust enums with a niche** (`enum E { X(Box<u8>), Y }`, `enum F { X(bool), Y, Z }`, `X(u32, bool)`) were given a separate tag byte; rustc stores the tag in the payload's spare bit patterns, so they are the payload's size (8 and 1 bytes, not 16 and 2).
+- **Rust explicit discriminants** (`X = 1000`, `X = -1`) now widen the tag to the integer that holds them (2 bytes, not 1).
+- **Go inline `struct { … }` types containing a local struct** (also inside arrays: `[2]struct{ i In }`) were sized with a pointer-sized placeholder for it; they are now synthetic layouts the nested-struct resolver sizes, like C's anonymous aggregates.
+
 ## [0.55.0] — 2026-10-23
 
 ### Changed

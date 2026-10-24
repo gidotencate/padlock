@@ -234,6 +234,36 @@ fn futex_std(arch: &ArchConfig) -> bool {
     !(arch.name.contains("apple") || arch.name.contains("msvc"))
 }
 
+/// How many extra enum variants a value of `ty` can encode in bit patterns it
+/// never uses (its "niche"): 254 for `bool`, one (null) for references and
+/// non-null pointers, plenty for `char`, a `Vec`'s capacity or a fieldless enum.
+fn niche_capacity(ty: &Type, ctx: &RustCtx) -> u64 {
+    match ty {
+        Type::Reference(_) => 1,
+        Type::Paren(p) => niche_capacity(&p.elem, ctx),
+        Type::Path(tp) => {
+            let name = tp
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default();
+            match name.as_str() {
+                "bool" => 254,
+                "char" => u32::MAX as u64 - 0x10FFFF,
+                "Box" | "Arc" | "Rc" | "NonNull" | "Weak" => 1,
+                n if n.starts_with("NonZero") => 1,
+                "Vec" | "String" | "PathBuf" | "OsString" | "VecDeque" => u32::MAX as u64,
+                _ => match ctx.aliases.get(&name) {
+                    Some(t) if tp.path.segments.len() == 1 => niche_capacity(t, ctx),
+                    _ => 0,
+                },
+            }
+        }
+        _ => 0,
+    }
+}
+
 /// Size of `fields` laid out the way rustc lays out a `repr(Rust)` aggregate
 /// (tuples, std structs): largest alignment first.
 fn reordered_layout(fields: &[(usize, usize)]) -> (usize, usize) {
@@ -1021,6 +1051,45 @@ impl<'ast, 'src> Visit<'ast> for StructVisitor<'src> {
 }
 
 impl StructVisitor<'_> {
+    /// Tag width needed by explicit discriminant values (`A = 1000` → 2 bytes),
+    /// or `None` when no variant has one.
+    fn discriminant_bytes(&self, node: &ItemEnum) -> Option<usize> {
+        if node.variants.iter().all(|v| v.discriminant.is_none()) {
+            return None;
+        }
+        let lookup = |id: &str| self.ctx.consts.get(id).cloned();
+        let sizeof = |_: &str| None;
+        let env = super::consteval::Env {
+            lookup: &lookup,
+            sizeof: &sizeof,
+        };
+        let (mut next, mut min, mut max) = (0i64, 0i64, 0i64);
+        for v in &node.variants {
+            if let Some((_, e)) = &v.discriminant {
+                next = super::consteval::eval(&expr_text(e), &env, 0)?;
+            }
+            min = min.min(next);
+            max = max.max(next);
+            next += 1;
+        }
+        let fits = |bits: u32| {
+            if min < 0 {
+                min >= -(1i64 << (bits - 1)) && max < (1i64 << (bits - 1))
+            } else {
+                (max as u64) < (1u64 << bits)
+            }
+        };
+        Some(if fits(8) {
+            1
+        } else if fits(16) {
+            2
+        } else if fits(32) {
+            4
+        } else {
+            8
+        })
+    }
+
     /// Lay out a generic struct once per concrete instantiation found in the file,
     /// configured, or found in other files (`Name<args>` layouts). Skipped when
     /// there is none.
@@ -1212,7 +1281,11 @@ impl StructVisitor<'_> {
         // Discriminant size: an explicit `#[repr(u8/u16/u32/u64/C)]` wins; otherwise
         // the smallest integer that fits the variant count (what rustc picks).
         let explicit_repr = enum_repr_size(&node.attrs, self.ctx.arch);
+        // Explicit discriminant values (`A = 1000`) widen the tag.
+        let value_bytes = self.discriminant_bytes(node);
         let disc_size: usize = if let Some(n) = explicit_repr {
+            n
+        } else if let Some(n) = value_bytes {
             n
         } else if n_variants == 1
             && node
@@ -1308,6 +1381,64 @@ impl StructVisitor<'_> {
                 }
                 max_payload_align = max_payload_align.max(var_layout.align);
             }
+        }
+
+        // Niche filling: one variant with data, the rest without, and a payload
+        // field with spare bit patterns for them (`Option<Box<T>>`-like) — the
+        // tag lives inside the payload and the enum is the payload's size.
+        let dataful: Vec<&syn::Variant> = node
+            .variants
+            .iter()
+            .filter(|v| !matches!(v.fields, Fields::Unit))
+            .collect();
+        let units = node.variants.len() - dataful.len();
+        if explicit_repr.is_none()
+            && let [only] = dataful.as_slice()
+            && only
+                .fields
+                .iter()
+                .map(|f| niche_capacity(&f.ty, &self.ctx))
+                .max()
+                .unwrap_or(0)
+                >= units as u64
+        {
+            let enum_line = node.ident.span().start().line as u32;
+            let size = max_payload_size.next_multiple_of(max_payload_align.max(1));
+            self.layouts.push(StructLayout {
+                name,
+                total_size: size,
+                align: max_payload_align.max(1),
+                fields: vec![Field {
+                    name: "__payload".to_string(),
+                    ty: TypeInfo::Opaque {
+                        name: format!("payload with niche-encoded tag ({max_payload_size}B)"),
+                        size: max_payload_size,
+                        align: max_payload_align.max(1),
+                    },
+                    offset: 0,
+                    size: max_payload_size,
+                    align: max_payload_align.max(1),
+                    source_file: None,
+                    source_line: None,
+                    access: AccessPattern::Unknown,
+                }],
+                source_file: None,
+                source_line: Some(enum_line),
+                arch: self.ctx.arch,
+                is_packed: false,
+                is_union: false,
+                is_repr_rust: is_repr_rust(&node.attrs),
+                suppressed_findings: super::suppress::suppressed_from_source_line(
+                    self.source,
+                    enum_line,
+                ),
+                uncertain_fields: Vec::new(),
+                forced_align: None,
+                pack_limit: None,
+                cpp: None,
+                explicit_align: Vec::new(),
+            });
+            return;
         }
 
         // Conservative model: payload first at offset 0, discriminant immediately after.

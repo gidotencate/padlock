@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.57.0] — 2026-10-23
+
+### Fixed
+- **`padlock-lsp` ignored the new parse settings in `.padlock.toml`** (`defines`, `declared_order`, `[instantiate]`), so the editor could show a different layout than the CLI for the same file.
+
 ## [0.56.0] — 2026-10-23
 
 ### Fixed

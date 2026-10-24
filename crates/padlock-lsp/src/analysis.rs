@@ -23,6 +23,16 @@ pub fn analyze_text(
     arch: &'static ArchConfig,
     config: &Config,
 ) -> Report {
+    // Parse settings from `.padlock.toml`, as the CLI applies them.
+    padlock_source::set_preprocessor_defines(&config.defines);
+    padlock_source::set_declared_order(config.declared_order);
+    padlock_source::set_configured_instantiations(
+        config
+            .instantiate
+            .iter()
+            .map(|(name, args)| (name.clone(), padlock_source::split_type_args(args)))
+            .collect(),
+    );
     let layouts = match padlock_source::parse_source_str(text, lang, arch) {
         Ok(layouts) => layouts,
         Err(_) => return Report::from_layouts(&[]),
@@ -92,5 +102,20 @@ mod tests {
                 .all(|f| matches!(f.severity(), Severity::High)),
             "only High findings survive the filter"
         );
+    }
+
+    #[test]
+    fn config_defines_select_ifdef_branches() {
+        let src = "struct S {\n char a;\n#ifdef WIDE\n long w;\n#endif\n};\n";
+        let plain = analyze_text(src, &SourceLanguage::C, &X86_64_SYSV, &Config::default());
+        assert_eq!(plain.structs[0].total_size, 1);
+        let cfg = Config {
+            defines: vec!["WIDE".to_string()],
+            ..Config::default()
+        };
+        let wide = analyze_text(src, &SourceLanguage::C, &X86_64_SYSV, &cfg);
+        assert_eq!(wide.structs[0].total_size, 16);
+        // Reset the process-global setting for other tests.
+        analyze_text(src, &SourceLanguage::C, &X86_64_SYSV, &Config::default());
     }
 }

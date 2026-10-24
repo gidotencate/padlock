@@ -2,6 +2,14 @@
 
 All notable changes to padlock are documented here.
 
+## [0.58.0] — 2026-10-25
+
+### Fixed
+- **`padlock-lsp` analysis could race on its parse settings**: `analyze_text` sets the preprocessor defines, declared-order flag and configured instantiations process-wide, so two concurrent calls (seen in parallel tests) could parse with each other's settings. The settings are now held under a lock for the whole parse.
+
+### Changed
+- The integration tests that build with the host `gcc`/`g++` (DWARF input variants, `verify`, `--compile-commands`) now run on Linux only: they assume ELF output and an 8-byte `long`, which MinGW (LLP64, `.exe` output) and macOS (`gcc` is clang, DWARF left in the object files) do not give.
+
 ## [0.57.0] — 2026-10-23
 
 ### Fixed

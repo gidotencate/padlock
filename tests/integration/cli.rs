@@ -619,7 +619,10 @@ fn rust_go_zig_generics_are_instantiated_from_uses() {
 }
 
 // ── DWARF input variants (need gcc; skipped when it is missing) ──────────────
+// Linux only: they expect ELF output and LP64 `long` (MinGW is LLP64 and
+// writes `t.exe`; macOS `gcc` is clang and keeps DWARF in the object files).
 
+#[cfg(target_os = "linux")]
 fn gcc_build(dir: &Path, flags: &[&str]) -> Option<std::path::PathBuf> {
     let src = dir.join("t.c");
     std::fs::write(
@@ -650,6 +653,7 @@ fn struct_size(json: &[u8], name: &str) -> Option<u64> {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn dwarf_type_units_split_dwarf_and_compression_are_read() {
     for flags in [
         &["-g"][..],
@@ -683,6 +687,7 @@ fn dwarf_type_units_split_dwarf_and_compression_are_read() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn verify_agrees_with_gcc_and_reports_mismatches() {
     let dir = tempfile::TempDir::new().unwrap();
     let src = dir.path().join("v.c");
@@ -751,6 +756,7 @@ fn target_flag_lays_sources_out_for_that_target() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn compile_commands_gives_compiler_exact_layouts() {
     if std::process::Command::new("g++")
         .arg("--version")

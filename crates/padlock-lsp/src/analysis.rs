@@ -23,6 +23,12 @@ pub fn analyze_text(
     arch: &'static ArchConfig,
     config: &Config,
 ) -> Report {
+    // The parse settings below are process-global; hold this lock until the
+    // parse is done so concurrent callers (parallel tests) can't swap them
+    // out from under each other.
+    static PARSE_SETTINGS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = PARSE_SETTINGS.lock().unwrap_or_else(|e| e.into_inner());
+
     // Parse settings from `.padlock.toml`, as the CLI applies them.
     padlock_source::set_preprocessor_defines(&config.defines);
     padlock_source::set_declared_order(config.declared_order);

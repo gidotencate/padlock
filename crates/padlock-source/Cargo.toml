@@ -24,3 +24,4 @@ similar         = "3"
 
 [dev-dependencies]
 padlock-core = { workspace = true, features = ["test-helpers"] }
+tempfile = "3"

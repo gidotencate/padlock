@@ -5,7 +5,7 @@
 
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Parser};
 
@@ -16,6 +16,9 @@ thread_local! {
     /// Anonymous struct types laid out while parsing the current file (sized by
     /// the nested-struct resolver, then hidden — see `c_cpp::ANON_PREFIX`).
     static PENDING_ANON: RefCell<Vec<StructLayout>> = const { RefCell::new(Vec::new()) };
+    /// Distinguishes the anonymous-struct names of the files of one package,
+    /// which are resolved together (0 = a lone file).
+    static ANON_SALT: Cell<usize> = const { Cell::new(0) };
     static PARSER: RefCell<Parser> = RefCell::new({
         let mut p = Parser::new();
         p.set_language(&tree_sitter_go::LANGUAGE.into())
@@ -225,7 +228,7 @@ fn is_known_external_go_type(ty: &str) -> bool {
 /// What a single walk over the file learns about its own declarations, so field
 /// types can be sized without a type checker.
 #[derive(Clone)]
-struct GoCtx {
+pub(crate) struct GoCtx {
     arch: &'static ArchConfig,
     /// `type X interface { … }` — a two-word fat pointer.
     interfaces: HashSet<String>,
@@ -239,6 +242,46 @@ struct GoCtx {
     generics: HashMap<String, Vec<String>>,
     /// Concrete uses `Name[args]` anywhere in the file.
     uses: Vec<(String, Vec<String>)>,
+}
+
+impl GoCtx {
+    fn declares(&self, name: &str) -> bool {
+        self.interfaces.contains(name)
+            || self.structs.contains(name)
+            || self.aliases.contains_key(name)
+            || self.consts.contains_key(name)
+            || self.generics.contains_key(name)
+    }
+
+    /// Add the declarations of another file of the same package; a name this
+    /// file declares itself wins.
+    pub(crate) fn absorb(&mut self, other: &GoCtx) {
+        for n in &other.interfaces {
+            if !self.declares(n) {
+                self.interfaces.insert(n.clone());
+            }
+        }
+        for n in &other.structs {
+            if !self.declares(n) {
+                self.structs.insert(n.clone());
+            }
+        }
+        for (n, v) in &other.aliases {
+            if !self.declares(n) {
+                self.aliases.insert(n.clone(), v.clone());
+            }
+        }
+        for (n, v) in &other.consts {
+            if !self.declares(n) {
+                self.consts.insert(n.clone(), v.clone());
+            }
+        }
+        for (n, v) in &other.generics {
+            if !self.declares(n) {
+                self.generics.insert(n.clone(), v.clone());
+            }
+        }
+    }
 }
 
 /// Result of sizing one field type.
@@ -521,12 +564,44 @@ fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
     // uncertain so the output layer can warn the user.
     // Exception: types in `is_known_external_go_type` have hardcoded accurate
     // sizes in `go_type_size_align` and must not be marked uncertain.
-    let uncertain =
-        !base.starts_with('*') && base.contains('.') && !is_known_external_go_type(base);
+    let uncertain = (!base.starts_with('*') && base.contains('.') && !is_known_external_go_type(base))
+        // A bare name that is neither predeclared nor declared in the package
+        // (e.g. a type from a file excluded by build constraints).
+        || (base.chars().all(|c| c.is_alphanumeric() || c == '_') && !is_predeclared_go_type(base));
     Sized {
         uncertain,
         ..plain(size, align)
     }
+}
+
+/// Go's predeclared type names.
+fn is_predeclared_go_type(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "byte"
+            | "rune"
+            | "string"
+            | "error"
+            | "any"
+            | "comparable"
+            | "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "uint"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "uintptr"
+            | "float32"
+            | "float64"
+            | "complex64"
+            | "complex128"
+            | "func"
+    )
 }
 
 /// Follow `type A B` aliases to the final bare type name.
@@ -544,9 +619,13 @@ fn resolve_alias_chain(ty: &str, ctx: &GoCtx) -> String {
 // ── tree-sitter walker ────────────────────────────────────────────────────────
 
 fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> Vec<StructLayout> {
-    PENDING_ANON.with(|p| p.borrow_mut().clear());
     // Phase 1: learn the file's own interfaces, structs, aliases and constants.
     let ctx = collect_go_declarations(source, root, arch);
+    extract_structs_with(source, root, &ctx)
+}
+
+fn extract_structs_with(source: &str, root: Node<'_>, ctx: &GoCtx) -> Vec<StructLayout> {
+    PENDING_ANON.with(|p| p.borrow_mut().clear());
 
     let mut layouts = Vec::new();
     let mut stack = vec![root];
@@ -561,7 +640,7 @@ fn extract_structs(source: &str, root: Node<'_>, arch: &'static ArchConfig) -> V
         // type_declaration → type_spec(s) → struct_type. A grouped
         // `type ( A struct{…}; B struct{…} )` holds several specs.
         if node.kind() == "type_declaration" {
-            layouts.extend(parse_type_declaration(source, node, &ctx));
+            layouts.extend(parse_type_declaration(source, node, ctx));
         }
     }
     layouts.extend(PENDING_ANON.with(|p| std::mem::take(&mut *p.borrow_mut())));
@@ -895,7 +974,14 @@ fn type_text_with_anon(source: &str, t: Node<'_>, ctx: &GoCtx) -> String {
             continue;
         }
         let (fields, size, align, uncertain) = simulate_go_layout(raw, ctx);
-        let name = format!("{}struct#{}", super::c_cpp::ANON_PREFIX, n.start_byte());
+        let name = match ANON_SALT.with(Cell::get) {
+            0 => format!("{}struct#{}", super::c_cpp::ANON_PREFIX, n.start_byte()),
+            salt => format!(
+                "{}struct#{salt}_{}",
+                super::c_cpp::ANON_PREFIX,
+                n.start_byte()
+            ),
+        };
         PENDING_ANON.with(|p| {
             p.borrow_mut().push(StructLayout {
                 name: name.clone(),
@@ -994,6 +1080,70 @@ pub fn parse_go(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<S
         .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter-go failed to parse source"))?;
     Ok(extract_structs(source, tree.root_node(), arch))
+}
+
+/// `package` clause name of a Go source text (a text scan: the clause is the
+/// first token after comments, and a full parse just for it is costly).
+pub(crate) fn package_clause(source: &str) -> Option<String> {
+    let mut rest = source;
+    loop {
+        rest = rest.trim_start();
+        if let Some(r) = rest.strip_prefix("//") {
+            rest = r.split_once('\n').map_or("", |(_, r)| r);
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            rest = r.split_once("*/")?.1;
+        } else {
+            break;
+        }
+    }
+    let name = rest.strip_prefix("package")?;
+    if !name.starts_with(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    let name: String = name
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The declarations of one file, as the other files of its package see them,
+/// plus its syntax tree for [`parse_go_in_package`].
+pub(crate) fn file_declarations(
+    source: &str,
+    arch: &'static ArchConfig,
+) -> Option<(GoCtx, tree_sitter::Tree)> {
+    let tree = PARSER.with(|p| p.borrow_mut().parse(source, None))?;
+    let ctx = collect_go_declarations(source, tree.root_node(), arch);
+    Some((ctx, tree))
+}
+
+/// Parse one file of a package: its own declarations plus `package`'s (the
+/// other files'). `salt` keeps anonymous-struct names unique in the package;
+/// `parsed` reuses the file's tree and declarations when already known.
+pub(crate) fn parse_go_in_package(
+    source: &str,
+    arch: &'static ArchConfig,
+    package: &GoCtx,
+    salt: usize,
+    parsed: Option<&(GoCtx, tree_sitter::Tree)>,
+) -> anyhow::Result<Vec<StructLayout>> {
+    let fresh;
+    let (own, tree) = match parsed {
+        Some((ctx, tree)) => (ctx, tree),
+        None => {
+            fresh = file_declarations(source, arch)
+                .ok_or_else(|| anyhow::anyhow!("tree-sitter-go failed to parse source"))?;
+            (&fresh.0, &fresh.1)
+        }
+    };
+    let mut ctx = own.clone();
+    ctx.absorb(package);
+    ANON_SALT.with(|s| s.set(salt));
+    let layouts = extract_structs_with(source, tree.root_node(), &ctx);
+    ANON_SALT.with(|s| s.set(0));
+    Ok(layouts)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

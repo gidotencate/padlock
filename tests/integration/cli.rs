@@ -959,3 +959,35 @@ fn perf_data_types_mark_measured_hot_fields() {
         String::from_utf8_lossy(&measured.stdout)
     );
 }
+
+#[test]
+fn go_types_from_sibling_files_are_sized_and_cached_per_package() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let geom = dir.path().join("geom.go");
+    std::fs::write(
+        &geom,
+        "package image\n\ntype Rect struct{ A, B, C, D int }\n",
+    )
+    .unwrap();
+    let file = dir.path().join("image.go");
+    std::fs::write(
+        &file,
+        "package image\n\ntype RGBA struct {\n\tPix []uint8\n\tR   Rect\n}\n",
+    )
+    .unwrap();
+    let size = || {
+        let out = padlock()
+            .args(["analyze", "--json", "--target", "x86_64"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["structs"][0]["total_size"].as_u64().unwrap()
+    };
+    // []uint8 (24) + Rect from geom.go (32).
+    assert_eq!(size(), 56);
+    // Editing only the sibling must invalidate the cached result for image.go.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&geom, "package image\n\ntype Rect struct{ A, B int }\n").unwrap();
+    assert_eq!(size(), 40);
+}

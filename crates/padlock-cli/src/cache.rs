@@ -164,6 +164,54 @@ impl ParseCache {
 }
 
 fn file_mtime(path: &Path) -> Option<u64> {
+    let own = mtime_secs(path)?;
+    // A Go file is laid out with the other files of its package, so an edit,
+    // addition or removal of a sibling `.go` file invalidates it too.
+    if path.extension().is_some_and(|e| e == "go")
+        && let Some(dir) = path.parent()
+    {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        return Some(own.max(go_dir_mtime(dir)));
+    }
+    Some(own)
+}
+
+/// Newest mtime among a directory and its `.go` files. Memoized for a second:
+/// every file of a package asks for the same directory, and listing it per
+/// file is quadratic in the package size.
+fn go_dir_mtime(dir: &Path) -> u64 {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{Duration, Instant};
+    static MEMO: LazyLock<Mutex<HashMap<PathBuf, (u64, Instant)>>> =
+        LazyLock::new(Default::default);
+    if let Ok(memo) = MEMO.lock()
+        && let Some((t, at)) = memo.get(dir)
+        && at.elapsed() < Duration::from_secs(1)
+    {
+        return *t;
+    }
+    let newest = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "go"))
+        .filter_map(|p| mtime_secs(&p))
+        .chain(mtime_secs(dir))
+        .max()
+        .unwrap_or(0);
+    if let Ok(mut memo) = MEMO.lock() {
+        memo.insert(dir.to_path_buf(), (newest, Instant::now()));
+    }
+    newest
+}
+
+fn mtime_secs(path: &Path) -> Option<u64> {
     path.metadata()
         .ok()?
         .modified()

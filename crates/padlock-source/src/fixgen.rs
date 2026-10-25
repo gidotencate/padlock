@@ -112,6 +112,7 @@ pub fn extract_rust_field_chunks(body: &str) -> Vec<(String, String)> {
     let mut result: Vec<(String, String)> = Vec::new();
     let mut depth: i32 = 0; // tracks < ( [ nesting within a field declaration
     let mut chunk_start = 0usize;
+    let mut last_code_end = 0usize; // end of the last non-comment, non-space byte
     let bytes = body.as_bytes();
     let mut i = 0usize;
 
@@ -145,45 +146,109 @@ pub fn extract_rust_field_chunks(body: &str) -> Vec<(String, String)> {
                     }
                     i += 1;
                 }
+                last_code_end = i;
             }
             b'<' | b'(' | b'[' => {
                 depth += 1;
                 i += 1;
+                last_code_end = i;
             }
             b'>' | b')' | b']' => {
                 depth = (depth - 1).max(0);
                 i += 1;
+                last_code_end = i;
             }
             // Curly braces (e.g. struct default field values, closure syntax):
             // just skip past them; they don't appear in normal struct bodies
             b'{' | b'}' => {
                 i += 1;
+                last_code_end = i;
             }
             b',' if depth == 0 => {
                 i += 1; // include the comma in the chunk
+                i = trailing_comment_end(body, i); // …and a comment trailing it
                 let chunk = &body[chunk_start..i];
                 if let Some(name) = rust_field_name_from_chunk(chunk) {
                     result.push((name, chunk.to_string()));
+                } else if let Some(last) = result.last_mut() {
+                    // Comments with no field: keep them, after the previous one.
+                    last.1.push_str(chunk.trim_end());
                 }
                 chunk_start = i;
+                last_code_end = i;
             }
-            _ => {
+            c => {
+                if !c.is_ascii_whitespace() {
+                    last_code_end = i + 1;
+                }
                 i += 1;
             }
         }
     }
 
-    // Handle last field (may not have trailing comma)
-    let tail = body[chunk_start..].trim();
-    if !tail.is_empty() {
-        // Use the full slice (including leading whitespace) for the chunk
-        let chunk = &body[chunk_start..];
-        if let Some(name) = rust_field_name_from_chunk(chunk) {
-            result.push((name, chunk.to_string()));
+    push_unterminated_tail(&mut result, body, chunk_start, last_code_end, ',', |c| {
+        rust_field_name_from_chunk(c)
+    });
+    result
+}
+
+/// The part of a struct body after the last terminator: a final field written
+/// without its terminator (Rust/Zig allow that) gets one, so it can move
+/// anywhere; comments with no field stay with the previous field.
+fn push_unterminated_tail(
+    result: &mut Vec<(String, String)>,
+    body: &str,
+    chunk_start: usize,
+    last_code_end: usize,
+    terminator: char,
+    name_of: impl Fn(&str) -> Option<String>,
+) {
+    let tail = &body[chunk_start..];
+    if tail.trim().is_empty() {
+        return;
+    }
+    let code_end = last_code_end.max(chunk_start).min(body.len());
+    let mut chunk = String::with_capacity(tail.len() + 1);
+    chunk.push_str(&body[chunk_start..code_end]);
+    if let Some(name) = name_of(&chunk) {
+        if !chunk.trim_end().ends_with(terminator) {
+            chunk.push(terminator);
+        }
+        chunk.push_str(body[code_end..].trim_end());
+        result.push((name, chunk));
+    } else if let Some(last) = result.last_mut() {
+        last.1.push_str(tail.trim_end());
+    }
+}
+
+/// End (exclusive) of a comment that trails a field on the same line, starting
+/// the search at `i` (just past the field's `,` or `;`): `// …` to the end of
+/// the line, or `/* … */` that closes on the line, possibly followed by more.
+/// Returns `i` when no comment follows. The comment belongs to the field it
+/// trails, so it must travel with it when fields are reordered.
+fn trailing_comment_end(body: &str, i: usize) -> usize {
+    let b = body.as_bytes();
+    let mut j = i;
+    while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+        j += 1;
+    }
+    if j + 1 < b.len() && b[j] == b'/' && b[j + 1] == b'/' {
+        while j < b.len() && b[j] != b'\n' {
+            j += 1;
+        }
+        return j;
+    }
+    if j + 1 < b.len()
+        && b[j] == b'/'
+        && b[j + 1] == b'*'
+        && let Some(close) = body[j + 2..].find("*/")
+    {
+        let end = j + 2 + close + 2;
+        if !body[j..end].contains('\n') {
+            return trailing_comment_end(body, end).max(end);
         }
     }
-
-    result
+    i
 }
 
 /// Extract the field name from a Rust field chunk.
@@ -304,6 +369,7 @@ fn extract_c_chunks_typed(body: &str) -> Vec<CChunk> {
             }
             b';' if depth == 0 => {
                 i += 1;
+                i = trailing_comment_end(body, i); // a comment trailing the field
                 let chunk = &body[chunk_start..i];
                 if !chunk.trim().is_empty() {
                     if let Some(name) = c_field_name_from_chunk(chunk) {
@@ -324,6 +390,11 @@ fn extract_c_chunks_typed(body: &str) -> Vec<CChunk> {
             }
         }
     }
+    // Comments after the last field stay where they were (as passthrough text).
+    let tail = &body[chunk_start..];
+    if !tail.trim().is_empty() {
+        result.push(CChunk::Passthrough(tail.trim_end().to_string()));
+    }
     result
 }
 
@@ -340,17 +411,52 @@ pub fn extract_c_field_chunks(body: &str) -> Vec<(String, String)> {
 /// Extract a C/C++ field name from a chunk (everything up to and including `;`).
 /// The field name is the last identifier before the `;`, stripping pointer
 /// declarators and array declarators.
+/// `text` without its `// …` and `/* … */` comments (string and character
+/// literals are left alone); lines are joined with spaces.
+fn strip_c_comments(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+            out.push(' ');
+        } else if b[i] == b'"' || b[i] == b'\'' {
+            let q = b[i];
+            let start = i;
+            i += 1;
+            while i < b.len() && b[i] != q {
+                if b[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i = (i + 1).min(b.len());
+            out.push_str(&text[start..i]);
+        } else {
+            let ch = text[i..].chars().next().unwrap_or(' ');
+            out.push(if ch == '\n' { ' ' } else { ch });
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
 fn c_field_name_from_chunk(chunk: &str) -> Option<String> {
-    // Strip comments to get just the code text
-    let code: String = chunk
-        .lines()
-        .filter(|l| !l.trim().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Strip comments (`// …`, `/* … */`, wherever they sit) to get the code.
+    let code = strip_c_comments(chunk);
 
     // Tokenise by whitespace and punctuation; look for the last identifier-like
     // token before `;`, skipping keywords and type names
-    let stripped = code.trim_end_matches(';').trim();
+    let stripped = code.trim().trim_end_matches(';').trim();
     // Strip array declarator: `field[N]` → `field`
     let stripped = if let Some(bracket) = stripped.rfind('[') {
         stripped[..bracket].trim()
@@ -422,17 +528,46 @@ fn is_c_keyword(s: &str) -> bool {
 }
 
 /// Split a Go struct body (text between `{` and `}`, exclusive) into
-/// field chunks, one per non-blank non-comment line.
+/// field chunks, one per field line. A chunk also carries the comment lines
+/// directly above the field (they describe it); a comment after the last field
+/// stays with it. The line's own trailing `// comment` is part of the line.
 pub fn extract_go_field_chunks(body: &str) -> Vec<(String, String)> {
     let mut result: Vec<(String, String)> = Vec::new();
+    let mut pending = String::new();
+    let mut in_block = false;
     for line in body.lines() {
         let s = line.trim();
-        if s.is_empty() || s.starts_with("//") {
+        if in_block {
+            pending.push_str(line);
+            pending.push('\n');
+            if s.contains("*/") {
+                in_block = false;
+            }
+            continue;
+        }
+        if s.is_empty() {
+            continue;
+        }
+        if s.starts_with("//") {
+            pending.push_str(line);
+            pending.push('\n');
+            continue;
+        }
+        if s.starts_with("/*") {
+            pending.push_str(line);
+            pending.push('\n');
+            in_block = !s.contains("*/");
             continue;
         }
         if let Some(name) = go_field_name_from_line(s) {
-            result.push((name, format!("{line}\n")));
+            result.push((name, format!("{pending}{line}\n")));
+            pending.clear();
         }
+    }
+    if !pending.is_empty()
+        && let Some(last) = result.last_mut()
+    {
+        last.1.push_str(&pending);
     }
     result
 }
@@ -467,6 +602,7 @@ pub fn extract_zig_field_chunks(body: &str) -> Vec<(String, String)> {
     let mut result: Vec<(String, String)> = Vec::new();
     let mut depth: i32 = 0;
     let mut chunk_start = 0usize;
+    let mut last_code_end = 0usize;
     let bytes = body.as_bytes();
     let mut i = 0usize;
 
@@ -490,38 +626,45 @@ pub fn extract_zig_field_chunks(body: &str) -> Vec<(String, String)> {
                     }
                     i += 1;
                 }
+                last_code_end = i;
             }
             b'<' | b'(' | b'[' => {
                 depth += 1;
                 i += 1;
+                last_code_end = i;
             }
             b'>' | b')' | b']' => {
                 depth = (depth - 1).max(0);
                 i += 1;
+                last_code_end = i;
             }
             b'{' | b'}' => {
                 i += 1;
+                last_code_end = i;
             }
             b',' if depth == 0 => {
                 i += 1;
+                i = trailing_comment_end(body, i);
                 let chunk = &body[chunk_start..i];
                 if let Some(name) = zig_field_name_from_chunk(chunk) {
                     result.push((name, chunk.to_string()));
+                } else if let Some(last) = result.last_mut() {
+                    last.1.push_str(chunk.trim_end());
                 }
                 chunk_start = i;
+                last_code_end = i;
             }
-            _ => {
+            c => {
+                if !c.is_ascii_whitespace() {
+                    last_code_end = i + 1;
+                }
                 i += 1;
             }
         }
     }
-    let tail = body[chunk_start..].trim();
-    if !tail.is_empty() {
-        let chunk = &body[chunk_start..];
-        if let Some(name) = zig_field_name_from_chunk(chunk) {
-            result.push((name, chunk.to_string()));
-        }
-    }
+    push_unterminated_tail(&mut result, body, chunk_start, last_code_end, ',', |c| {
+        zig_field_name_from_chunk(c)
+    });
     result
 }
 
@@ -822,11 +965,10 @@ fn try_source_aware_go(layout: &StructLayout, struct_source: &str) -> Option<Str
         return None;
     }
 
+    // Go chunks are whole lines, so the first field starts on a fresh line.
     let header = &struct_source[..=brace_open];
     let mut result = header.to_string();
-    if !body.starts_with('\n') {
-        result.push('\n');
-    }
+    result.push('\n');
     for field in &optimal {
         result.push_str(chunk_map[field.name.as_str()]);
     }
@@ -1165,7 +1307,141 @@ fn field_type_name(field: &padlock_core::ir::Field) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use padlock_core::arch::X86_64_SYSV;
     use padlock_core::ir::test_fixtures::connection_layout;
+
+    /// Fix every struct of `src` and return the rewritten source.
+    fn fixed(src: &str, lang: crate::SourceLanguage) -> String {
+        let layouts = crate::parse_source_str(src, &lang, &X86_64_SYSV).unwrap();
+        let refs: Vec<&StructLayout> = layouts.iter().collect();
+        match lang {
+            crate::SourceLanguage::C | crate::SourceLanguage::Cpp => apply_fixes_c(src, &refs),
+            crate::SourceLanguage::Rust => apply_fixes_rust(src, &refs),
+            crate::SourceLanguage::Go => apply_fixes_go(src, &refs),
+            crate::SourceLanguage::Zig => apply_fixes_zig(src, &refs),
+        }
+    }
+
+    /// The line of `out` holding `needle`.
+    fn line_with<'a>(out: &'a str, needle: &str) -> &'a str {
+        out.lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("`{needle}` missing from:\n{out}"))
+    }
+
+    /// Every comment appears once, and each trailing comment is still on its
+    /// field's line.
+    fn assert_comments_travel(out: &str, pairs: &[(&str, &str)], loose: &[&str]) {
+        for (field, comment) in pairs {
+            assert_eq!(out.matches(comment).count(), 1, "{comment} in:\n{out}");
+            assert!(
+                line_with(out, comment).contains(field),
+                "`{comment}` is not on the line of `{field}`:\n{out}"
+            );
+        }
+        for comment in loose {
+            assert_eq!(out.matches(comment).count(), 1, "{comment} in:\n{out}");
+        }
+    }
+
+    #[test]
+    fn c_fix_keeps_comments_with_their_fields() {
+        let src = "struct conn {\n    char state;              // connection state\n    unsigned long long id;   /* the id */\n    short port;\n    // guards the counters\n    int mu;\n    char flags;              // flags\n    // end note\n};\n";
+        let out = fixed(src, crate::SourceLanguage::C);
+        assert!(
+            out.find("id;").unwrap() < out.find("state;").unwrap(),
+            "{out}"
+        );
+        assert_comments_travel(
+            &out,
+            &[
+                ("state", "// connection state"),
+                ("id", "/* the id */"),
+                ("flags", "// flags"),
+            ],
+            &["// guards the counters", "// end note"],
+        );
+        // The comment above `mu` still sits directly above it.
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines.iter().position(|l| l.contains("// guards")).unwrap();
+        assert!(lines[at + 1].contains("mu;"), "{out}");
+    }
+
+    #[test]
+    fn rust_fix_keeps_comments_and_adds_a_missing_trailing_comma() {
+        let src = "#[repr(C)]\npub struct Conn {\n    pub state: u8,       // connection state\n    /// The connection id.\n    pub id: u64,\n    pub port: u16, // listening port\n    pub flags: u8 // no trailing comma\n}\n";
+        let out = fixed(src, crate::SourceLanguage::Rust);
+        assert!(
+            !out.contains("{       //"),
+            "comment glued to the brace:\n{out}"
+        );
+        assert_comments_travel(
+            &out,
+            &[
+                ("state", "// connection state"),
+                ("port", "// listening port"),
+                ("flags", "// no trailing comma"),
+            ],
+            &["/// The connection id."],
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("/// The connection id."))
+            .unwrap();
+        assert!(lines[at + 1].contains("pub id: u64,"), "{out}");
+        // `flags` was last and unterminated; wherever it lands it has a comma.
+        assert!(line_with(&out, "pub flags").contains("u8,"), "{out}");
+    }
+
+    #[test]
+    fn go_fix_keeps_comment_lines_and_starts_on_a_new_line() {
+        let src = "package p\n\ntype Conn struct {\n\tstate byte // connection state\n\t// the id\n\tid   uint64 `json:\"id\"`\n\tport uint16 // listening port\n}\n";
+        let out = fixed(src, crate::SourceLanguage::Go);
+        assert!(out.contains("type Conn struct {\n"), "{out}");
+        assert_comments_travel(
+            &out,
+            &[
+                ("state", "// connection state"),
+                ("port", "// listening port"),
+            ],
+            &["// the id"],
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines.iter().position(|l| l.contains("// the id")).unwrap();
+        assert!(lines[at + 1].contains("id "), "{out}");
+    }
+
+    #[test]
+    fn zig_fix_keeps_comments_and_terminates_the_last_field() {
+        let src = "const Conn = extern struct {\n    state: u8, // connection state\n    /// The id.\n    id: u64,\n    port: u16 // no trailing comma\n};\n";
+        let out = fixed(src, crate::SourceLanguage::Zig);
+        assert_comments_travel(
+            &out,
+            &[
+                ("state", "// connection state"),
+                ("port", "// no trailing comma"),
+            ],
+            &["/// The id."],
+        );
+        assert!(line_with(&out, "port").contains("u16,"), "{out}");
+    }
+
+    #[test]
+    fn c_comment_stripper_handles_trailing_and_block_comments() {
+        assert_eq!(
+            c_field_name_from_chunk("\n  unsigned long long id;   /* the id */").as_deref(),
+            Some("id")
+        );
+        assert_eq!(
+            c_field_name_from_chunk("\n  char state; // connection state").as_deref(),
+            Some("state")
+        );
+        assert_eq!(
+            c_field_name_from_chunk("\n  // note\n  const char *s; /* c; d */").as_deref(),
+            Some("s")
+        );
+    }
 
     #[test]
     fn c_fix_starts_with_struct() {

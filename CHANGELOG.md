@@ -2,6 +2,13 @@
 
 All notable changes to padlock are documented here.
 
+## [0.67.0] — 2026-10-25
+
+### Fixed
+- **`padlock fix` detached comments from their fields.** A comment after a field on the same line (`char state; // connection state`) was taken for the *next* field's, so after reordering it described the wrong one; in Rust a comment after the last field was deleted outright and another ended up glued to the struct's opening brace; in Go the first field landed on the `struct {` line and standalone comment lines above a field were dropped. Trailing comments (`// …` and one-line `/* … */`) now travel with their field in C, C++, Rust and Zig, Go keeps the comment lines above a field with it, and a comment after the last field is kept.
+- A last field written without its terminator (Rust and Zig allow that) gets a comma when it moves, instead of producing invalid code.
+- C/C++ field names were misread when a field carried a trailing comment, which made `fix` fall back to a regenerated struct that dropped every comment.
+
 ## [0.66.0] — 2026-10-25
 
 ### Fixed

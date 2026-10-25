@@ -188,7 +188,8 @@ pub(crate) fn predefined(arch: &ArchConfig) -> Macros {
             }
         }
         "riscv64" => {
-            for k in ["__riscv", "__LP64__", "_LP64"] {
+            // Linux on RISC-V uses the lp64d ABI.
+            for k in ["__riscv", "__LP64__", "_LP64", "__riscv_float_abi_double"] {
                 flags.push(k);
             }
         }
@@ -234,6 +235,7 @@ pub(crate) fn predefined(arch: &ArchConfig) -> Macros {
     }
     if arch.name == "riscv64" {
         m.insert("__riscv_xlen".into(), object("64"));
+        m.insert("__riscv_flen".into(), object("64"));
     }
     m
 }

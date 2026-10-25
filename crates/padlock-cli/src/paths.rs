@@ -155,6 +155,19 @@ pub fn collect_layouts(
             go_dirs
                 .into_par_iter()
                 .for_each(|d| padlock_source::prepare_go_packages(d, arch));
+            // …and Rust files per crate.
+            let mut crates: std::collections::BTreeMap<PathBuf, &PathBuf> = Default::default();
+            for f in misses
+                .iter()
+                .filter(|f| f.extension().is_some_and(|e| e == "rs"))
+            {
+                if let Some(root) = padlock_source::rust_crate_root(f) {
+                    crates.entry(root).or_insert(f);
+                }
+            }
+            crates
+                .into_par_iter()
+                .for_each(|(_, f)| padlock_source::prepare_rust_crate(f, arch));
 
             // A C/C++ header is laid out in the context of the file that
             // includes it (an umbrella header's macros, say), so files that no

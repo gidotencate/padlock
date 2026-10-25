@@ -344,6 +344,10 @@ fn collect_go_declarations(source: &str, root: Node<'_>, arch: &'static ArchConf
                     "interface_type" => {
                         ctx.interfaces.insert(name);
                     }
+                    // `type noCopy struct{}`: zero-sized, never a layout of its own.
+                    "struct_type" if !has_fields(ty) => {
+                        ctx.aliases.insert(name, "struct{}".to_string());
+                    }
                     "struct_type" => {
                         ctx.structs.insert(name);
                     }
@@ -474,7 +478,18 @@ fn eval_go_const(expr: &str, ctx: &GoCtx, depth: u8) -> Option<i64> {
     let sizeof = |operand: &str| {
         // `unsafe.Sizeof(atomic.Int64{})`: size the composite literal's type.
         let ty = operand.trim().strip_suffix("{}")?;
-        i64::try_from(go_field_size(ty, ctx, depth + 1).size).ok()
+        // A struct of the package is only sized by the nested-struct resolver,
+        // after this: its one-word placeholder is no answer.
+        let sized = go_field_size(ty, ctx, depth + 1);
+        let base = resolve_alias_chain(ty, ctx);
+        if sized.uncertain
+            || sized.named_elem.is_some()
+            || ctx.structs.contains(&base)
+            || base.starts_with(super::c_cpp::ANON_PREFIX)
+        {
+            return None;
+        }
+        i64::try_from(sized.size).ok()
     };
     super::consteval::eval(
         expr,
@@ -548,6 +563,10 @@ fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
     if ctx.interfaces.contains(ty) {
         return plain(ps * 2, ps);
     }
+    // An empty struct (also `struct {}` written inline) has no size.
+    if ty.split_whitespace().collect::<String>() == "struct{}" {
+        return plain(0, 1);
+    }
     // `func(...)` values are a single pointer.
     if ty == "func" || ty.starts_with("func(") {
         return plain(ps, ps);
@@ -572,6 +591,18 @@ fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
         uncertain,
         ..plain(size, align)
     }
+}
+
+/// Whether a `struct_type` node declares any field.
+fn has_fields(struct_type: Node<'_>) -> bool {
+    (0..struct_type.named_child_count())
+        .filter_map(|i| struct_type.named_child(i as u32))
+        .filter(|c| c.kind() == "field_declaration_list")
+        .any(|list| {
+            (0..list.named_child_count())
+                .filter_map(|i| list.named_child(i as u32))
+                .any(|f| f.kind() == "field_declaration")
+        })
 }
 
 /// Go's predeclared type names.
@@ -1152,6 +1183,16 @@ pub(crate) fn parse_go_in_package(
 mod tests {
     use super::*;
     use padlock_core::arch::X86_64_SYSV;
+
+    #[test]
+    fn empty_structs_are_zero_sized() {
+        // sync.WaitGroup's shape: noCopy marker, atomic word, semaphore.
+        let src = "package p\ntype noCopy struct{}\ntype W struct {\n\tn noCopy\n\tv uint64\n\ts uint32\n\te struct{}\n}\n";
+        let layouts = parse_go(src, &X86_64_SYSV).unwrap();
+        let w = layouts.iter().find(|l| l.name == "W").unwrap();
+        assert_eq!(w.total_size, 16);
+        assert!(w.uncertain_fields.is_empty());
+    }
 
     #[test]
     fn parse_simple_go_struct() {

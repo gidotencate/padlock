@@ -179,6 +179,16 @@ impl ParseCache {
 
 fn file_mtime(path: &Path) -> Option<u64> {
     let own = mtime_secs(path)?;
+    // A Rust file is laid out with the rest of its crate.
+    if path.extension().is_some_and(|e| e == "rs")
+        && let Some(root) = padlock_source::rust_crate_root(path)
+    {
+        let newest = padlock_source::rust_crate_newest_mtime(&root)
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        return Some(own.max(newest));
+    }
     // A Go file is laid out with the other files of its package, so an edit,
     // addition or removal of a sibling `.go` file invalidates it too.
     if path.extension().is_some_and(|e| e == "go")

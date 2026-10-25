@@ -6,6 +6,7 @@ pub mod concurrency;
 pub mod fixgen;
 pub mod frontends;
 mod go_package;
+mod rust_crate;
 pub use c_includes::{include_dirs, set_include_dirs};
 
 use std::collections::HashMap;
@@ -40,6 +41,23 @@ pub(crate) fn bump_settings_generation() {
 
 pub(crate) fn settings_generation() -> u64 {
     SETTINGS_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Parse the Rust crate containing `path` ahead of its files (see
+/// [`prepare_go_packages`]).
+pub fn prepare_rust_crate(path: &Path, arch: &'static ArchConfig) {
+    rust_crate::prepare(path, arch);
+}
+
+/// The root of the crate whose `src/` holds `path` (for grouping files).
+pub fn rust_crate_root(path: &Path) -> Option<PathBuf> {
+    rust_crate::crate_root(path)
+}
+
+/// Newest mtime among the source files of the crate rooted at `root`; a Rust
+/// file's parse depends on all of them.
+pub fn rust_crate_newest_mtime(root: &Path) -> Option<std::time::SystemTime> {
+    rust_crate::newest_mtime(root)
 }
 
 /// Parse every Go package in `dir` ahead of its files, so callers that parse
@@ -366,6 +384,8 @@ pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<Pa
     // …and a C/C++ file with what its `#include`s declare.
     let package = match lang {
         SourceLanguage::Go => go_package::parse_in_package(path, &source, arch).map(Ok),
+        // …and a Rust file with the rest of its crate.
+        SourceLanguage::Rust => rust_crate::parse_in_crate(path, &source, arch).map(Ok),
         SourceLanguage::C | SourceLanguage::Cpp => {
             c_includes::parse_with_includes(path, &source, &lang, arch)
         }

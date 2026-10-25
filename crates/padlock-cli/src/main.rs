@@ -242,7 +242,11 @@ enum Commands {
     },
 
     /// Generate a .padlock.toml configuration template in the current directory
-    Init,
+    Init {
+        /// Overwrite an existing .padlock.toml
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Compare current layout findings against a saved baseline; fail only on regressions
     Check {
@@ -314,7 +318,7 @@ fn main() -> anyhow::Result<()> {
             filter,
         } => commands::bpf::run(&paths, json, sarif, fail_on_severity, &filter),
 
-        Commands::Init => commands::init::run(),
+        Commands::Init { force } => commands::init::run(force),
 
         Commands::List { paths, filter } => commands::list::run(&paths, &filter),
 

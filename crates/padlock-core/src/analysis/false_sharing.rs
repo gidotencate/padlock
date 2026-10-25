@@ -46,58 +46,71 @@ pub fn find_sharing_conflicts(layout: &StructLayout) -> Vec<SharingConflict> {
         .collect()
 }
 
-/// Return `true` if any cache line contains two or more `Concurrent` fields
-/// with *different* lock guards — a confirmed false-sharing hazard.
-///
-/// ## Heuristic tightening
-///
-/// The type-name heuristic assigns each field's own name as its guard, so two
-/// `AtomicU64` fields always receive different guards and would naively trigger
-/// this check. However, two purely-atomic fields sharing a cache line is a
-/// performance concern (cache-line bouncing) rather than *false sharing* in the
-/// classical lock-based sense. To avoid noisy findings from the heuristic, we
-/// only flag a conflict when **at least one** of the two fields has
-/// `is_atomic: false` (i.e. it is a mutex/lock type, or was explicitly
-/// annotated as lock-protected data).
-///
-/// Explicit guard annotations (`GUARDED_BY`, `#[lock_protected_by]`, etc.) always
-/// set `is_atomic: false`, so annotated conflicts are always reported.
-pub fn has_false_sharing(layout: &StructLayout) -> bool {
+/// The concurrently accessed fields of each cache line that holds two or more
+/// of them with *different* guards — written under different locks, or atomics
+/// updated independently. That is false sharing: threads touching unrelated
+/// data still bounce the line between their cores. Fields under the same guard
+/// do not conflict. Only the conflicting fields are listed (not every field
+/// that happens to share the line).
+pub fn find_concurrent_conflicts(layout: &StructLayout) -> Vec<SharingConflict> {
     let line = layout.arch.cache_line_size;
-    if line == 0 {
-        return false;
+    if line == 0 || layout.is_union {
+        return Vec::new();
     }
-
-    let concurrent: Vec<(usize, Option<&str>, bool)> = layout
-        .fields
-        .iter()
-        .filter_map(|f| {
-            if let AccessPattern::Concurrent {
-                guard, is_atomic, ..
-            } = &f.access
-            {
-                Some((f.offset / line, guard.as_deref(), *is_atomic))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for i in 0..concurrent.len() {
-        for j in (i + 1)..concurrent.len() {
-            let (cl_a, guard_a, atomic_a) = concurrent[i];
-            let (cl_b, guard_b, atomic_b) = concurrent[j];
-            if cl_a == cl_b && guard_a.map(normalize_guard) != guard_b.map(normalize_guard) {
-                // Skip if both fields are purely atomic with no lock involvement —
-                // that pattern is handled by the locality analysis, not false sharing.
-                if atomic_a && atomic_b {
-                    continue;
-                }
-                return true;
+    let mut buckets: std::collections::BTreeMap<usize, Vec<(&str, Option<&str>)>> =
+        std::collections::BTreeMap::new();
+    for f in &layout.fields {
+        if let AccessPattern::Concurrent { guard, .. } = &f.access {
+            // A field spanning several lines conflicts on each of them.
+            let first = f.offset / line;
+            let last = (f.offset + f.size.max(1) - 1) / line;
+            for cl in first..=last {
+                buckets
+                    .entry(cl)
+                    .or_default()
+                    .push((f.name.as_str(), guard.as_deref().map(normalize_guard)));
             }
         }
     }
-    false
+    buckets
+        .into_iter()
+        .filter(|(_, fields)| fields.len() > 1 && fields.iter().any(|(_, g)| *g != fields[0].1))
+        .map(|(cache_line, fields)| SharingConflict {
+            fields: fields.into_iter().map(|(n, _)| n.to_string()).collect(),
+            cache_line,
+        })
+        .collect()
+}
+
+/// Return `true` if any cache line contains two or more `Concurrent` fields
+/// with *different* guards (see [`find_concurrent_conflicts`]): two locks, a
+/// lock and an atomic, or two independently updated atomics.
+///
+/// Guards come from explicit annotations (`GUARDED_BY`, `#[lock_protected_by]`,
+/// `// padlock:guard=`) or, without them, from the type-name heuristic, which
+/// gives every lock or atomic its own guard. Findings from the heuristic are
+/// reported as inferred, at lower severity.
+pub fn has_false_sharing(layout: &StructLayout) -> bool {
+    !find_concurrent_conflicts(layout).is_empty()
+}
+
+/// Whether some conflicting field carries an explicit guard annotation (as
+/// opposed to every conflict being inferred from type names).
+pub fn is_annotated(layout: &StructLayout) -> bool {
+    let conflicting: std::collections::HashSet<String> = find_concurrent_conflicts(layout)
+        .into_iter()
+        .flat_map(|c| c.fields)
+        .collect();
+    layout.fields.iter().any(|f| {
+        conflicting.contains(&f.name)
+            && matches!(
+                f.access,
+                AccessPattern::Concurrent {
+                    is_annotated: true,
+                    ..
+                }
+            )
+    })
 }
 
 /// Return `true` if any cache line holds 2+ fields where at least one is
@@ -265,12 +278,34 @@ mod tests {
         assert!(!has_false_sharing(&layout));
     }
 
-    // Heuristic tightening: two pure atomics sharing a cache line is cache-line
-    // bouncing (a locality concern), not classical false sharing.
+    // Two independently updated atomics on one line are the textbook case:
+    // threads bumping different counters still bounce the line.
     #[test]
-    fn no_false_sharing_for_two_pure_atomics_same_line() {
+    fn two_atomics_on_one_line_are_false_sharing() {
         let layout = make_layout(vec![atomic("counter_a", 0), atomic("counter_b", 8)]);
+        assert!(has_false_sharing(&layout));
+        let conflicts = find_concurrent_conflicts(&layout);
+        assert_eq!(conflicts[0].fields, vec!["counter_a", "counter_b"]);
+    }
+
+    // …but not once each has a cache line of its own.
+    #[test]
+    fn atomics_on_separate_lines_are_not_false_sharing() {
+        let layout = make_layout(vec![atomic("counter_a", 0), atomic("counter_b", 64)]);
         assert!(!has_false_sharing(&layout));
+    }
+
+    // Only the conflicting fields are reported, not everything on the line.
+    #[test]
+    fn conflicts_list_only_concurrent_fields() {
+        let mut layout = make_layout(vec![concurrent("a", 0, "mu_a"), atomic("b", 16)]);
+        let mut plain = layout.fields[0].clone();
+        plain.name = "plain".into();
+        plain.offset = 8;
+        plain.access = AccessPattern::Unknown;
+        layout.fields.insert(1, plain);
+        let conflicts = find_concurrent_conflicts(&layout);
+        assert_eq!(conflicts[0].fields, vec!["a", "b"]);
     }
 
     // A mutex-protected field paired with an atomic on the same line IS false sharing.

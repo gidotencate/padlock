@@ -2,7 +2,7 @@
 
 Standalone Language Server Protocol server for [padlock](https://github.com/gidotencate/padlock) — struct-layout diagnostics, hover, inlay hints, document symbols, and reorder quick-fixes for any LSP-capable editor (Neovim, Helix, Zed, JetBrains, Sublime).
 
-Analyzes the live buffer in-process on open/change/save — no `padlock` CLI install required, no subprocess per keystroke. Honours the same `.padlock.toml` as the CLI (`ignore`, `min_severity`, per-struct overrides, `arch.override`), and accepts editor-pushed overrides via `initializationOptions` or `workspace/didChangeConfiguration`.
+Analyzes the live buffer in-process on open/change/save — no `padlock` CLI install required, no subprocess per keystroke. Types the file uses from elsewhere are resolved when they can be found — the rest of its Go package, its Rust crate, the headers a C/C++ file includes — with unsaved edits taking precedence over the saved file; otherwise the buffer is analyzed on its own. Honours the same `.padlock.toml` as the CLI (`ignore`, `min_severity`, per-struct overrides, `arch.override`), and accepts editor-pushed overrides via `initializationOptions` or `workspace/didChangeConfiguration`.
 
 ## Install
 

@@ -76,6 +76,7 @@ fn main() -> anyhow::Result<()> {
 /// diagnostics were computed against, instead of silently drifting back to
 /// the default on an `arch.override` project.
 struct DocState {
+    path: std::path::PathBuf,
     text: String,
     lang: SourceLanguage,
     structs: Vec<StructReport>,
@@ -329,7 +330,7 @@ fn analyze_and_publish(
 
     let config = overrides.apply_to(Config::for_path(&path));
     let arch = resolve_arch(&config);
-    let report = analyze_text(text, &lang, arch, &config);
+    let report = analyze_text(Some(&path), text, &lang, arch, &config);
     let diagnostics = report
         .structs
         .iter()
@@ -339,6 +340,7 @@ fn analyze_and_publish(
     docs.insert(
         uri.as_str().to_string(),
         DocState {
+            path,
             text: text.to_string(),
             lang,
             structs: report.structs,
@@ -615,7 +617,8 @@ fn build_code_actions(docs: &DocStore, params: &CodeActionParams) -> Vec<CodeAct
     // already-scored StructReport (which doesn't carry per-field IR). Uses
     // doc.arch (not the bare default) so a reorder computed here matches
     // the architecture the diagnostics were scored against.
-    let Ok(layouts) = padlock_source::parse_source_str(&doc.text, &doc.lang, doc.arch) else {
+    let Ok(layouts) = analysis::parse_buffer(Some(&doc.path), &doc.text, &doc.lang, doc.arch)
+    else {
         return Vec::new();
     };
 
@@ -729,10 +732,11 @@ mod tests {
     }
 
     fn insert_doc(docs: &mut DocStore, uri: &Uri, text: &str, lang: SourceLanguage) {
-        let report = analyze_text(text, &lang, &X86_64_SYSV, &Config::default());
+        let report = analyze_text(None, text, &lang, &X86_64_SYSV, &Config::default());
         docs.insert(
             uri.as_str().to_string(),
             DocState {
+                path: std::path::PathBuf::from("test.src"),
                 text: text.to_string(),
                 lang,
                 structs: report.structs,
@@ -764,6 +768,7 @@ mod tests {
     #[test]
     fn analyze_text_finds_padding_waste_in_c_struct() {
         let report = analyze_text(
+            None,
             padded_c_struct(),
             &padlock_source::SourceLanguage::C,
             &X86_64_SYSV,
@@ -776,6 +781,7 @@ mod tests {
     #[test]
     fn analyze_text_on_malformed_source_returns_empty_report_not_panic() {
         let report = analyze_text(
+            None,
             "struct {{{ nonsense",
             &padlock_source::SourceLanguage::C,
             &X86_64_SYSV,
@@ -787,6 +793,7 @@ mod tests {
     #[test]
     fn diagnostics_for_struct_converts_line_to_zero_based() {
         let report = analyze_text(
+            None,
             padded_c_struct(),
             &padlock_source::SourceLanguage::C,
             &X86_64_SYSV,
@@ -802,6 +809,7 @@ mod tests {
     #[test]
     fn diagnostics_for_struct_with_no_source_line_emits_nothing() {
         let report = analyze_text(
+            None,
             padded_c_struct(),
             &padlock_source::SourceLanguage::C,
             &X86_64_SYSV,
@@ -1117,6 +1125,7 @@ mod tests {
     #[test]
     fn diagnostics_for_struct_tags_only_low_severity_as_unnecessary() {
         let report = analyze_text(
+            None,
             padded_c_struct(),
             &padlock_source::SourceLanguage::C,
             &X86_64_SYSV,

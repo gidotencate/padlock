@@ -521,12 +521,52 @@ pub(crate) fn parse_in_package(
         );
     }
     // A test file, or one excluded for the target: parse it against the package.
+    against_package(&package, &file, source, arch)
+}
+
+/// Directories with more `.go` files than this are not scanned for editor
+/// buffers (building the package would stall the editor); the buffer is
+/// analyzed on its own then.
+const MAX_BUFFER_PACKAGE_FILES: usize = 400;
+
+/// Layouts of an editor buffer (`source` is the live text of `path`, possibly
+/// unsaved) resolved against the package on disk: the buffer's own
+/// declarations win over the saved version of the same file.
+pub(crate) fn parse_buffer_in_package(
+    path: &Path,
+    source: &str,
+    arch: &'static ArchConfig,
+) -> Option<Vec<StructLayout>> {
+    let name = go::package_clause(source)?;
+    let dir = path.parent()?.to_path_buf();
+    let dir = if dir.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        dir
+    };
+    if dir_signature(&dir).len() > MAX_BUFFER_PACKAGE_FILES {
+        return None;
+    }
+    let package = package_for(&dir, &name, arch, true)?;
+    against_package(&package, &path.to_string_lossy(), source, arch)
+}
+
+/// Parse `source` with `package`'s declarations in scope and resolve its
+/// structs against the package's layouts.
+fn against_package(
+    package: &Package,
+    file: &str,
+    source: &str,
+    arch: &'static ArchConfig,
+) -> Option<Vec<StructLayout>> {
     let mut own = go::parse_go_in_package(source, arch, &package.ctx, usize::MAX, None).ok()?;
     for l in &mut own {
-        l.source_file = Some(file.clone());
+        l.source_file = Some(file.to_string());
     }
     let n = own.len();
-    // The package's layouts are final; only those this file names are needed.
+    // The package's layouts are final; only those this file names are needed —
+    // and not the saved versions of types the file itself (re)defines.
+    let defined: HashSet<String> = own.iter().map(|l| l.name.clone()).collect();
     let named: HashSet<&str> = own
         .iter()
         .flat_map(|l| &l.fields)
@@ -541,7 +581,7 @@ pub(crate) fn parse_in_package(
     let context: Vec<StructLayout> = package
         .layouts
         .iter()
-        .filter(|l| named.contains(l.name.as_str()))
+        .filter(|l| named.contains(l.name.as_str()) && !defined.contains(&l.name))
         .cloned()
         .collect();
     own.extend(context);

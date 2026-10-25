@@ -15,6 +15,8 @@ use padlock_core::arch::ArchConfig;
 use padlock_core::findings::SkippedStruct;
 use padlock_core::ir::StructLayout;
 
+use crate::frontends::rust::RustCtx;
+
 /// The directory holding the crate's `Cargo.toml`, for a file under its `src/`.
 pub(crate) fn crate_root(path: &Path) -> Option<PathBuf> {
     let path = std::fs::canonicalize(path).ok()?;
@@ -79,6 +81,10 @@ const RECHECK_AFTER: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 5_000;
 
 fn build(signature: Signature, arch: &'static ArchConfig) -> Crate {
+    build_with_ctx(signature, arch).0
+}
+
+fn build_with_ctx(signature: Signature, arch: &'static ArchConfig) -> (Crate, RustCtx) {
     let files: Vec<(String, String)> = signature
         .iter()
         .filter_map(|(p, _, len)| {
@@ -93,7 +99,7 @@ fn build(signature: Signature, arch: &'static ArchConfig) -> Crate {
         })
         .collect();
     let outer = crate::take_skipped();
-    let per_file = crate::frontends::rust::parse_rust_crate(&files, arch);
+    let (per_file, ctx) = crate::frontends::rust::parse_rust_crate(&files, arch);
     let skipped_all = crate::take_skipped();
     crate::restore_skipped(outer);
     let mut all: Vec<StructLayout> = Vec::new();
@@ -115,11 +121,14 @@ fn build(signature: Signature, arch: &'static ArchConfig) -> Crate {
     if let Some((first, _)) = files.first() {
         skipped.insert(PathBuf::from(first), skipped_all);
     }
-    Crate {
-        signature,
-        layouts,
-        skipped,
-    }
+    (
+        Crate {
+            signature,
+            layouts,
+            skipped,
+        },
+        ctx,
+    )
 }
 
 fn crate_for(root: &Path, arch: &'static ArchConfig) -> Option<Arc<Crate>> {
@@ -184,6 +193,78 @@ pub(crate) fn parse_in_crate(
             })
             .collect(),
     )
+}
+
+/// A crate as an editor session sees it: its layouts, the declarations buffers
+/// are parsed against, and when it was last checked against the disk.
+type BufferCrate = (Arc<Crate>, RustCtx, Instant);
+
+thread_local! {
+    /// The crate-wide declarations an editor session parses buffers against.
+    /// A `RustCtx` holds syntax trees (`!Send`), so it lives per thread — the
+    /// language server is single-threaded; the CLI never uses this.
+    static BUFFER_CRATES: std::cell::RefCell<HashMap<PathBuf, BufferCrate>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Layouts of an editor buffer (`source` is the live text of `path`, possibly
+/// unsaved) resolved against the crate on disk: the buffer's own declarations
+/// win over the saved version of the same file. `None` when `path` is not a
+/// file under a crate's `src/`.
+pub(crate) fn parse_buffer_in_crate(
+    path: &Path,
+    source: &str,
+    arch: &'static ArchConfig,
+) -> Option<Vec<StructLayout>> {
+    let root = crate_root(path)?;
+    let (krate, ctx) = BUFFER_CRATES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let fresh = cache.get(&root).and_then(|(c, ctx, checked)| {
+            (checked.elapsed() < RECHECK_AFTER || c.signature == signature(&root))
+                .then(|| (c.clone(), ctx.clone()))
+        });
+        if let Some(hit) = fresh {
+            if let Some(entry) = cache.get_mut(&root) {
+                entry.2 = Instant::now();
+            }
+            return Some(hit);
+        }
+        let sig = signature(&root);
+        if sig.len() > MAX_FILES {
+            return None;
+        }
+        let (c, ctx) = build_with_ctx(sig, arch);
+        let c = Arc::new(c);
+        cache.insert(root.clone(), (c.clone(), ctx.clone(), Instant::now()));
+        Some((c, ctx))
+    })?;
+    let mut own = crate::frontends::rust::parse_rust_in_ctx(source, ctx).ok()?;
+    let n = own.len();
+    // The crate's layouts are final; only those the buffer names are needed,
+    // and not the saved versions of types it (re)defines.
+    let defined: std::collections::HashSet<String> = own.iter().map(|l| l.name.clone()).collect();
+    let named: std::collections::HashSet<String> = own
+        .iter()
+        .flat_map(|l| &l.fields)
+        .filter_map(|f| match &f.ty {
+            padlock_core::ir::TypeInfo::Primitive { name, .. }
+            | padlock_core::ir::TypeInfo::Opaque { name, .. } => {
+                Some(crate::split_c_array_suffix(name).0.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    let context: Vec<StructLayout> = krate
+        .layouts
+        .values()
+        .flatten()
+        .filter(|l| named.contains(&l.name) && !defined.contains(&l.name))
+        .cloned()
+        .collect();
+    own.extend(context);
+    crate::resolve_nested_structs(&mut own);
+    own.truncate(n);
+    Some(own)
 }
 
 #[cfg(test)]

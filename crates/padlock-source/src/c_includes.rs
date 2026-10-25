@@ -75,12 +75,29 @@ fn system_dirs(arch: &ArchConfig) -> Vec<PathBuf> {
 }
 
 fn resolve_include(name: &str, angle: bool, from_dir: &Path, arch: &ArchConfig) -> Option<PathBuf> {
+    // Without the build's `-I` flags, a project's include root is usually a
+    // parent of the including file (`#include "uv/linux.h"` from
+    // `include/uv/unix.h`): try up to three levels up — before the system
+    // paths for `"…"`, after them for `<…>` so a project file never shadows
+    // a system header.
+    let ancestors: Vec<PathBuf> = from_dir
+        .ancestors()
+        .skip(1)
+        .take(3)
+        .map(Path::to_path_buf)
+        .collect();
     let mut candidates = Vec::new();
     if !angle {
         candidates.push(from_dir.to_path_buf());
     }
     candidates.extend(include_dirs());
+    if !angle {
+        candidates.extend(ancestors.iter().cloned());
+    }
     candidates.extend(system_dirs(arch));
+    if angle {
+        candidates.extend(ancestors);
+    }
     candidates
         .into_iter()
         .map(|d| d.join(name))
@@ -109,6 +126,58 @@ enum Slot {
 }
 
 static HEADERS: LazyLock<(Mutex<HashMap<Key, Slot>>, Condvar)> = LazyLock::new(Default::default);
+
+/// Which translation-unit root lays out each header: the first root, in
+/// sorted order, whose includes reach it. A shared header's layout depends on
+/// the context it is first processed in, so this keeps results independent of
+/// thread timing (see [`parse_units_in_order`]).
+#[derive(Default)]
+struct Ownership {
+    /// Every root (by rank) whose includes reach the header.
+    reached_by: HashMap<PathBuf, Vec<usize>>,
+    finished: HashSet<usize>,
+}
+
+static OWNERSHIP: LazyLock<Mutex<Ownership>> = LazyLock::new(Default::default);
+
+thread_local! {
+    /// The root this thread is processing (an index into the ownership order).
+    static CURRENT_ROOT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// …and its canonical path.
+    static CURRENT_ROOT_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Once a root has been preprocessed it includes nothing more: release the
+/// headers it did not lay out to the roots after it.
+fn root_done_including(path: &Path) {
+    let is_root = CURRENT_ROOT_PATH.with(|c| c.borrow().as_deref() == Some(path));
+    if !is_root {
+        return;
+    }
+    if let Some(rank) = CURRENT_ROOT.with(|c| c.get())
+        && let Ok(mut o) = OWNERSHIP.lock()
+    {
+        o.finished.insert(rank);
+    }
+    HEADERS.1.notify_all();
+}
+
+/// Whether a lower-ranked root that may include `path` is still running: the
+/// header is laid out by the lowest-ranked root that actually includes it, so
+/// this thread waits until those have finished (it never waits on a higher
+/// root, so this cannot deadlock).
+fn owned_elsewhere(path: &Path) -> bool {
+    let Ok(o) = OWNERSHIP.lock() else {
+        return false;
+    };
+    let Some(ranks) = o.reached_by.get(path) else {
+        return false;
+    };
+    let current = CURRENT_ROOT.with(|c| c.get()).unwrap_or(usize::MAX);
+    ranks
+        .iter()
+        .any(|&r| r < current && !o.finished.contains(&r))
+}
 
 /// How long a thread waits for a header another thread is building before
 /// building it itself. Waiting without a bound could deadlock on headers that
@@ -155,6 +224,15 @@ fn claim(key: &Key) -> Claim {
         return Claim::None;
     };
     loop {
+        // Another root lays this header out: wait for it (it only ever waits
+        // on lower roots, so this cannot deadlock).
+        if owned_elsewhere(&key.0) && !matches!(map.get(key), Some(Slot::Done(_))) {
+            match ready.wait_timeout(map, Duration::from_millis(50)) {
+                Ok((m, _)) => map = m,
+                Err(_) => return Claim::None,
+            }
+            continue;
+        }
         match map.get(key) {
             Some(Slot::Done(h)) => return Claim::Done(h.clone()),
             Some(Slot::Building(since)) if since.elapsed() < WAIT_FOR_OTHER => {
@@ -207,6 +285,9 @@ struct Unit {
     include: IncludeContext,
     headers: Vec<Arc<Header>>,
     seen: HashSet<PathBuf>,
+    /// Macros absorbed since the last `#include` began (handed to the
+    /// including file's preprocessor for the lines after the include).
+    recent: Vec<(String, c_preproc::Macro)>,
 }
 
 impl Unit {
@@ -231,6 +312,7 @@ impl Unit {
             include,
             headers: Vec::new(),
             seen: HashSet::new(),
+            recent: Vec::new(),
         }
     }
 
@@ -244,6 +326,7 @@ impl Unit {
     fn absorb(&mut self, h: &Arc<Header>) {
         for (k, m) in &h.macros {
             self.include.macros.insert(k.clone(), m.clone());
+            self.recent.push((k.clone(), m.clone()));
         }
         for (k, v) in &h.exports {
             if !k.starts_with('$') && c_cpp::is_builtin_c_type(k, self.arch) {
@@ -299,16 +382,11 @@ impl Unit {
 
     fn build(&mut self, path: &Path) -> Option<Header> {
         let source = std::fs::read_to_string(path).ok()?;
-        let dir = path.parent().unwrap_or(Path::new("."));
-        let includes = includes_of(&source, dir, self.arch);
-        for inc in &includes {
-            self.include(inc);
-        }
-        let ctx = self.snapshot();
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let lang = language_of(path, &source, self.cpp);
-        let mut scope = c_preproc::Scope::new(&ctx.include.macros);
-        let expanded = c_preproc::process(&source, &mut scope);
-        let own_macros = scope.into_own();
+        let (expanded, own_macros, includes) = self.preprocess_in_order(&source, &dir, &lang);
+        root_done_including(path);
+        let ctx = self.snapshot();
         // The header's own skip notes belong to whoever analyzes it directly.
         let outer = crate::take_skipped();
         c_cpp::set_include_context(Some(ctx.include.clone()));
@@ -337,6 +415,103 @@ impl Unit {
             skipped,
         })
     }
+
+    /// Preprocess `source` top to bottom as part of this unit: at each
+    /// `#include` that is followed, what the file declared so far is made
+    /// visible to the unit (the included header may use it), the header is
+    /// included, and its macros apply to the lines after. Returns the expanded
+    /// text, the macros the file itself defined and the headers it included.
+    fn preprocess_in_order(
+        &mut self,
+        source: &str,
+        dir: &Path,
+        lang: &SourceLanguage,
+    ) -> (String, Macros, Vec<PathBuf>) {
+        let base = self.include.macros.clone();
+        let mut scope = c_preproc::Scope::new(&base);
+        let mut includes = Vec::new();
+        let mut declared_up_to = 0usize;
+        let expanded = c_preproc::process_with(source, &mut scope, &mut |out, rest| {
+            let directive = format!("#include {rest}");
+            let Some((name, angle)) = c_cpp::include_directives(&directive).into_iter().next()
+            else {
+                return Vec::new();
+            };
+            let Some(inc) = resolve_include(&name, angle, dir, self.arch) else {
+                return Vec::new();
+            };
+            // Declarations between the previous include and this one.
+            if has_declarations(&out[declared_up_to.min(out.len())..]) {
+                self.absorb_prefix(out, lang);
+            }
+            declared_up_to = out.len();
+            includes.push(inc.clone());
+            // Everything absorbed from here on (nested includes too) is new
+            // to this file; earlier entries stay for the enclosing file.
+            let mark = self.recent.len();
+            self.include(&inc);
+            self.recent[mark..].to_vec()
+        });
+        (expanded, scope.into_own(), includes)
+    }
+
+    /// Make the declarations of a file's text so far (typedefs, constants,
+    /// records) visible to the headers it includes next.
+    fn absorb_prefix(&mut self, text: &str, lang: &SourceLanguage) {
+        let ctx = self.snapshot();
+        let outer = crate::take_skipped();
+        c_cpp::set_include_context(Some(ctx.include.clone()));
+        c_cpp::capture_aliases(true);
+        let parsed = match lang {
+            SourceLanguage::Cpp => c_cpp::parse_cpp(text, self.arch),
+            _ => c_cpp::parse_c(text, self.arch),
+        };
+        c_cpp::capture_aliases(false);
+        c_cpp::set_include_context(None);
+        let mut exports = c_cpp::take_exported_aliases();
+        exports.retain(|k, v| ctx.include.aliases.get(k) != Some(v));
+        let _ = crate::take_skipped();
+        crate::restore_skipped(outer);
+        let Ok(parsed) = parsed else { return };
+        let mut layouts = resolve_with(parsed, &ctx);
+        crate::hide_anonymous_aggregates(&mut layouts);
+        for l in &layouts {
+            exports.insert(format!("$rec:{}", l.name), String::new());
+        }
+        let prefix = Arc::new(Header {
+            includes: Vec::new(),
+            exports,
+            macros: Macros::new(),
+            layouts,
+            skipped: Vec::new(),
+        });
+        self.absorb(&prefix);
+    }
+}
+
+/// Whether a stretch of preprocessed text declares anything (more than
+/// blank lines, comments and directives).
+fn has_declarations(text: &str) -> bool {
+    let mut in_comment = false;
+    text.lines().any(|l| {
+        let mut t = l.trim();
+        if in_comment {
+            match t.find("*/") {
+                Some(i) => {
+                    in_comment = false;
+                    t = t[i + 2..].trim();
+                }
+                None => return false,
+            }
+        }
+        if let Some(i) = t.find("/*") {
+            if !t[i..].contains("*/") {
+                in_comment = true;
+            }
+            t = t[..i].trim();
+        }
+        !t.is_empty() && !t.starts_with('#') && !t.starts_with("//")
+    })
 }
 
 /// Resolve `own` against the context's already-final layouts (only the ones
@@ -365,6 +540,90 @@ fn resolve_with(mut own: Vec<StructLayout>, ctx: &Context) -> Vec<StructLayout> 
     crate::resolve_nested_structs(&mut own);
     own.truncate(n);
     own
+}
+
+/// Parse translation-unit roots (files no other analyzed file includes) so
+/// that every shared header is laid out in the context of the first root, in
+/// sorted order, that reaches it — the same result on every run — while roots
+/// still run in parallel. Roots are started in order on plain threads, so a
+/// root waiting for a header owned by a lower root always has that root
+/// running. Returns the results in the order of `roots`.
+pub(crate) fn parse_units_in_order(
+    roots: &[PathBuf],
+    arch: &'static ArchConfig,
+) -> Vec<anyhow::Result<crate::ParseOutput>> {
+    let mut order: Vec<usize> = (0..roots.len()).collect();
+    order.sort_by(|a, b| roots[*a].cmp(&roots[*b]));
+    // Ownership by a text walk of the include graph (a superset of what the
+    // builds follow; a root that finishes releases what it did not build).
+    {
+        let mut edges: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        let mut reached_by: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        for (rank, &i) in order.iter().enumerate() {
+            let mut seen: HashSet<PathBuf> = HashSet::new();
+            let mut stack = direct_includes(&roots[i], arch);
+            while let Some(h) = stack.pop() {
+                if !seen.insert(h.clone()) {
+                    continue;
+                }
+                reached_by.entry(h.clone()).or_default().push(rank);
+                let next = edges
+                    .entry(h.clone())
+                    .or_insert_with(|| direct_includes(&h, arch));
+                stack.extend(next.iter().cloned());
+            }
+        }
+        if let Ok(mut o) = OWNERSHIP.lock() {
+            *o = Ownership {
+                reached_by,
+                finished: HashSet::new(),
+            };
+        }
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: Vec<Mutex<Option<anyhow::Result<crate::ParseOutput>>>> =
+        roots.iter().map(|_| Mutex::new(None)).collect();
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(roots.len().max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let rank = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(&i) = order.get(rank) else { break };
+                    CURRENT_ROOT.with(|c| c.set(Some(rank)));
+                    let canonical =
+                        std::fs::canonicalize(&roots[i]).unwrap_or_else(|_| roots[i].clone());
+                    CURRENT_ROOT_PATH.with(|c| *c.borrow_mut() = Some(canonical));
+                    let r = crate::parse_source(&roots[i], arch);
+                    CURRENT_ROOT.with(|c| c.set(None));
+                    CURRENT_ROOT_PATH.with(|c| *c.borrow_mut() = None);
+                    if let Ok(mut o) = OWNERSHIP.lock() {
+                        o.finished.insert(rank);
+                    }
+                    HEADERS.1.notify_all();
+                    if let Ok(mut slot) = results[i].lock() {
+                        *slot = Some(r);
+                    }
+                }
+            });
+        }
+    });
+    if let Ok(mut o) = OWNERSHIP.lock() {
+        *o = Ownership::default();
+    }
+    HEADERS.1.notify_all();
+    results
+        .into_iter()
+        .map(|m| {
+            m.into_inner()
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| Err(anyhow::anyhow!("not parsed")))
+        })
+        .collect()
 }
 
 /// The headers `path` includes directly, resolved and canonical.
@@ -435,13 +694,9 @@ pub(crate) fn parse_with_includes(
             return Some(Ok(h.layouts.clone()));
         }
     }
-    let dir = path.parent().unwrap_or(Path::new("."));
-    for inc in includes_of(source, dir, arch) {
-        unit.include(&inc);
-    }
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let (expanded, _, _) = unit.preprocess_in_order(source, &dir, lang);
     let ctx = unit.snapshot();
-    let mut scope = c_preproc::Scope::new(&ctx.include.macros);
-    let expanded = c_preproc::process(source, &mut scope);
     c_cpp::set_include_context(Some(ctx.include.clone()));
     let parsed = match lang {
         SourceLanguage::Cpp => c_cpp::parse_cpp(&expanded, arch),
@@ -480,6 +735,45 @@ mod tests {
         assert!(s.uncertain_fields.is_empty(), "{:?}", s.uncertain_fields);
         // Records of the headers are context only, not part of this file.
         assert!(layouts.iter().all(|l| l.name != "ts"));
+    }
+
+    #[test]
+    fn a_header_sees_what_its_includer_declared_before_including_it() {
+        // uv.h's pattern: a type, then the header that uses it, then a struct
+        // built from that header's macro.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("lib")).unwrap();
+        std::fs::write(
+            dir.path().join("lib/priv.h"),
+            "#ifndef PRIV_H\n#define PRIV_H\nstruct io { struct queue q; int fd; };\n#define PRIV_FIELDS struct queue pending; int flags;\n#endif\n",
+        )
+        .unwrap();
+        let path = dir.path().join("pub.h");
+        let src = "#ifndef PUB_H\n#define PUB_H\nstruct queue { void *next; void *prev; };\n#include \"lib/priv.h\"\nstruct handle { void *data; PRIV_FIELDS };\n#endif\n";
+        std::fs::write(&path, src).unwrap();
+        let layouts = parse_with_includes(&path, src, &SourceLanguage::C, &X86_64_SYSV)
+            .unwrap()
+            .unwrap();
+        let handle = layouts.iter().find(|l| l.name == "handle").unwrap();
+        // data 8 + queue 16 + int 4 → 32.
+        assert_eq!(handle.total_size, 32, "{:?}", handle.fields);
+        assert!(
+            handle.uncertain_fields.is_empty(),
+            "{:?}",
+            handle.uncertain_fields
+        );
+        let io = parse_with_includes(
+            &dir.path().join("lib/priv.h"),
+            &std::fs::read_to_string(dir.path().join("lib/priv.h")).unwrap(),
+            &SourceLanguage::C,
+            &X86_64_SYSV,
+        )
+        .unwrap()
+        .unwrap();
+        // Processed inside pub.h's unit: `struct queue` is known.
+        let io = io.iter().find(|l| l.name == "io").unwrap();
+        assert_eq!(io.total_size, 24);
+        assert!(io.uncertain_fields.is_empty(), "{:?}", io.uncertain_fields);
     }
 
     #[test]

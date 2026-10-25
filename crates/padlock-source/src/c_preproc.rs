@@ -34,6 +34,8 @@ pub(crate) struct Scope<'a> {
     base: &'a Macros,
     /// `Some` = defined by the file, `None` = `#undef`ed by it.
     own: HashMap<String, Option<Macro>>,
+    /// Names brought in by a header included part-way through the file.
+    imported: HashSet<String>,
 }
 
 impl<'a> Scope<'a> {
@@ -41,6 +43,7 @@ impl<'a> Scope<'a> {
         Scope {
             base,
             own: HashMap::new(),
+            imported: HashSet::new(),
         }
     }
 
@@ -60,6 +63,13 @@ impl<'a> Scope<'a> {
     }
 
     fn define(&mut self, name: String, m: Macro) {
+        self.imported.remove(&name);
+        self.own.insert(name, Some(m));
+    }
+
+    /// A macro from a header included at this point of the file.
+    fn import(&mut self, name: String, m: Macro) {
+        self.imported.insert(name.clone());
         self.own.insert(name, Some(m));
     }
 
@@ -69,8 +79,10 @@ impl<'a> Scope<'a> {
 
     /// The macros the file itself left defined.
     pub(crate) fn into_own(self) -> Macros {
+        let imported = self.imported;
         self.own
             .into_iter()
+            .filter(|(k, _)| !imported.contains(k))
             .filter_map(|(k, m)| m.map(|m| (k, m)))
             .collect()
     }
@@ -438,6 +450,10 @@ fn find_word(text: &str, word: &str) -> Option<usize> {
 /// modelled). A condition on a project macro (`CONFIG_X`, `NDEBUG`) is not:
 /// the build may define it, so both branches stay for the C frontend to flag.
 fn decidable(cond: &str, macros: &Scope<'_>) -> bool {
+    // An include guard (`#ifndef X_H` / `#define X_H`), recorded as `guard:`.
+    if cond.starts_with("guard:") {
+        return true;
+    }
     let mut words = cond
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty() && !w.starts_with(|c: char| c.is_ascii_digit()));
@@ -469,7 +485,24 @@ struct Group {
 /// groups decided for the target are resolved (their directives and untaken
 /// branches become blank lines); the others are kept for the C frontend.
 /// Returns the expanded text; the file's own macros stay in `macros`.
+#[cfg(test)]
 pub(crate) fn process(source: &str, macros: &mut Scope<'_>) -> String {
+    process_with(source, macros, &mut |_, _| Vec::new())
+}
+
+/// Called at a followed `#include` with the output so far and the directive's
+/// text; returns the macros the included header defines.
+pub(crate) type IncludeHook<'a> = dyn FnMut(&str, &str) -> Vec<(String, Macro)> + 'a;
+
+/// [`process`], calling `on_include(output_so_far, include_text)` at every
+/// `#include` the preprocessor would follow (in a taken branch); the macros it
+/// returns (those the included header defines) are in effect for the lines
+/// after it.
+pub(crate) fn process_with(
+    source: &str,
+    macros: &mut Scope<'_>,
+    on_include: &mut IncludeHook<'_>,
+) -> String {
     let lines = logical_lines(source);
     let mut in_comment = false;
     let codes: Vec<(String, bool, bool)> = lines
@@ -489,9 +522,16 @@ pub(crate) fn process(source: &str, macros: &mut Scope<'_>) -> String {
                 open.push(i);
                 group_conds.insert(i, vec![rest.to_string()]);
             }
-            Some(("ifdef" | "ifndef", rest)) => {
+            Some((kind @ ("ifdef" | "ifndef"), rest)) => {
                 open.push(i);
-                group_conds.insert(i, vec![first_word(rest).to_string()]);
+                let name = first_word(rest).to_string();
+                // `#ifndef X` whose first directive is `#define X`: a guard.
+                let guard = kind == "ifndef"
+                    && codes[i + 1..]
+                        .iter()
+                        .find_map(|(c, _, _)| directive(c))
+                        .is_some_and(|(d, r)| d == "define" && first_word(r) == name);
+                group_conds.insert(i, vec![if guard { format!("guard:{name}") } else { name }]);
             }
             Some(("elif" | "elifdef" | "elifndef", rest)) => {
                 if let Some(g) = open.last().and_then(|g| group_conds.get_mut(g)) {
@@ -565,6 +605,11 @@ pub(crate) fn process(source: &str, macros: &mut Scope<'_>) -> String {
                                     }
                                 }
                                 "undef" => macros.undef(first_word(rest)),
+                                "include" => {
+                                    for (n, m) in on_include(&out, rest) {
+                                        macros.import(n, m);
+                                    }
+                                }
                                 _ => {}
                             }
                         }

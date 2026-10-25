@@ -272,6 +272,16 @@ fn file_is_built(path: &Path, source: &str, goos: &str, goarch: &str) -> bool {
     true
 }
 
+/// Whether `go build` for `arch` would compile the Go file at `path` (its
+/// `_GOOS`/`_GOARCH` name suffix and `//go:build` line).
+pub(crate) fn built_for_target(path: &Path, arch: &ArchConfig) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    let (goos, goarch) = go_target(arch);
+    file_is_built(path, &text, goos, goarch)
+}
+
 /// One package (directory + `package` name), parsed and resolved together.
 struct Package {
     /// (path, mtime, size) of every `.go` file in the directory, to detect edits.

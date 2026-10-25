@@ -2,13 +2,13 @@
 
 [![crates.io](https://img.shields.io/crates/v/padlock-cli.svg)](https://crates.io/crates/padlock-cli)
 [![CI](https://github.com/gidotencate/padlock/actions/workflows/ci.yml/badge.svg)](https://github.com/gidotencate/padlock/actions/workflows/ci.yml)
-[![License](https://img.shields.io/crates/l/padlock-cli.svg)](LICENSE)
+[![License](https://img.shields.io/crates/l/padlock-cli.svg)](#license)
 
 **The lint pass for struct memory layout** — catches padding waste, false sharing, and cache locality problems at the source level, before they cost you at runtime.
 
 Supports C, C++, Rust, Go, and Zig. Ranks findings by impact, generates reorder suggestions, flags concurrency risks. CLI-first and CI-ready.
 
-**Accuracy:** checked against the compilers on real code (Go standard library, glibc, Python and OpenSSL headers, Rust crates; amd64, arm64, i386, riscv64): 83–95% of struct sizes exact, the rest flagged as uncertain, **none silently wrong**. See [How exact is it?](#how-exact-is-it).
+**Accuracy:** checked against the compilers on real code with default settings (Go standard library, glibc, Python, OpenSSL and libuv headers, Rust crates; amd64, arm64, i386, riscv64): 83–100% of struct sizes exact, the rest flagged as uncertain, **none silently wrong**. See [How exact is it?](#how-exact-is-it).
 
 ```
 $ padlock analyze src/connection.rs
@@ -77,7 +77,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **ABI safety** | `padlock fix` warns before reordering fixed-layout structs (`repr(C)` Rust, C, Go, `extern`/`packed` Zig) that may break FFI or serialization — a plain (non-`extern`, non-`packed`) Zig struct is field-order-unstable like Rust's default `repr(Rust)` and does **not** get this warning, since the compiler may already reorder it |
 | **CI-ready** | SARIF output, `action.yml`, exit-code gating on high-severity findings |
 | **`cargo padlock`** | Cargo subcommand — builds your project then analyses the binary |
-| **Compile-time assertions** | `#[padlock::assert_no_padding]`, `#[padlock::assert_size(N)]`, `#[padlock::assert_align(N)]`, `#[padlock::assert_offsets(field = N, …)]` proc macros |
+| **Compile-time assertions** | `#[padlock::assert_no_padding]`, `#[padlock::assert_size(N)]` proc macros; `#[padlock::assert_align(N)]` and `#[padlock::assert_offsets(field = N, …)]` from 0.47 |
 | **Watch mode** | `padlock watch <path>` re-analyses on every file change |
 | **Source-preserving fixes** | `padlock fix` reorders field chunks verbatim, keeping `pub`, `#[serde(...)]`, `/// doc-comments`, and guard annotations intact |
 | **Project health summary** | `padlock summary` shows aggregate score, severity bar chart, worst files, and worst structs in one terminal screen |
@@ -94,18 +94,21 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 
 Source analysis computes layouts the way the compiler would. Go files are laid out together with the rest of their package, Rust files with the rest of their crate, and C/C++ files with the headers they include (macros expanded), so types from other files are sized, not guessed. What source alone cannot know, padlock marks as **uncertain** instead of guessing silently — a type from another Go package or Rust crate, a header it cannot find, a member written as an unknown macro, a branch on an undefined project macro.
 
-**Measured on real code**, source analysis against the layouts the compiler actually produced (its DWARF debug info, or rustc's `-Zprint-type-sizes`). *Exact* means the struct's size matches; *flagged* means padlock got it wrong but said so; *silently wrong* is the number that matters for trusting the output:
+**Measured on real code** with the default `padlock analyze <path>` — no options — against the layouts the compiler actually produced (its DWARF debug info, or rustc's `-Zprint-type-sizes`). *Exact* means the struct's size matches; *flagged* means padlock got it wrong but said so; *silently wrong* is the number that matters for trusting the output:
 
 | Code | Target | Types | Exact | Flagged | Silently wrong |
 |---|---|---:|---:|---:|---:|
 | Go standard library (19 packages incl. `runtime`, `net/http`, `crypto/tls`) | linux/amd64 | 400 | 83% | 17% | **0** |
-| | linux/arm64 | 394 | 83% | 17% | **0** |
-| | linux/386 | 391 | 83% | 17% | **0** |
-| glibc headers (stdio, pthread, socket, signal, ucontext, elf, …) | x86_64 Linux | 173 | 93% | 7% | **0** |
-| | aarch64 Linux | 181 | 94% | 6% | **0** |
-| | riscv64 Linux | 169 | 93% | 7% | **0** |
+| | linux/arm64 ¹ | 394 | 83% | 17% | **0** |
+| | linux/386 ¹ | 391 | 83% | 17% | **0** |
+| glibc headers (stdio, pthread, socket, signal, ucontext, elf, …) | x86_64 Linux | 153 | 91% | 9% | **0** |
+| | aarch64 Linux ¹ | 181 | 96% | 4% | **0** |
+| | riscv64 Linux ¹ | 169 | 93% | 7% | **0** |
 | Python 3.12 + OpenSSL headers | x86_64 Linux | 152 | 95% | 5% | **0** |
-| padlock's own crates | x86_64 Linux | 96 | 93% | 7% | **0** |
+| libuv headers | x86_64 Linux | 51 | 100% | 0% | **0** |
+| padlock's own Rust crates | x86_64 Linux | 97 | 93% | 7% | **0** |
+
+¹ Cross targets need `--target`, and for C the target's headers (`-I`, here zig's bundled glibc headers).
 
 Most flagged Go types hold a type from another package (`runtime/internal/atomic`, `internal/abi`), which source analysis does not follow; use `--go-exact` for those. Not yet measured on real code: C++, Zig, Windows/MSVC, macOS, and Rust on 32-bit targets — for these the evidence is the conformance suite below.
 
@@ -835,7 +838,7 @@ See **[docs/real-world-examples.md](docs/real-world-examples.md)** for full fiel
 
 ```toml
 [dependencies]
-padlock-macros = "0.1"
+padlock-macros = "0.20"
 ```
 
 ### `#[padlock::assert_no_padding]`
@@ -896,7 +899,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build
-      - uses: gidotencate/padlock@v1
+      - uses: gidotencate/padlock@v0.12.0
         with:
           path: target/debug/myapp
           output-format: sarif

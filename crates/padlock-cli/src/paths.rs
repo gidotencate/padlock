@@ -74,9 +74,10 @@ pub fn collect_layouts(
             .collect();
         if named.len() > 1 {
             let (first, _) = include_roots_first(&named, arch);
-            first.par_iter().for_each(|f| {
-                let _ = padlock_source::parse_source(f, arch);
-            });
+            // A header shared by several roots is laid out in the context of
+            // the first (in sorted order), whatever the thread timing.
+            let first: Vec<PathBuf> = first.into_iter().cloned().collect();
+            let _ = padlock_source::parse_c_roots(&first, arch);
         }
     }
 
@@ -89,6 +90,24 @@ pub fn collect_layouts(
                     .filter(|f| !should_skip_source_file(f))
                     .collect();
                 files.sort_unstable();
+            }
+            // Go files built only for another OS/architecture (or behind an
+            // off build tag) are not part of the program being analyzed;
+            // naming such a file explicitly still analyzes it.
+            let arch = source_arch();
+            let before = files.len();
+            files = files
+                .into_par_iter()
+                .filter(|f| padlock_source::built_for_target(f, arch))
+                .collect();
+            files.sort_unstable();
+            if files.len() < before {
+                eprintln!(
+                    "padlock: note: skipped {} Go file(s) in {} not built for {} (build constraints)",
+                    before - files.len(),
+                    path.display(),
+                    arch.name
+                );
             }
             if files.is_empty() {
                 eprintln!(
@@ -180,8 +199,37 @@ pub fn collect_layouts(
                 counter_ref.fetch_add(1, Ordering::Relaxed);
                 ((*file).clone(), r)
             };
-            let mut miss_results: Vec<_> = first.par_iter().map(parse).collect();
-            miss_results.extend(later.par_iter().map(parse).collect::<Vec<_>>());
+            // C/C++ roots one at a time, in order (a shared header takes the
+            // context of the first root that reaches it, which must not depend
+            // on thread timing); the other roots in parallel.
+            let (c_roots, other_roots): (Vec<&PathBuf>, Vec<&PathBuf>) = first
+                .into_iter()
+                .partition(|f| !padlock_source::direct_includes(f, arch).is_empty());
+            let mut miss_results: Vec<_> = other_roots.par_iter().map(parse).collect();
+            let c_roots: Vec<PathBuf> = c_roots.into_iter().cloned().collect();
+            for (file, r) in c_roots
+                .iter()
+                .zip(padlock_source::parse_c_roots(&c_roots, arch))
+            {
+                counter_ref.fetch_add(1, Ordering::Relaxed);
+                miss_results.push((file.clone(), r));
+            }
+            // Included files: mostly laid out already by their roots; those
+            // that are not (reached only through branches no root takes) are
+            // processed in the same deterministic order.
+            let (later_c, later_other): (Vec<&PathBuf>, Vec<&PathBuf>) =
+                later.into_iter().partition(|f| {
+                    !padlock_source::direct_includes(f, arch).is_empty() || is_c_family(f)
+                });
+            miss_results.extend(later_other.par_iter().map(parse).collect::<Vec<_>>());
+            let later_c: Vec<PathBuf> = later_c.into_iter().cloned().collect();
+            for (file, r) in later_c
+                .iter()
+                .zip(padlock_source::parse_c_roots(&later_c, arch))
+            {
+                counter_ref.fetch_add(1, Ordering::Relaxed);
+                miss_results.push((file.clone(), r));
+            }
             // Back to the walk's (deterministic) order.
             let order: std::collections::HashMap<&PathBuf, usize> =
                 misses.iter().enumerate().map(|(i, f)| (f, i)).collect();
@@ -332,6 +380,13 @@ pub fn source_arch() -> &'static padlock_core::arch::ArchConfig {
 
 /// [`collect_layouts`], plus exact compiler layouts from `--compile-commands`
 /// when given: those replace the source-level layouts of the files compiled.
+fn is_c_family(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "inl" | "ipp")
+    )
+}
+
 /// Split C/C++ `files` into those no other file (transitively) includes —
 /// translation-unit roots such as `.c` files and umbrella headers — and the
 /// rest, so the roots can be parsed first.
@@ -465,7 +520,10 @@ fn instantiate_across_files(
     go_dirs
         .into_par_iter()
         .for_each(|d| padlock_source::prepare_go_packages(d, arch));
-    for file in pending.keys() {
+    // Sorted, so the replaced layouts come back in a stable order.
+    let mut files: Vec<&String> = pending.keys().collect();
+    files.sort();
+    for file in files {
         let Ok(output) = padlock_source::parse_source(Path::new(file), arch) else {
             continue;
         };

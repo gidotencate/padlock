@@ -1032,3 +1032,28 @@ fn c_types_from_included_headers_are_sized_and_cached_with_their_headers() {
     .unwrap();
     assert_eq!(size(), 48);
 }
+
+#[test]
+fn init_refuses_to_overwrite_unless_forced() {
+    let dir = tempfile::TempDir::new().unwrap();
+    padlock()
+        .arg("init")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    padlock()
+        .arg("init")
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(contains("--force"));
+    std::fs::write(dir.path().join(".padlock.toml"), "garbage = [").unwrap();
+    padlock()
+        .args(["init", "--force"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    // The template is valid configuration.
+    let text = std::fs::read_to_string(dir.path().join(".padlock.toml")).unwrap();
+    assert!(text.parse::<toml::Table>().is_ok());
+}

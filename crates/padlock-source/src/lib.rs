@@ -43,6 +43,12 @@ pub(crate) fn settings_generation() -> u64 {
     SETTINGS_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// `false` for a Go file `go build` would leave out for the target (another
+/// OS or architecture, a build tag that is off); `true` for everything else.
+pub fn built_for_target(path: &Path, arch: &'static ArchConfig) -> bool {
+    path.extension().is_none_or(|e| e != "go") || go_package::built_for_target(path, arch)
+}
+
 /// Parse the Rust crate containing `path` ahead of its files (see
 /// [`prepare_go_packages`]).
 pub fn prepare_rust_crate(path: &Path, arch: &'static ArchConfig) {
@@ -345,6 +351,17 @@ fn looks_like_cpp(source: &str) -> bool {
             || l.contains(" virtual ")
             || l.starts_with("virtual ")
     })
+}
+
+/// Parse C/C++ translation-unit roots (files no other analyzed file includes)
+/// in parallel but deterministically: each shared header is laid out in the
+/// context of the first root, in sorted order, that reaches it. Results are
+/// in the order of `roots`.
+pub fn parse_c_roots(
+    roots: &[PathBuf],
+    arch: &'static ArchConfig,
+) -> Vec<anyhow::Result<ParseOutput>> {
+    c_includes::parse_units_in_order(roots, arch)
 }
 
 /// The headers a C/C++ file includes directly (resolved, canonical); empty for

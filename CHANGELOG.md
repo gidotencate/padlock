@@ -2,6 +2,20 @@
 
 All notable changes to padlock are documented here.
 
+## [0.64.0] — 2026-10-25
+
+### Fixed
+- **C/C++ headers are preprocessed in order.** A header included part-way through a file now sees the declarations above its `#include` (libuv's `uv.h` defines `struct uv__queue` before including `uv/unix.h`, which uses it), and the macros it defines apply only to the lines after it; `#include`s in branches the target does not take are no longer followed. Include guards (`#ifndef X_H` / `#define X_H`) count as decided.
+- **Results are the same on every run.** A header shared by several files is laid out in the context of the first file, in sorted order, that includes it, instead of whichever thread got there first; output order no longer depends on hash-map iteration.
+- Without `-I`, a quoted `#include` that is not next to the including file is also looked for up to three directories higher (a project's include root), and an `<…>` one after the system paths.
+- Function-pointer typedefs (`typedef void (*cb_t)(…)`) and array typedefs (`typedef long jmp_buf[8]`) are sized.
+- In a directory scan, Go files not built for the target (`_windows.go` on Linux, `//go:build` tags that are off) are skipped, as `go build` would; naming a file explicitly still analyzes it.
+- `padlock init --force` overwrites an existing `.padlock.toml` (it was documented but missing).
+- VS Code extension: the hover says when a struct's size is uncertain (fields whose type padlock could not see), instead of showing it as exact.
+
+### Documentation
+- README accuracy table measured with default options and extended with libuv; the license badge links to the license section; the GitHub Action and `padlock-macros` examples reference released versions (`v0.12.0`, `0.20`), noting that `assert_align`/`assert_offsets` need 0.47 or later. `padlock-source`'s README and CLAUDE.md updated for the current layout model.
+
 ## [0.63.0] — 2026-10-25
 
 ### Fixed

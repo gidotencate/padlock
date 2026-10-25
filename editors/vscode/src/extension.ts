@@ -31,6 +31,8 @@ interface PadlockStruct {
   wasted_bytes: number;
   score: number;
   findings: PadlockFinding[];
+  /** Fields whose size padlock could not determine from source (a guess). */
+  uncertain_fields?: string[];
 }
 
 interface PadlockOutput {
@@ -504,7 +506,8 @@ function buildHover(
   // source_line is 1-based; VS Code position.line is 0-based
   const line = position.line + 1;
   const struct = structs.find((s) => s.source_line === line);
-  if (!struct || struct.findings.length === 0) {
+  const uncertain = struct?.uncertain_fields ?? [];
+  if (!struct || (struct.findings.length === 0 && uncertain.length === 0)) {
     return null;
   }
 
@@ -526,6 +529,14 @@ function buildHover(
     md.appendMarkdown(` · **${struct.wasted_bytes}B wasted**`);
   }
   md.appendMarkdown("\n\n");
+
+  // Sizes padlock had to guess: say so, so the numbers are not over-trusted.
+  if (uncertain.length > 0) {
+    md.appendMarkdown(
+      `⚠️ Size uncertain for ${uncertain.map((f) => `\`${f}\``).join(", ")} ` +
+        `(type not visible from source) — layout is an estimate\n\n`,
+    );
+  }
 
   // Findings
   for (const f of struct.findings) {

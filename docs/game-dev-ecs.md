@@ -130,7 +130,7 @@ Add to `.github/workflows/padlock.yml`:
 
 ```yaml
 - name: Check component struct layouts
-  uses: gidotencate/padlock@v0.9.3
+  uses: gidotencate/padlock@v0.12.0
   with:
     path: game/components/
     fail-on-severity: high

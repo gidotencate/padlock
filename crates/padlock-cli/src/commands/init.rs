@@ -71,12 +71,12 @@ const TEMPLATE: &str = r#"# .padlock.toml — padlock project configuration
 # fail_below   = 50       # allow a lower score for this struct
 "#;
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run(force: bool) -> anyhow::Result<()> {
     let path = Path::new(".padlock.toml");
-    if path.exists() {
+    if path.exists() && !force {
         anyhow::bail!(
             ".padlock.toml already exists in the current directory. \
-             Remove it first or edit it directly."
+             Edit it directly, or pass --force to overwrite it."
         );
     }
     std::fs::write(path, TEMPLATE)?;

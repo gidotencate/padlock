@@ -2,16 +2,16 @@
 
 Source analysis backend for [padlock](https://github.com/gidotencate/padlock) — a struct memory layout analyzer for C, C++, Rust, Go, and Zig.
 
-This crate parses source files without invoking a compiler, using tree-sitter (C/C++/Go) and syn (Rust) to extract struct definitions and simulate their memory layout.
+This crate parses source files without invoking a compiler, using tree-sitter (C/C++/Go/Zig) and syn (Rust) to extract struct definitions and simulate their memory layout.
 
 ## Supported languages
 
 | Language | Parser | Notes |
 |---|---|---|
-| C | tree-sitter-c | structs, unions, typedefs, bitfields (grouped as `[a:3|b:5]` storage-unit fields) |
-| C++ | tree-sitter-cpp | classes, inheritance, vtable pointer, `typedef` alias resolution; stdlib types (`std::string`, `std::vector`, `std::optional`, `std::shared_ptr`, …); template structs/classes are skipped |
-| Rust | syn | `repr(C)`, `repr(packed)`, `repr(align(N))`, all primitive types, `NonZeroXxx`, `f16`/`f128`, transparent newtypes (`Cell<T>`, `MaybeUninit<T>`, etc.); `repr(Rust)` structs emit a caveat note; generic structs are skipped |
-| Go | tree-sitter-go | built-in types, `sync.Mutex`, slices, maps, locally-declared interfaces (sized as 2-word fat pointers); qualified cross-package types flagged as uncertain |
+| C | tree-sitter-c | structs, unions, typedefs, bitfields (grouped as `[a:3|b:5]` storage-unit fields); laid out with the file's `#include`s, macros expanded, `#if` branches resolved for the target |
+| C++ | tree-sitter-cpp | classes, Itanium inheritance (tail padding, empty bases, virtual bases), vtable pointer, namespaces, `typedef` alias resolution; stdlib types (`std::string`, `std::vector`, `std::optional`, `std::shared_ptr`, …); templates analyzed per concrete instantiation |
+| Rust | syn | `repr(C)`, `repr(packed)`, `repr(align(N))`, all primitive types, `NonZeroXxx`, `f16`/`f128`, transparent newtypes, enum niches; `repr(Rust)` laid out in rustc's order; generics per instantiation; laid out with the whole crate |
+| Go | tree-sitter-go | built-in types, `sync.Mutex`, slices, maps, interfaces (2-word fat pointers), generics per instantiation; laid out with the whole package (build constraints applied); cross-package types flagged as uncertain |
 | Zig | tree-sitter | structs, unions (bare + tagged), packed structs; C interop types, arbitrary-width integers |
 
 ## Concurrency annotation
@@ -26,7 +26,7 @@ Fields without explicit annotations are inferred from their type names (`Mutex`,
 
 ## Skipped types
 
-Generic and template types that cannot be accurately sized from source are recorded rather than silently dropped. `parse_source` returns a `ParseOutput { layouts, skipped }` where `skipped: Vec<SkippedStruct>` lists every type that was encountered but not analyzed, along with the reason. These appear in JSON output and as SARIF `notifications` so CI pipelines can see what was skipped.
+Generic and template types with no concrete instantiation in the analyzed code are recorded rather than silently dropped. `parse_source` returns a `ParseOutput { layouts, skipped }` where `skipped: Vec<SkippedStruct>` lists every type that was encountered but not analyzed, along with the reason. These appear in JSON output and as SARIF `notifications` so CI pipelines can see what was skipped.
 
 Skipped type categories:
 - **Rust**: generic structs and enums (`struct Foo<T>`, `enum Result<T, E>`)

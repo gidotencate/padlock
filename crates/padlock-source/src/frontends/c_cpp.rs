@@ -1950,6 +1950,53 @@ fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, Stri
             }
             continue;
         }
+        // `typedef long int jmp_buf[8];`: an array type. The alias carries the
+        // dimensions (`long int[8]`), which `resolve_field_type` evaluates.
+        if let Some(decl) = node.child_by_field_name("declarator")
+            && decl.kind() == "array_declarator"
+        {
+            let mut dims = Vec::new();
+            let mut d = decl;
+            while d.kind() == "array_declarator" {
+                let size = d
+                    .child_by_field_name("size")
+                    .map(|n| source[n.byte_range()].trim().to_string())
+                    .unwrap_or_default();
+                dims.push(size);
+                match d.child_by_field_name("declarator") {
+                    Some(inner) => d = inner,
+                    None => break,
+                }
+            }
+            let base = node
+                .child_by_field_name("type")
+                .map(|t| source[t.byte_range()].trim().to_string());
+            if d.kind() == "type_identifier"
+                && let Some(base) = base
+                && !dims.iter().any(String::is_empty)
+            {
+                // Declarator order is outermost first: `a[2][3]` → ["3", "2"].
+                let suffix: String = dims.iter().rev().map(|n| format!("[{n}]")).collect();
+                aliases.insert(
+                    source[d.byte_range()].to_string(),
+                    format!("{base}{suffix}"),
+                );
+            }
+            continue;
+        }
+        // `typedef void (*cb_t)(int);`: a function pointer, one pointer wide.
+        if let Some(decl) = node.child_by_field_name("declarator")
+            && decl.kind() == "function_declarator"
+            && let Some(inner) = decl.child_by_field_name("declarator")
+            && inner.kind() == "parenthesized_declarator"
+            && let Some(ptr) = inner.named_child(0)
+            && ptr.kind() == "pointer_declarator"
+            && let Some(name) = ptr.child_by_field_name("declarator")
+            && name.kind() == "type_identifier"
+        {
+            aliases.insert(source[name.byte_range()].to_string(), "void *".to_string());
+            continue;
+        }
         // Skip struct/union/class typedefs — those produce StructLayout entries.
         let has_record = (0..node.child_count()).any(|i| {
             node.child(i)

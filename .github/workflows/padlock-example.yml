@@ -3,7 +3,7 @@
 #
 # To use this in your own repository:
 #   1. Copy this file to .github/workflows/padlock.yml
-#   2. Replace `uses: gidotencate/padlock@v0.10.9` with the version you want to pin
+#   2. Replace `uses: gidotencate/padlock@v0.12.0` with the version you want to pin
 #   3. Adjust `path` to point at your source directory or compiled binary
 
 name: Struct Layout Analysis

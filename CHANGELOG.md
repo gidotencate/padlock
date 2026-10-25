@@ -2,6 +2,20 @@
 
 All notable changes to padlock are documented here.
 
+## [0.63.0] — 2026-10-25
+
+### Fixed
+- **Go empty structs (`type noCopy struct{}`) were sized as one word**, so `sync.WaitGroup` and every struct embedding such a marker came out too large without a warning. They are zero-sized now.
+- **Go files built only under a `GOEXPERIMENT` were treated wrongly**: build constraints now use the toolchain's own tags (`go list -f '{{context.ToolTags}}'`, e.g. `goexperiment.exectracer2`, `amd64.v1`), falling back to Go 1.22–1.23 defaults without a toolchain.
+- An array length using `unsafe.Sizeof(localStruct{})` took a one-word placeholder as the size; it is now flagged uncertain.
+- **Rust types from other modules of the crate were guessed silently.** Rust files are laid out together with their crate (every `.rs` under `src/`, cached per crate); a name declared in more than one module stays unknown and is flagged. A type name padlock knows nowhere is flagged uncertain instead of taken as one word.
+- `Option` of a fieldless enum, of a struct with a niche-bearing field, and of a tuple with one (`Option<(String, usize)>`) is sized as rustc does (no extra tag).
+- **`--rust-exact` silently did nothing on a second run** (cargo considered the crate fresh, so rustc printed no sizes); the crate is now always recompiled for the probe, a run that prints nothing is reported, and binary-only packages with several binaries are probed per binary.
+- `__attribute__ ((__aligned__ (16)))` with spaces (glibc's spelling) on a C field is honoured; RISC-V Linux predefines `__riscv_float_abi_double`.
+
+### Documentation
+- README: accuracy measured on real code (Go standard library on amd64/arm64/386, glibc on x86_64/aarch64/riscv64, Python and OpenSSL headers, Rust crates), replacing an earlier Go figure that had been measured incorrectly (`--go-exact` cannot probe some standard-library packages, which were then compared with themselves).
+
 ## [0.62.0] — 2026-10-25
 
 ### Fixed

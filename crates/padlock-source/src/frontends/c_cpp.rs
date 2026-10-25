@@ -3279,9 +3279,11 @@ fn extract_guard_from_c_field_text(field_source: &str) -> Option<String> {
 fn extract_aligned_from_c_field_text(field_source: &str) -> Option<usize> {
     // Use "aligned(" as the search key so we don't false-match identifiers
     // like "is_aligned" that do not have an immediately following '('.
+    // glibc spells it `__attribute__ ((__aligned__ (16)))`, with spaces.
+    let compact: String = field_source.split_whitespace().collect();
     for kw in &["aligned(", "__aligned__("] {
-        if let Some(pos) = field_source.find(kw) {
-            let after = &field_source[pos + kw.len()..];
+        if let Some(pos) = compact.find(kw) {
+            let after = &compact[pos + kw.len()..];
             if let Some(end) = after.find(')') {
                 let n_str = after[..end].trim();
                 if let Ok(n) = n_str.parse::<usize>() {

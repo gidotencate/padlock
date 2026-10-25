@@ -8,6 +8,8 @@
 
 Supports C, C++, Rust, Go, and Zig. Ranks findings by impact, generates reorder suggestions, flags concurrency risks. CLI-first and CI-ready.
 
+**Accuracy:** checked against the compilers on real code (Go standard library, glibc, Python and OpenSSL headers, Rust crates; amd64, arm64, i386, riscv64): 83–95% of struct sizes exact, the rest flagged as uncertain, **none silently wrong**. See [How exact is it?](#how-exact-is-it).
+
 ```
 $ padlock analyze src/connection.rs
 
@@ -90,7 +92,24 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 
 ## How exact is it?
 
-Source analysis computes layouts the way the compiler would, and is checked against the real compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) on every change: a conformance suite of several hundred probe structs for each language and seven targets, plus differential fuzzing of random C/C++ structs (`tests/conformance/`). Go files are laid out together with the rest of their package, and C/C++ files with the headers they include, so types from other files are sized exactly. What source alone cannot know, padlock reports as `uncertain` rather than guessing silently — a typedef from a header it cannot find, a member written as an unknown macro, a branch that depends on an undefined project macro, a type from another Go package. Checked against the compilers on real code: 0 silently wrong sizes among 1,331 Go standard-library types (`--go-exact`) and among 325 glibc, Python and OpenSSL header types (gcc DWARF), with 93–97% exact.
+Source analysis computes layouts the way the compiler would. Go files are laid out together with the rest of their package, Rust files with the rest of their crate, and C/C++ files with the headers they include (macros expanded), so types from other files are sized, not guessed. What source alone cannot know, padlock marks as **uncertain** instead of guessing silently — a type from another Go package or Rust crate, a header it cannot find, a member written as an unknown macro, a branch on an undefined project macro.
+
+**Measured on real code**, source analysis against the layouts the compiler actually produced (its DWARF debug info, or rustc's `-Zprint-type-sizes`). *Exact* means the struct's size matches; *flagged* means padlock got it wrong but said so; *silently wrong* is the number that matters for trusting the output:
+
+| Code | Target | Types | Exact | Flagged | Silently wrong |
+|---|---|---:|---:|---:|---:|
+| Go standard library (19 packages incl. `runtime`, `net/http`, `crypto/tls`) | linux/amd64 | 400 | 83% | 17% | **0** |
+| | linux/arm64 | 394 | 83% | 17% | **0** |
+| | linux/386 | 391 | 83% | 17% | **0** |
+| glibc headers (stdio, pthread, socket, signal, ucontext, elf, …) | x86_64 Linux | 173 | 93% | 7% | **0** |
+| | aarch64 Linux | 181 | 94% | 6% | **0** |
+| | riscv64 Linux | 169 | 93% | 7% | **0** |
+| Python 3.12 + OpenSSL headers | x86_64 Linux | 152 | 95% | 5% | **0** |
+| padlock's own crates | x86_64 Linux | 96 | 93% | 7% | **0** |
+
+Most flagged Go types hold a type from another package (`runtime/internal/atomic`, `internal/abi`), which source analysis does not follow; use `--go-exact` for those. Not yet measured on real code: C++, Zig, Windows/MSVC, macOS, and Rust on 32-bit targets — for these the evidence is the conformance suite below.
+
+Every change is also checked against the compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) with a conformance suite of probe structs per language — x86-64, aarch64, riscv64, i386, Cortex-M, AVR and Windows x64 for C; i386 for Go and Zig — plus differential fuzzing of random C/C++ structs (`tests/conformance/`). Known remaining gaps: C++ `packed` classes combined with inheritance (rare fuzzing mismatches), and the editor server (`padlock-lsp`) analyzes the open file alone, without its package, crate or includes.
 
 When you need the compiler's own answer:
 

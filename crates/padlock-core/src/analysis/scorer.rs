@@ -48,7 +48,12 @@ pub fn score_with_breakdown(layout: &StructLayout) -> ScoreBreakdown {
     let false_sharing_deduction = if layout.is_union {
         0.0
     } else if false_sharing::has_false_sharing(layout) {
-        30.0
+        // Confirmed by an annotation: 30; inferred from type names: 15.
+        if false_sharing::is_annotated(layout) {
+            30.0
+        } else {
+            15.0
+        }
     } else if false_sharing::has_potential_sharing_risk(layout) {
         10.0
     } else {

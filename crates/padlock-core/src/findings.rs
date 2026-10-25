@@ -293,21 +293,19 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
     // ── false sharing ────────────────────────────────────────────────────────
     // Unions place all fields at offset 0 by definition; that is not false sharing.
     if !layout.is_union && false_sharing::has_false_sharing(layout) {
-        let conflicts = false_sharing::find_sharing_conflicts(layout);
-        // is_inferred = true when no conflicting field carries an explicit annotation.
-        let is_inferred = !layout.fields.iter().any(|f| {
-            matches!(
-                f.access,
-                AccessPattern::Concurrent {
-                    is_annotated: true,
-                    ..
-                }
-            )
-        });
+        let conflicts = false_sharing::find_concurrent_conflicts(layout);
+        // is_inferred = true when no conflicting field carries an explicit
+        // annotation: the guards come from type names, so the hazard is
+        // likely but unconfirmed — Medium rather than High.
+        let is_inferred = !false_sharing::is_annotated(layout);
         findings.push(Finding::FalseSharing {
             struct_name: layout.name.clone(),
             conflicts,
-            severity: Severity::High,
+            severity: if is_inferred {
+                Severity::Medium
+            } else {
+                Severity::High
+            },
             is_inferred,
         });
     }

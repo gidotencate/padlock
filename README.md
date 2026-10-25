@@ -619,9 +619,11 @@ struct Stats {
 };
 ```
 
-Fix: pad each independently-locked group to its own cache line.
+Two atomics updated by different threads (`std::atomic<long> produced, consumed;`) are the same hazard and are reported too. Only the fields that conflict are listed.
 
-Severity: always **High**
+Fix: pad each independently-locked group (or each hot atomic) to its own cache line.
+
+Severity: **High** when a conflicting field carries a guard annotation (below); **Medium** when the guards are inferred from type names — likely, but verify with profiling before restructuring.
 
 #### Explicit guard annotation
 

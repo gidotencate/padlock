@@ -2,6 +2,15 @@
 
 All notable changes to padlock are documented here.
 
+## [0.65.0] — 2026-10-25
+
+### Fixed
+- **False sharing between two atomics was never reported.** Two independently updated atomics on one cache line (`AtomicU64 produced, consumed`), the textbook case, passed as clean in every language because pairs of atomics were excluded. They are now a conflict like two locks or a lock and an atomic; fields under the same guard still are not.
+- **False-sharing findings list only the conflicting fields** (the locks and atomics on the line), not every field that happens to share it.
+
+### Changed
+- **False-sharing severity follows confidence**: High when a conflicting field carries a guard annotation, Medium when the guards are inferred from type names (it was always High). The score deduction for an inferred finding is 15 instead of 30.
+
 ## [0.64.0] — 2026-10-25
 
 ### Fixed

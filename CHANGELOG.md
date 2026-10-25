@@ -2,6 +2,12 @@
 
 All notable changes to padlock are documented here.
 
+## [0.68.0] — 2026-10-25
+
+### Added
+- **`padlock-lsp` resolves types from outside the open file.** The buffer is laid out against the rest of its Go package, its Rust crate or the headers a C/C++ file includes (found next to the file, in its parent directories and, on Linux, the system include paths — an editor has no `-I` flags), with the unsaved text taking precedence over the saved file. A field typed with a struct from a sibling file is sized instead of guessed. Without context — a new unsaved file, a Go directory with more than 400 files, nothing found — the buffer is analyzed alone, as before. Opening a file from `net/http` takes 0.15 s, `uv.h` 0.19 s.
+- `padlock_source::parse_source_text(path, text, lang, arch)`: the library entry point for this.
+
 ## [0.67.0] — 2026-10-25
 
 ### Fixed

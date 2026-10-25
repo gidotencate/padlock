@@ -112,7 +112,7 @@ Source analysis computes layouts the way the compiler would. Go files are laid o
 
 Most flagged Go types hold a type from another package (`runtime/internal/atomic`, `internal/abi`), which source analysis does not follow; use `--go-exact` for those. Not yet measured on real code: C++, Zig, Windows/MSVC, macOS, and Rust on 32-bit targets — for these the evidence is the conformance suite below.
 
-Every change is also checked against the compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) with a conformance suite of probe structs per language — x86-64, aarch64, riscv64, i386, Cortex-M, AVR and Windows x64 for C; i386 for Go and Zig — plus differential fuzzing of random C/C++ structs (`tests/conformance/`). Known remaining gaps: C++ `packed` classes combined with inheritance (rare fuzzing mismatches), and the editor server (`padlock-lsp`) analyzes the open file alone, without its package, crate or includes.
+Every change is also checked against the compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) with a conformance suite of probe structs per language — x86-64, aarch64, riscv64, i386, Cortex-M, AVR and Windows x64 for C; i386 for Go and Zig — plus differential fuzzing of random C/C++ structs (`tests/conformance/`). Known remaining gaps: C++ `packed` classes combined with inheritance (rare fuzzing mismatches). The editor server (`padlock-lsp`) lays out the open file's live text against its Go package, Rust crate or C/C++ includes when it can find them (Go directories over 400 files are skipped), and the file alone otherwise.
 
 When you need the compiler's own answer:
 

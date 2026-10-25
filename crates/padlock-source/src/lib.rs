@@ -423,6 +423,32 @@ pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<Pa
     Ok(ParseOutput { layouts, skipped })
 }
 
+/// Parse the live text of an editor buffer for the file at `path`, which may
+/// differ from what is saved. Types the file uses from elsewhere are resolved
+/// when they can be found: the rest of its Go package, its Rust crate, the
+/// headers a C/C++ file includes. Without that context — the file is new, the
+/// directory is too large to scan, nothing is found — the text is analyzed on
+/// its own, as [`parse_source_str`] does.
+pub fn parse_source_text(
+    path: &Path,
+    text: &str,
+    lang: &SourceLanguage,
+    arch: &'static ArchConfig,
+) -> anyhow::Result<Vec<StructLayout>> {
+    let with_context = match lang {
+        SourceLanguage::Go => go_package::parse_buffer_in_package(path, text, arch).map(Ok),
+        SourceLanguage::Rust => rust_crate::parse_buffer_in_crate(path, text, arch).map(Ok),
+        SourceLanguage::C | SourceLanguage::Cpp => {
+            c_includes::parse_with_includes(path, text, lang, arch)
+        }
+        SourceLanguage::Zig => None,
+    };
+    match with_context {
+        Some(layouts) => Ok(finish_layouts(text, lang, layouts?)),
+        None => parse_source_str(text, lang, arch),
+    }
+}
+
 /// Parse source text directly (useful for tests and piped input).
 pub fn parse_source_str(
     source: &str,

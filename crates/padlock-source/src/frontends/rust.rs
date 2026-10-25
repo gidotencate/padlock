@@ -55,7 +55,8 @@ type LocalStruct = (Vec<(String, Type)>, Option<usize>, Option<usize>, bool);
 
 /// What a pre-pass over the file learns about its own items, so field types can be
 /// sized without a type checker.
-struct RustCtx {
+#[derive(Clone)]
+pub(crate) struct RustCtx {
     arch: &'static ArchConfig,
     /// `const N: usize = 8;` → name → expression text.
     consts: HashMap<String, String>,
@@ -1607,8 +1608,16 @@ pub fn generic_uses(source: &str) -> Vec<(String, Vec<String>)> {
 }
 
 pub fn parse_rust(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
+    parse_rust_in_ctx(source, RustCtx::new(arch))
+}
+
+/// Parse `source` with `ctx` (the declarations already known, e.g. the rest of
+/// the crate) in scope; the file's own declarations take precedence.
+pub(crate) fn parse_rust_in_ctx(
+    source: &str,
+    mut ctx: RustCtx,
+) -> anyhow::Result<Vec<StructLayout>> {
     let file: syn::File = syn::parse_str(source)?;
-    let mut ctx = RustCtx::new(arch);
     let mut collector = ItemCollector {
         ctx: &mut ctx,
         generic_params: Vec::new(),
@@ -1664,7 +1673,7 @@ fn declared_names(file: &syn::File) -> HashSet<String> {
 pub(crate) fn parse_rust_crate(
     files: &[(String, String)],
     arch: &'static ArchConfig,
-) -> Vec<Vec<StructLayout>> {
+) -> (Vec<Vec<StructLayout>>, RustCtx) {
     let parsed: Vec<Option<syn::File>> = files
         .iter()
         .map(|(_, src)| syn::parse_str::<syn::File>(src).ok())
@@ -1721,7 +1730,7 @@ pub(crate) fn parse_rust_crate(
         ctx = back;
         out.push(layouts);
     }
-    out
+    (out, ctx)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -1745,7 +1754,7 @@ mod tests {
                     .to_string(),
             ),
         ];
-        let out = parse_rust_crate(&files, &X86_64_SYSV);
+        let (out, _) = parse_rust_crate(&files, &X86_64_SYSV);
         let mut all: Vec<StructLayout> = out.into_iter().flatten().collect();
         crate::resolve_nested_structs(&mut all);
         let uses = all.iter().find(|l| l.name == "Uses").unwrap();

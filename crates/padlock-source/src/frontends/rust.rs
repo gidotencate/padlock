@@ -77,6 +77,9 @@ struct RustCtx {
     generic_structs: HashSet<String>,
     /// Concrete uses `Name<args>` of any path in the file (filtered by name later).
     uses: Vec<(String, Vec<String>)>,
+    /// Non-generic fieldless enums without explicit discriminants:
+    /// `(size in bytes, variant count)` — enough to size `Option` of them.
+    local_enums: HashMap<String, (usize, u128)>,
 }
 
 impl RustCtx {
@@ -92,6 +95,7 @@ impl RustCtx {
             struct_sizes: std::cell::RefCell::new(HashMap::new()),
             generic_structs: HashSet::new(),
             uses: Vec::new(),
+            local_enums: HashMap::new(),
         }
     }
 }
@@ -204,6 +208,22 @@ impl<'ast> Visit<'ast> for ItemCollector<'_> {
             .any(|p| matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_)));
         if !generic {
             self.ctx.local_types.insert(node.ident.to_string());
+            let fieldless = node
+                .variants
+                .iter()
+                .all(|v| matches!(v.fields, Fields::Unit) && v.discriminant.is_none());
+            if fieldless {
+                let n = node.variants.len() as u128;
+                let size = enum_repr_size(&node.attrs, self.ctx.arch).unwrap_or(match n {
+                    0 | 1 => 0,
+                    2..=256 => 1,
+                    257..=65536 => 2,
+                    _ => 4,
+                });
+                self.ctx
+                    .local_enums
+                    .insert(node.ident.to_string(), (size, n));
+            }
         }
         syn::visit::visit_item_enum(self, node);
     }
@@ -515,7 +535,19 @@ fn rust_type_size_align(ty: &Type, ctx: &RustCtx) -> (usize, usize, TypeInfo) {
                     );
                 }
                 // No niche — conservative: inner size + 1-byte discriminant
-                // rounded up to inner alignment.
+                // rounded up to inner alignment. For a local data enum the
+                // niche (and its size) is only known after the resolver.
+                if let Type::Path(ip) = inner
+                    && let Some(last) = ip.path.segments.last()
+                {
+                    let n = last.ident.to_string();
+                    if ctx.local_types.contains(&n)
+                        && !ctx.local_structs.contains_key(&n)
+                        && !ctx.local_enums.contains_key(&n)
+                    {
+                        ctx.uncertain.set(true);
+                    }
+                }
                 let (inner_size, inner_align, _) = rust_type_size_align(inner, ctx);
                 let sz = if inner_size == 0 {
                     1 // Option<()> / Option<ZST> = 1 byte
@@ -541,6 +573,11 @@ fn rust_type_size_align(ty: &Type, ctx: &RustCtx) -> (usize, usize, TypeInfo) {
                 (arch.pointer_size * 2, arch.pointer_size)
             } else {
                 if matches!(name.as_str(), "Condvar" | "Once" | "Barrier") && !futex_std(arch) {
+                    ctx.uncertain.set(true);
+                }
+                // A type declared neither here nor in std (another module or
+                // crate) is only a guess.
+                if known_size_align(&name, arch).is_none() && !ctx.local_types.contains(&name) {
                     ctx.uncertain.set(true);
                 }
                 primitive_size_align(&name, arch)
@@ -731,9 +768,40 @@ fn option_niche_size(inner: &Type, ctx: &RustCtx) -> Option<(usize, usize)> {
                     {
                         return option_niche_size(target, ctx);
                     }
+                    // A fieldless enum with unused discriminant values.
+                    if let Some(&(size, variants)) = ctx.local_enums.get(&name) {
+                        let room = 1u128.checked_shl(8 * size as u32).unwrap_or(u128::MAX);
+                        return (size > 0 && variants < room).then_some((size, size));
+                    }
+                    // A struct with a niche in any field (rustc uses it).
+                    if let Some((fields, packed, _, _)) = ctx.local_structs.get(&name)
+                        && packed.is_none()
+                        && ctx.depth.get() < 8
+                    {
+                        ctx.depth.set(ctx.depth.get() + 1);
+                        let niche = fields
+                            .iter()
+                            .any(|(_, t)| option_niche_size(t, ctx).is_some());
+                        ctx.depth.set(ctx.depth.get() - 1);
+                        if niche {
+                            return local_struct_size(&name, ctx);
+                        }
+                    }
                     None
                 }
             }
+        }
+        // A tuple with a niche in any element.
+        Type::Tuple(t) if t.elems.iter().any(|e| option_niche_size(e, ctx).is_some()) => {
+            let parts: Vec<(usize, usize)> = t
+                .elems
+                .iter()
+                .map(|e| {
+                    let (s, a, _) = rust_type_size_align(e, ctx);
+                    (s, a)
+                })
+                .collect();
+            Some(reordered_layout(&parts))
         }
         // &T and &mut T — references are always non-null → niche at null
         Type::Reference(r) => {
@@ -748,8 +816,14 @@ fn option_niche_size(inner: &Type, ctx: &RustCtx) -> Option<(usize, usize)> {
 }
 
 fn primitive_size_align(name: &str, arch: &'static ArchConfig) -> (usize, usize) {
+    known_size_align(name, arch).unwrap_or((arch.pointer_size, arch.pointer_size))
+}
+
+/// Size and alignment of a primitive or std type padlock knows, `None` for any
+/// other name (a type from elsewhere, a generic parameter).
+fn known_size_align(name: &str, arch: &'static ArchConfig) -> Option<(usize, usize)> {
     let ps = arch.pointer_size;
-    match name {
+    Some(match name {
         // ── language primitives ───────────────────────────────────────────────
         "bool" | "u8" | "i8" => (1, 1),
         "u16" | "i16" | "f16" => (2, 2),
@@ -845,8 +919,8 @@ fn primitive_size_align(name: &str, arch: &'static ArchConfig) -> (usize, usize)
         "f32x16" | "i32x16" | "u32x16" => (64, 64),
 
         // ── unknown / third-party / generic type params (T, E, …) ────────────
-        _ => (ps, ps),
-    }
+        _ => return None,
+    })
 }
 
 // ── struct repr detection ─────────────────────────────────────────────────────
@@ -1556,12 +1630,133 @@ pub fn parse_rust(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec
     Ok(visitor.layouts)
 }
 
+/// Names of the structs, enums, type aliases and consts a file declares.
+fn declared_names(file: &syn::File) -> HashSet<String> {
+    struct Names(HashSet<String>);
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_item_struct(&mut self, n: &'ast ItemStruct) {
+            self.0.insert(n.ident.to_string());
+            syn::visit::visit_item_struct(self, n);
+        }
+        fn visit_item_enum(&mut self, n: &'ast ItemEnum) {
+            self.0.insert(n.ident.to_string());
+            syn::visit::visit_item_enum(self, n);
+        }
+        fn visit_item_type(&mut self, n: &'ast syn::ItemType) {
+            self.0.insert(n.ident.to_string());
+            syn::visit::visit_item_type(self, n);
+        }
+        fn visit_item_const(&mut self, n: &'ast syn::ItemConst) {
+            self.0.insert(n.ident.to_string());
+            syn::visit::visit_item_const(self, n);
+        }
+    }
+    let mut names = Names(HashSet::new());
+    names.visit_file(file);
+    names.0
+}
+
+/// Lay out every file of a crate together: each file sees the structs, enums,
+/// aliases and consts of all the others, so a field typed with a type from
+/// another module is sized. A name declared in more than one file is
+/// ambiguous without a module resolver and stays unknown (and so uncertain).
+/// Returns the layouts per input file, in order (empty for unparsable files).
+pub(crate) fn parse_rust_crate(
+    files: &[(String, String)],
+    arch: &'static ArchConfig,
+) -> Vec<Vec<StructLayout>> {
+    let parsed: Vec<Option<syn::File>> = files
+        .iter()
+        .map(|(_, src)| syn::parse_str::<syn::File>(src).ok())
+        .collect();
+    let mut seen_in: HashMap<String, usize> = HashMap::new();
+    for f in parsed.iter().flatten() {
+        for n in declared_names(f) {
+            *seen_in.entry(n).or_default() += 1;
+        }
+    }
+    let ambiguous: HashSet<String> = seen_in
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(k, _)| k)
+        .collect();
+    let mut ctx = RustCtx::new(arch);
+    let mut params = Vec::new();
+    for f in parsed.iter().flatten() {
+        let mut collector = ItemCollector {
+            ctx: &mut ctx,
+            generic_params: Vec::new(),
+        };
+        collector.visit_file(f);
+        params.append(&mut collector.generic_params);
+    }
+    ctx.uses.retain(|(_, args)| {
+        !args.iter().any(|a| {
+            a.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|w| params.iter().any(|p| p == w))
+        })
+    });
+    for n in &ambiguous {
+        ctx.consts.remove(n);
+        ctx.aliases.remove(n);
+        ctx.local_types.remove(n);
+        ctx.local_structs.remove(n);
+        ctx.generic_structs.remove(n);
+    }
+    let mut out = Vec::with_capacity(files.len());
+    for ((_, source), file) in files.iter().zip(&parsed) {
+        let Some(file) = file else {
+            out.push(Vec::new());
+            continue;
+        };
+        let mut visitor = StructVisitor {
+            ctx,
+            layouts: Vec::new(),
+            source,
+        };
+        visitor.visit_file(file);
+        let StructVisitor {
+            ctx: back, layouts, ..
+        } = visitor;
+        ctx = back;
+        out.push(layouts);
+    }
+    out
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use padlock_core::arch::X86_64_SYSV;
+
+    #[test]
+    fn crate_files_see_each_others_types() {
+        let files = vec![
+            (
+                "a.rs".to_string(),
+                "pub enum Severity { Low, High }\npub struct Inner { a: u64, b: u32 }\n"
+                    .to_string(),
+            ),
+            (
+                "b.rs".to_string(),
+                "use crate::a::*;\nstruct Uses { s: Option<Severity>, i: Inner, f: u8 }\n"
+                    .to_string(),
+            ),
+        ];
+        let out = parse_rust_crate(&files, &X86_64_SYSV);
+        let mut all: Vec<StructLayout> = out.into_iter().flatten().collect();
+        crate::resolve_nested_structs(&mut all);
+        let uses = all.iter().find(|l| l.name == "Uses").unwrap();
+        // Inner (16) + Option<Severity> (1, niche) + u8 → 24.
+        assert_eq!(uses.total_size, 24, "{:?}", uses.fields);
+        assert!(
+            uses.uncertain_fields.is_empty(),
+            "{:?}",
+            uses.uncertain_fields
+        );
+    }
 
     #[test]
     fn parse_simple_struct() {

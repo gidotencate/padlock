@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use padlock_core::arch::ArchConfig;
@@ -98,8 +98,58 @@ fn go_target(arch: &ArchConfig) -> (&'static str, &'static str) {
 
 /// Whether a build tag holds for the target. Release tags (`go1.21`) and `gc`
 /// / `cgo` hold; custom tags (`purego`, `race`, experiments) do not.
+/// The toolchain's own build tags for the target — the `GOEXPERIMENT`s on by
+/// default (`goexperiment.exectracer2`, …) and the arch level (`amd64.v1`) —
+/// asked once from `go list`; without a Go toolchain, those of Go 1.22–1.23.
+fn tool_tags(goos: &str, goarch: &str) -> Arc<HashSet<String>> {
+    type Tags = Mutex<HashMap<(String, String), Arc<HashSet<String>>>>;
+    static TAGS: LazyLock<Tags> = LazyLock::new(Default::default);
+    let key = (goos.to_string(), goarch.to_string());
+    if let Some(t) = TAGS.lock().ok().and_then(|t| t.get(&key).cloned()) {
+        return t;
+    }
+    let asked = std::process::Command::new("go")
+        .args(["list", "-f", "{{context.ToolTags}}", "runtime"])
+        .env("GOOS", goos)
+        .env("GOARCH", goarch)
+        .env("CGO_ENABLED", "0")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<HashSet<String>>()
+        });
+    let tags = Arc::new(asked.unwrap_or_else(|| {
+        let mut t: HashSet<String> = [
+            "goexperiment.regabiwrappers",
+            "goexperiment.regabiargs",
+            "goexperiment.coverageredesign",
+            "goexperiment.allocheaders",
+            "goexperiment.exectracer2",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        if goarch == "amd64" {
+            t.insert("amd64.v1".to_string());
+        }
+        t
+    }));
+    if let Ok(mut t) = TAGS.lock() {
+        t.insert(key, tags.clone());
+    }
+    tags
+}
+
 fn tag_holds(tag: &str, goos: &str, goarch: &str) -> bool {
     tag == goos
+        || tool_tags(goos, goarch).contains(tag)
         || tag == goarch
         || (tag == "unix" && UNIX_OS.contains(&goos))
         || (tag == "linux" && goos == "android")
@@ -245,7 +295,7 @@ type Cache = Mutex<HashMap<(PathBuf, String, &'static str, u64), Arc<Slot>>>;
 /// How long a package is trusted before its files' timestamps are checked again.
 const RECHECK_AFTER: Duration = Duration::from_secs(2);
 
-static PACKAGES: std::sync::LazyLock<Cache> = std::sync::LazyLock::new(Default::default);
+static PACKAGES: LazyLock<Cache> = LazyLock::new(Default::default);
 
 fn dir_signature(dir: &Path) -> Vec<(PathBuf, Option<SystemTime>, u64)> {
     let mut sig: Vec<_> = std::fs::read_dir(dir)

@@ -98,45 +98,86 @@ fn cargo_root(file: &Path) -> Option<PathBuf> {
 
 fn build_with_type_sizes(root: &Path) -> anyhow::Result<String> {
     let target_dir = root.join("target").join("padlock-rust-exact");
-    let out = std::process::Command::new("cargo")
-        .args([
-            "rustc",
-            "--quiet",
-            "--lib",
-            "--",
-            "-Awarnings",
-            "-Zprint-type-sizes",
-        ])
-        .env("RUSTC_BOOTSTRAP", "1")
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .current_dir(root)
-        .output()?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    // A binary-only package has no `--lib` target.
-    if !out.status.success() {
-        let bins = std::process::Command::new("cargo")
-            .args([
-                "rustc",
-                "--quiet",
-                "--bins",
-                "--",
-                "-Awarnings",
-                "-Zprint-type-sizes",
-            ])
+    // A fresh `--cfg` changes the crate's fingerprint, so cargo recompiles it
+    // (and rustc prints the sizes again) even when nothing changed; its
+    // dependencies stay cached.
+    let nonce = format!(
+        "padlock_exact_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let run = |selector: &[&str]| -> anyhow::Result<std::process::Output> {
+        Ok(std::process::Command::new("cargo")
+            .arg("rustc")
+            .arg("--quiet")
+            .args(selector)
+            .args(["--", "-Awarnings", "-Zprint-type-sizes", "--cfg", &nonce])
             .env("RUSTC_BOOTSTRAP", "1")
             .env("CARGO_TARGET_DIR", &target_dir)
             .current_dir(root)
-            .output()?;
-        if !bins.status.success() {
-            let err = String::from_utf8_lossy(&bins.stderr);
+            .output()?)
+    };
+    let mut out = run(&["--lib"])?;
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    // A binary-only package has no `--lib` target: build each binary (extra
+    // rustc arguments apply to one target at a time).
+    if !out.status.success() {
+        text.clear();
+        for bin in binary_names(root) {
+            out = run(&["--bin", &bin])?;
+            if !out.status.success() {
+                break;
+            }
+            text.push_str(&String::from_utf8_lossy(&out.stdout));
+        }
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
             anyhow::bail!(
                 "cargo build failed: {}",
                 err.lines().find(|l| l.contains("error")).unwrap_or("")
             );
         }
-        text = String::from_utf8_lossy(&bins.stdout).into_owned();
+    }
+    if !text.contains("print-type-size") {
+        anyhow::bail!("rustc printed no type sizes");
     }
     Ok(text)
+}
+
+/// The `[[bin]]` targets of the package at `root`.
+fn binary_names(root: &Path) -> Vec<String> {
+    let Ok(out) = std::process::Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return Vec::new();
+    };
+    let manifest = root.join("Cargo.toml");
+    let manifest = std::fs::canonicalize(&manifest).unwrap_or(manifest);
+    meta["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| {
+            p["manifest_path"]
+                .as_str()
+                .map(|m| std::fs::canonicalize(m).unwrap_or_else(|_| m.into()) == manifest)
+                .unwrap_or(false)
+        })
+        .flat_map(|p| p["targets"].as_array().cloned().unwrap_or_default())
+        .filter(|t| {
+            t["kind"]
+                .as_array()
+                .is_some_and(|k| k.iter().any(|k| k == "bin"))
+        })
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// Replace Rust struct layouts with the ones rustc reports.

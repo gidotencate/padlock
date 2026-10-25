@@ -80,9 +80,35 @@ namespace na { struct Same { char a; long b; }; }
 namespace nb { struct Same { char a; char b; }; struct UseB { char x; Same s; char z; }; }
 struct Outer { struct Inner { char c; int i; }; char a; Inner in; char z; };
 struct UseA { char x; na::Same s; char z; };
+// Alignment, packing and bit-fields across inheritance (found by differential fuzzing).
+struct EmptyAl16 { } __attribute__((aligned(16)));
+struct EA1 : Empty { EmptyAl16 f0; short f4; };
+struct BaseEmpty64 : Empty { } __attribute__((aligned(64)));
+struct DerEmpty64 : BaseEmpty64 { };
+struct BaseA4 { unsigned f2; };
+struct DerAl64 : BaseA4 { } __attribute__((aligned(64)));
+struct PkDerAl64 : DerAl64 { long long f7; } __attribute__((packed));
+struct NpAnon { struct { Empty e; EB1 b; } m; };
+struct HoldsNpAnon { char x; NpAnon n; };
+union UAl { unsigned long f0 __attribute__((aligned(2))); };
+union UAl2 { long double f2 __attribute__((aligned(4))); char c[3]; };
+struct PkD1 : BaseA4 { } __attribute__((packed));
+struct PkD1Out { char c; PkD1 f3; } __attribute__((packed));
+struct PkNpMember { NpAnon n; } __attribute__((packed));
+struct PkNpMemberOut { char c; PkNpMember a; } __attribute__((packed));
+struct BfBase { unsigned char f0; };
+struct BfDer : BfBase { unsigned long long b0 : 41; char *f4; };
+struct BfPkBase { signed char f1; } __attribute__((packed));
+struct BfPkDer : BfPkBase { unsigned short b0 : 8; bool f3; };
+struct BfDerDer : BfDer { unsigned b1 : 5; int f9; };
+struct HoldsDerThenBf { BfDer d; unsigned long long b5 : 45; signed char f6; };
+#pragma pack(push, 4)
+struct PragmaAl { unsigned long long b2 : 43; unsigned long f3 __attribute__((aligned(2))); };
+#pragma pack(pop)
 #define P(T,L) printf(#T " %zu %zu " #L "\n", sizeof(T), offsetof(T, L))
 int main(){
-P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);P(AlNest,c);P(PkNest,l);P(BfNest,t);P(TP1,c);P(TP2,c);P(TP3,c);P(TP4,c);P(TP5,c);P(TP6,c);P(EB1,x);P(EB3,t);P(Nua,x);P(VDd,d);P(PrimLater,q);P(OnlyVirtualBase,k);P(TUser,z);P(UseA,z);P(nb::UseB,z);P(Outer,z);
+P(Arr,c);P(ArrC,c);P(Ref,c);P(RRef,c);P(En,c);P(Str,c);P(Sp,c);P(At,c);P(Mx,c);P(Mp,c);P(Ar,c);P(Op,c);P(Fn,c);P(Der,c);P(Der2,c);P(Vb,c);P(VD,d);P(Mem,c);P(Fp,c);P(Nst,c);P(Ptr,c);P(Bf,c);P(St,b);P(Cx,c);P(Mut,c);P(AlNest,c);P(PkNest,l);P(BfNest,t);P(TP1,c);P(TP2,c);P(TP3,c);P(TP4,c);P(TP5,c);P(TP6,c);P(EB1,x);P(EB3,t);P(Nua,x);P(VDd,d);P(PrimLater,q);P(OnlyVirtualBase,k);P(TUser,z);P(UseA,z);P(nb::UseB,z);P(Outer,z);P(EA1,f4);P(PkDerAl64,f7);P(HoldsNpAnon,x);P(PkD1Out,f3);P(PkNpMemberOut,a);P(BfDer,f4);P(BfPkDer,f3);P(BfDerDer,f9);P(HoldsDerThenBf,f6);P(PragmaAl,f3);
+printf("UAl %zu -1\nUAl2 %zu -1\nEmptyAl16 %zu -1\nNpAnon %zu -1\nDerEmpty64 %zu -1\n", sizeof(UAl), sizeof(UAl2), sizeof(EmptyAl16), sizeof(NpAnon), sizeof(DerEmpty64));
 printf("TBuf<long> %zu -1\nTBuf<char, 8> %zu -1\nTNode<double> %zu -1\nTNode<char> %zu -1\nTBuf<short, 2> %zu -1\n", sizeof(TBuf<long>), sizeof(TBuf<char, 8>), sizeof(TNode<double>), sizeof(TNode<char>), sizeof(TBuf<short, 2>));
 printf("EB2 %zu -1\nVBb %zu -1\n", sizeof(EB2), sizeof(VBb));
 }

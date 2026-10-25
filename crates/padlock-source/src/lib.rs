@@ -541,10 +541,13 @@ fn cpp_views(layouts: &[StructLayout]) -> HashMap<String, CppView> {
             let nv = l.fields.iter().filter(|f| !f.name.starts_with("__vbase_"));
             let nvsize = nv.clone().map(|f| f.offset + f.size).max().unwrap_or(0);
             // Never stricter than the class itself (`#pragma pack` / `packed` cap it).
+            // An explicit `aligned(N)` / `alignas(N)` on the class aligns it
+            // as a base subobject too — `packed` does not undo it.
             let nvalign = nv
                 .map(|f| f.align)
                 .max()
                 .unwrap_or(1)
+                .max(l.forced_align.unwrap_or(1))
                 .clamp(1, l.align.max(1));
             (
                 l.name.clone(),
@@ -625,7 +628,8 @@ fn cpp_subobject(
         return (ps, ps, false);
     };
     if cpp_empty(name, views, 0) {
-        return (0, 1, true);
+        // No space, but the alignment still counts (`struct E {} aligned(64)`).
+        return (0, v.align.max(1), true);
     }
     // MSVC never lays a derived class's members into a base's tail padding.
     if msvc {
@@ -710,6 +714,29 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
             .filter(|f| !is_cpp_slot(&f.name))
             .cloned()
             .collect();
+        // Bit-fields of a derived class start where its bases end.
+        let mut regrouped_explicit: Option<Vec<String>> = None;
+        if !info.deferred.is_empty() {
+            let mut start = 0usize;
+            for s in &slots {
+                start = start.next_multiple_of(s.align.max(1)) + s.size;
+            }
+            let attr_packed = layout.is_packed && layout.pack_limit != Some(1);
+            let pragma = layout.pack_limit.unwrap_or(0);
+            let pack_n = if attr_packed { 1 } else { pragma };
+            let (placed, explicit) = frontends::c_cpp::regroup_deferred(
+                &info.deferred,
+                &members,
+                &layout.explicit_align,
+                start,
+                pack_n,
+                attr_packed,
+                pragma,
+                layout.arch,
+            );
+            members = placed;
+            regrouped_explicit = Some(explicit);
+        }
         for m in members.iter_mut() {
             if !info.no_unique_address.contains(&m.name) {
                 continue;
@@ -746,6 +773,10 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
             continue;
         }
         layout.fields = rebuilt;
+        if let Some(explicit) = regrouped_explicit {
+            layout.explicit_align.retain(|n| !n.starts_with('['));
+            layout.explicit_align.extend(explicit);
+        }
         // `packed` applies to data members, not to base subobjects or the vptr.
         for f in &layout.fields {
             if is_cpp_slot(&f.name) && !layout.explicit_align.contains(&f.name) {
@@ -754,8 +785,8 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
         }
         resimulate_layout(layout);
         if layout.total_size == 0 {
-            // C++ objects are never zero-sized.
-            layout.total_size = 1;
+            // C++ objects are never zero-sized (and a multiple of their alignment).
+            layout.total_size = layout.align.max(1);
         }
         changed_any = true;
     }
@@ -837,15 +868,12 @@ pub(crate) fn resolve_nested_structs(layouts: &mut [StructLayout]) {
             })
             .map(|l| l.name.clone())
             .collect();
-        let packed_types: std::collections::HashSet<String> = layouts
-            .iter()
-            .filter(|l| l.is_packed)
-            .map(|l| l.name.clone())
-            .collect();
         // …and so is any C++ class or union with a non-POD member.
         loop {
             let before = non_pod.len();
-            for l in layouts.iter().filter(|l| l.cpp.is_some()) {
+            // Anonymous member aggregates take part: a class holding a
+            // `struct { Base b; }` holds a non-POD member too.
+            for l in layouts.iter() {
                 let has_non_pod_member = l.fields.iter().any(|f| match &f.ty {
                     TypeInfo::Primitive { name, .. } | TypeInfo::Opaque { name, .. } => {
                         non_pod.contains(split_c_array_suffix(name).0)
@@ -861,6 +889,46 @@ pub(crate) fn resolve_nested_structs(layouts: &mut [StructLayout]) {
             }
         }
 
+        // `packed` on a class is cancelled when it has a data member of an
+        // *unpacked* non-POD type (GCC: "ignoring packed attribute because of
+        // unpacked non-POD field"); such a class then behaves as unpacked when
+        // it is itself a member of a packed struct. Iterate: cancelling one
+        // class can cancel the classes that hold it.
+        let mut effectively_packed: std::collections::HashSet<String> = layouts
+            .iter()
+            .filter(|l| l.is_packed)
+            .map(|l| l.name.clone())
+            .collect();
+        loop {
+            let before = effectively_packed.len();
+            for l in layouts.iter().filter(|l| l.is_packed) {
+                let cancelled = l.fields.iter().any(|f| match &f.ty {
+                    TypeInfo::Primitive { name, .. } | TypeInfo::Opaque { name, .. } => {
+                        let n = split_c_array_suffix(name).0;
+                        !is_cpp_slot(&f.name)
+                            && non_pod.contains(n)
+                            && !effectively_packed.contains(n)
+                    }
+                    _ => false,
+                });
+                if cancelled {
+                    effectively_packed.remove(&l.name);
+                }
+            }
+            if effectively_packed.len() == before {
+                break;
+            }
+        }
+        // A class with a non-POD member is non-POD itself for layout purposes:
+        // derived classes may start inside its tail padding.
+        for l in layouts.iter_mut() {
+            if non_pod.contains(&l.name)
+                && let Some(info) = &mut l.cpp
+                && !info.non_pod
+            {
+                info.non_pod = true;
+            }
+        }
         let mut changed_any = apply_cpp_inheritance(layouts);
 
         for layout in layouts.iter_mut() {
@@ -904,14 +972,22 @@ pub(crate) fn resolve_nested_structs(layouts: &mut [StructLayout]) {
                     let struct_size = elem_size.saturating_mul(elem_count);
                     // An explicitly aligned member keeps its alignment (never below
                     // the type's own); in a packed struct others drop to 1.
-                    // (A type that is itself packed can be packed into another.)
+                    // (`packed` on the outer struct does not reduce a non-POD member's
+                    // alignment even when that type is itself packed: its explicit
+                    // member alignments survive.)
+                    // What the source asked for with `aligned(N)` on this member
+                    // (0 if nothing): captured once, since `field.align` soon mixes
+                    // it with the type's alignment as the resolver learns it.
+                    let user = np_user_align(&mut layout.explicit_align, &field.name, field.align);
                     if layout.is_packed
                         && non_pod.contains(elem_name)
-                        && !packed_types.contains(elem_name)
+                        && !effectively_packed.contains(elem_name)
                     {
-                        // Track the member type's alignment as it gets resolved.
-                        if field.align != struct_align {
-                            field.align = struct_align;
+                        // Track the member type's alignment as it gets resolved;
+                        // an explicit `aligned(N)` stands (it can only raise).
+                        let wanted = user.max(struct_align);
+                        if field.align != wanted {
+                            field.align = wanted;
                             changed = true;
                         }
                         if !layout.explicit_align.contains(&field.name) {
@@ -920,16 +996,22 @@ pub(crate) fn resolve_nested_structs(layouts: &mut [StructLayout]) {
                         }
                     }
                     let eff_align = if layout.explicit_align.contains(&field.name) {
-                        // In a packed struct the explicit value stands as written.
-                        if layout.is_packed || layout.pack_limit.is_some() {
+                        if layout.is_packed {
+                            // In a packed struct the explicit value stands as written.
                             field.align
+                        } else if let Some(p) = layout.pack_limit {
+                            // `aligned(N)` only raises; `#pragma pack(N)` caps the result.
+                            user.max(struct_align).min(p)
                         } else {
-                            field.align.max(struct_align)
+                            user.max(struct_align)
                         }
                     } else if layout.is_packed {
                         1
                     } else {
-                        struct_align
+                        // `#pragma pack(N)` caps a member's alignment at N.
+                        layout
+                            .pack_limit
+                            .map_or(struct_align, |p| struct_align.min(p))
                     };
                     // Only update if something would change — avoids infinite loops
                     // for pointer-sized structs that already have the right size.
@@ -1015,8 +1097,63 @@ pub(crate) fn resolve_nested_structs(layouts: &mut [StructLayout]) {
     }
 }
 
+/// The alignment the source gave member `name` explicitly (`aligned(N)`), for a
+/// member whose own alignment is otherwise tracked from its type as the
+/// resolver learns it. Read from `explicit_align` the first time — before the
+/// resolver adds the member there itself — and kept in a marker entry, since
+/// later the member's alignment mixes the user's value with provisional ones.
+fn np_user_align(explicit_align: &mut Vec<String>, name: &str, current_align: usize) -> usize {
+    let prefix = format!("\u{1}user:{name}:");
+    if let Some(m) = explicit_align.iter().find(|e| e.starts_with(&prefix)) {
+        return m[prefix.len()..].parse().unwrap_or(0);
+    }
+    let user = if explicit_align.iter().any(|e| e == name) {
+        current_align
+    } else {
+        0
+    };
+    explicit_align.push(format!("{prefix}{user}"));
+    user
+}
+
 /// Re-simulate field offsets and total_size after field sizes have been updated.
 fn resimulate_layout(layout: &mut StructLayout) {
+    // A tagged union (Zig `union(enum)`, marked by the frontend's synthetic
+    // `__tag` field) is its payload plus the tag: after the payload when the
+    // payload is at least as aligned, else before it.
+    if layout.is_union && layout.fields.iter().any(|f| f.name == "__tag") {
+        let (mut size, mut align) = (0usize, 1usize);
+        for f in layout.fields.iter().filter(|f| f.name != "__tag") {
+            size = size.max(f.size);
+            align = align.max(f.align);
+        }
+        let Some(tag) = layout.fields.iter().find(|f| f.name == "__tag") else {
+            return;
+        };
+        let (tag_size, tag_align) = (tag.size, tag.align.max(1));
+        let whole_align = align.max(tag_align);
+        let (payload_at, tag_at, total) = if align >= tag_align {
+            let tag_at = size.next_multiple_of(tag_align);
+            (0, tag_at, (tag_at + tag_size).next_multiple_of(whole_align))
+        } else {
+            let payload_at = tag_size.next_multiple_of(align);
+            (
+                payload_at,
+                0,
+                (payload_at + size).next_multiple_of(whole_align),
+            )
+        };
+        for f in layout.fields.iter_mut() {
+            f.offset = if f.name == "__tag" {
+                tag_at
+            } else {
+                payload_at
+            };
+        }
+        layout.total_size = total;
+        layout.align = whole_align;
+        return;
+    }
     if layout.is_union {
         for field in layout.fields.iter_mut() {
             field.offset = 0;
@@ -1651,6 +1788,80 @@ struct Ctor { int a; char b; Ctor(); }; struct D3 : Ctor { char c; };");
         assert_eq!(find(&ls, "D2").total_size, 8);
         assert_eq!(field_off(find(&ls, "D2"), "c"), 5);
         assert_eq!(find(&ls, "D3").total_size, 8);
+    }
+
+    /// `(size, offset of f)` of record `rec` in the C++ `src` (laid out for x86-64).
+    fn cpp_rec(src: &str, rec: &str, f: &str) -> (usize, usize) {
+        let layouts =
+            parse_source_str(src, &SourceLanguage::Cpp, &padlock_core::arch::X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == rec).unwrap();
+        let off = l
+            .fields
+            .iter()
+            .find(|x| x.name == f || x.name.contains(&format!("{f}:")))
+            .map_or(0, |x| x.offset);
+        (l.total_size, off)
+    }
+
+    // The expected numbers below are what g++ prints for the same sources.
+
+    #[test]
+    fn empty_class_with_explicit_alignment_is_that_large() {
+        let src = "struct E {} __attribute__((aligned(16)));\nstruct Base {}; struct D : Base { E f0; short f4; };";
+        assert_eq!(cpp_rec(src, "E", "x").0, 16);
+        assert_eq!(cpp_rec(src, "D", "f4"), (32, 16));
+    }
+
+    #[test]
+    fn class_alignment_is_inherited_even_by_packed_derived_classes() {
+        let src = "struct S1 { unsigned f2; };\nstruct S3 : S1 {} __attribute__((aligned(64)));\nstruct S8 : S3 { long long f7; } __attribute__((packed));";
+        assert_eq!(cpp_rec(src, "S8", "f7"), (64, 4));
+    }
+
+    #[test]
+    fn bitfields_of_a_derived_class_start_where_its_bases_end() {
+        let src = "struct S1 { unsigned char f0; };\nstruct S6 : S1 { unsigned long long b0 : 41; char *f4; };";
+        assert_eq!(cpp_rec(src, "S6", "f4"), (16, 8));
+        let src = "struct S1 { signed char f1; } __attribute__((packed));\nstruct S4 : S1 { unsigned short b0 : 8; bool f3; };";
+        assert_eq!(cpp_rec(src, "S4", "f3"), (4, 2));
+        // …also after a member that is itself a derived class.
+        let src = "struct P { char a; };\nstruct D : P { int b : 3; };\nstruct H { D d; unsigned long long b5 : 45; signed char f6; };";
+        assert_eq!(cpp_rec(src, "H", "f6").0 % 8, 0);
+    }
+
+    #[test]
+    fn packed_is_cancelled_by_an_unpacked_non_pod_member() {
+        // T1 keeps `packed` (its base is not a data member): packed into the outer struct.
+        let src = "struct B0 { float f; };\nstruct __attribute__((packed)) T1 : B0 { };\nstruct __attribute__((packed)) U1 { char c; T1 a; };";
+        assert_eq!(cpp_rec(src, "U1", "a"), (5, 1));
+        // T2 contains a non-POD (derived) member, so its `packed` is ignored.
+        let src = "struct P0 {}; struct NP : P0 { int y; };\nstruct __attribute__((packed)) T2 { NP n; };\nstruct __attribute__((packed)) U2 { char c; T2 a; };";
+        assert_eq!(cpp_rec(src, "U2", "a"), (8, 4));
+    }
+
+    #[test]
+    fn explicit_member_alignment_survives_a_packed_non_pod_member_type() {
+        let src = "struct S3 {}; struct S6 : S3 {}; struct S7 { S6 f1; };\nstruct S10 { S7 f2 __attribute__((aligned(32))); long f6; } __attribute__((packed));";
+        assert_eq!(cpp_rec(src, "S10", "f6"), (32, 1));
+    }
+
+    #[test]
+    fn union_member_alignment_is_raised_never_lowered() {
+        let c = |src: &str| {
+            parse_source_str(src, &SourceLanguage::C, &padlock_core::arch::X86_64_SYSV).unwrap()
+        };
+        let l = c("#include <stddef.h>\nunion U { size_t f0 __attribute__((aligned(2))); };");
+        assert_eq!((l[0].total_size, l[0].align), (8, 8));
+        let l = c("union V { long double f2 __attribute__((aligned(4))); char c[3]; };");
+        assert_eq!((l[0].total_size, l[0].align), (16, 16));
+    }
+
+    #[test]
+    fn pragma_pack_caps_explicit_and_nested_alignment() {
+        let src = "struct S2 { unsigned f1; char f3[7]; };\n#pragma pack(push, 4)\nstruct W { unsigned long long b2 : 43; unsigned long f3 __attribute__((aligned(2))); };\nstruct X { union { long double m0; struct S2 m1; } u; };\n#pragma pack(pop)";
+        assert_eq!(cpp_rec(src, "W", "f3"), (16, 8));
+        // The union's 16-byte long double is capped to 4: 12 -> 16 -> struct of 16.
+        assert_eq!(cpp_rec(src, "X", "u").0, 16);
     }
 
     #[test]

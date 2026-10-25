@@ -485,14 +485,31 @@ struct Group {
 /// groups decided for the target are resolved (their directives and untaken
 /// branches become blank lines); the others are kept for the C frontend.
 /// Returns the expanded text; the file's own macros stay in `macros`.
+/// The text with every conditional resolved (undefined names are 0) and macros
+/// expanded, includes not followed.
+pub(crate) fn process_text(source: &str, macros: &mut Scope<'_>) -> String {
+    process_impl(source, macros, &mut |_, _| IncludeEffect::default(), true)
+}
+
 #[cfg(test)]
 pub(crate) fn process(source: &str, macros: &mut Scope<'_>) -> String {
-    process_with(source, macros, &mut |_, _| Vec::new())
+    process_with(source, macros, &mut |_, _| IncludeEffect::default())
+}
+
+/// What a followed `#include` contributes to the including file.
+#[derive(Default)]
+pub(crate) struct IncludeEffect {
+    /// The macros the included header defines.
+    pub(crate) macros: Vec<(String, Macro)>,
+    /// A header that only switches struct packing (`pshpack1.h`: one
+    /// `#pragma pack`) is spliced in as that pragma, since the pragma is
+    /// scoped to the include's position in the including file.
+    pub(crate) pragma: Option<String>,
 }
 
 /// Called at a followed `#include` with the output so far and the directive's
-/// text; returns the macros the included header defines.
-pub(crate) type IncludeHook<'a> = dyn FnMut(&str, &str) -> Vec<(String, Macro)> + 'a;
+/// text.
+pub(crate) type IncludeHook<'a> = dyn FnMut(&str, &str) -> IncludeEffect + 'a;
 
 /// [`process`], calling `on_include(output_so_far, include_text)` at every
 /// `#include` the preprocessor would follow (in a taken branch); the macros it
@@ -502,6 +519,17 @@ pub(crate) fn process_with(
     source: &str,
     macros: &mut Scope<'_>,
     on_include: &mut IncludeHook<'_>,
+) -> String {
+    process_impl(source, macros, on_include, false)
+}
+
+/// [`process_with`]; `decide_all` resolves every conditional group as a
+/// compiler would (undefined names are 0), not only those whose names are known.
+fn process_impl(
+    source: &str,
+    macros: &mut Scope<'_>,
+    on_include: &mut IncludeHook<'_>,
+    decide_all: bool,
 ) -> String {
     let lines = logical_lines(source);
     let mut in_comment = false;
@@ -555,13 +583,15 @@ pub(crate) fn process_with(
     {
         match directive(code) {
             Some((name, rest)) => {
+                let mut replacement: Option<String> = None;
                 let shown = match name {
                     "if" | "ifdef" | "ifndef" => {
                         let parent_active = active(&stack);
                         let parent_visible = visible(&stack);
-                        let decided = group_conds
-                            .get(&idx)
-                            .is_some_and(|c| c.iter().all(|c| decidable(c, macros)));
+                        let decided = decide_all
+                            || group_conds
+                                .get(&idx)
+                                .is_some_and(|c| c.iter().all(|c| decidable(c, macros)));
                         let cond = parent_active
                             && match name {
                                 "ifdef" => macros.contains(first_word(rest)),
@@ -606,9 +636,11 @@ pub(crate) fn process_with(
                                 }
                                 "undef" => macros.undef(first_word(rest)),
                                 "include" => {
-                                    for (n, m) in on_include(&out, rest) {
+                                    let effect = on_include(&out, rest);
+                                    for (n, m) in effect.macros {
                                         macros.import(n, m);
                                     }
+                                    replacement = effect.pragma;
                                 }
                                 _ => {}
                             }
@@ -617,7 +649,11 @@ pub(crate) fn process_with(
                     }
                 };
                 if shown {
-                    out.push_str(line);
+                    match replacement {
+                        // (Only when the include is visible: `shown` covers it.)
+                        Some(pragma) => out.push_str(&pragma),
+                        None => out.push_str(line),
+                    }
                 }
             }
             None if visible(&stack) => {

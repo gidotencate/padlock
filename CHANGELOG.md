@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.70.0] — 2026-10-25
+
+### Fixed
+- **PE/COFF binaries with GNU-compressed debug sections** (`.zdebug_*`, as mingw produces) are read; they previously yielded no types.
+
 ## [0.69.0] — 2026-10-25
 
 ### Fixed

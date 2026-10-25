@@ -22,12 +22,30 @@ pub fn load(binary_data: &[u8]) -> anyhow::Result<DwarfRc> {
         |id: gimli::SectionId| -> anyhow::Result<EndianRcSlice<gimli::RunTimeEndian>> {
             let data: Vec<u8> = match file.section_by_name(id.name()) {
                 Some(s) => load_section_with_relocations(&file, endian, s)?,
-                None => Vec::new(),
+                None => load_gnu_compressed_section(&file, id.name()).unwrap_or_default(),
             };
             Ok(EndianRcSlice::new(Rc::from(data.as_slice()), endian))
         };
 
     gimli::Dwarf::load(load_section)
+}
+
+/// A debug section stored GNU-style as `.zdebug_*`: the bytes `ZLIB`, the
+/// uncompressed length (8 bytes, big-endian), then a zlib stream. Go writes
+/// the DWARF of its Windows (PE/COFF) binaries this way; `object` only
+/// handles compressed sections of ELF files. `name` is the plain name
+/// (`.debug_info`).
+fn load_gnu_compressed_section(file: &object::File<'_>, name: &str) -> Option<Vec<u8>> {
+    let z = name.replacen(".debug_", ".zdebug_", 1);
+    if z == name {
+        return None;
+    }
+    let section = file.section_by_name(&z)?;
+    let raw = section.data().ok()?;
+    let body = raw.strip_prefix(b"ZLIB")?;
+    let expected = u64::from_be_bytes(body.get(..8)?.try_into().ok()?) as usize;
+    let out = miniz_oxide::inflate::decompress_to_vec_zlib(body.get(8..)?).ok()?;
+    (out.len() == expected).then_some(out)
 }
 
 /// Split DWARF (`-gsplit-dwarf`): the binary holds only skeleton units; the type
@@ -208,6 +226,52 @@ pub fn detect_arch_from_host() -> &'static ArchConfig {
 
 #[cfg(test)]
 mod tests {
+    /// A COFF object whose only section is `name` (a long name, via the string
+    /// table) holding `data`.
+    fn coff_with_section(name: &str, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(0x8664u16.to_le_bytes()); // machine: x86-64
+        out.extend(1u16.to_le_bytes()); // sections
+        out.extend(0u32.to_le_bytes()); // timestamp
+        out.extend((60 + data.len() as u32).to_le_bytes()); // symbol table (empty)
+        out.extend(0u32.to_le_bytes()); // symbols
+        out.extend(0u16.to_le_bytes()); // optional header size
+        out.extend(0u16.to_le_bytes()); // characteristics
+        out.extend(b"/4\0\0\0\0\0\0"); // name: string-table offset 4
+        out.extend(0u32.to_le_bytes()); // virtual size
+        out.extend(0u32.to_le_bytes()); // virtual address
+        out.extend((data.len() as u32).to_le_bytes());
+        out.extend(60u32.to_le_bytes()); // raw data pointer
+        out.extend([0u8; 12]); // relocations / line numbers
+        out.extend(0x4210_0040u32.to_le_bytes()); // characteristics
+        out.extend(data);
+        out.extend((4 + name.len() as u32 + 1).to_le_bytes()); // string table size
+        out.extend(name.as_bytes());
+        out.push(0);
+        out
+    }
+
+    #[test]
+    fn gnu_zdebug_sections_of_pe_files_are_decompressed() {
+        // Go writes the DWARF of its Windows binaries as `.zdebug_*`.
+        let payload: Vec<u8> = (0..4000u32).flat_map(|n| n.to_le_bytes()).collect();
+        let mut section = b"ZLIB".to_vec();
+        section.extend((payload.len() as u64).to_be_bytes());
+        section.extend(miniz_oxide::deflate::compress_to_vec_zlib(&payload, 6));
+        let bytes = coff_with_section(".zdebug_info", &section);
+        let file = object::File::parse(&*bytes).unwrap();
+        assert_eq!(
+            super::load_gnu_compressed_section(&file, ".debug_info"),
+            Some(payload)
+        );
+        // Other names and uncompressed sections are not this function's business.
+        assert_eq!(
+            super::load_gnu_compressed_section(&file, ".debug_abbrev"),
+            None
+        );
+        assert_eq!(super::load_gnu_compressed_section(&file, ".text"), None);
+    }
+
     use super::*;
 
     // ── synthetic binary header helpers ──────────────────────────────────────

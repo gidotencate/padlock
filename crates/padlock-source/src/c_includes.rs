@@ -435,10 +435,10 @@ impl Unit {
             let directive = format!("#include {rest}");
             let Some((name, angle)) = c_cpp::include_directives(&directive).into_iter().next()
             else {
-                return Vec::new();
+                return c_preproc::IncludeEffect::default();
             };
             let Some(inc) = resolve_include(&name, angle, dir, self.arch) else {
-                return Vec::new();
+                return c_preproc::IncludeEffect::default();
             };
             // Declarations between the previous include and this one.
             if has_declarations(&out[declared_up_to.min(out.len())..]) {
@@ -446,13 +446,36 @@ impl Unit {
             }
             declared_up_to = out.len();
             includes.push(inc.clone());
+            let pragma = self.packing_only_header(&inc);
             // Everything absorbed from here on (nested includes too) is new
             // to this file; earlier entries stay for the enclosing file.
             let mark = self.recent.len();
             self.include(&inc);
-            self.recent[mark..].to_vec()
+            c_preproc::IncludeEffect {
+                macros: self.recent[mark..].to_vec(),
+                pragma,
+            }
         });
         (expanded, scope.into_own(), includes)
+    }
+
+    /// For a header that does nothing but switch struct packing (`pshpack4.h`,
+    /// `poppack.h`): its one active `#pragma pack(…)` line, evaluated with the
+    /// macros in effect. `None` for any other header.
+    fn packing_only_header(&self, path: &Path) -> Option<String> {
+        let text = std::fs::read_to_string(path).ok()?;
+        if text.len() > 4096 || !text.contains("#pragma pack") {
+            return None;
+        }
+        let mut scope = c_preproc::Scope::new(&self.include.macros);
+        let processed = c_preproc::process_text(&text, &mut scope);
+        let mut active = processed.lines().map(str::trim).filter(|l| {
+            !l.is_empty() && !l.starts_with("//") && !l.starts_with("/*") && !l.starts_with('*')
+        });
+        let first = active.next()?;
+        // Directives that only guard the pragma are already resolved; anything
+        // else (a declaration, a second pragma) means this is not such a header.
+        (first.starts_with("#pragma pack") && active.next().is_none()).then(|| first.to_string())
     }
 
     /// Make the declarations of a file's text so far (typedefs, constants,

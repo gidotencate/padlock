@@ -76,6 +76,18 @@ const WArrArr = struct { v: [N][3]u16 };
 const WSlice = struct { v: []const u8 };
 const WStr = struct { v: [:0]const u8 };
 
+// Aliases, typeless (void) union fields and explicit tag types (found measuring std).
+const Word = u32;
+const Off = u64;
+const Half = u16;
+const WAlias = extern struct { a: Word, b: Off, c: Half, d: Word };
+const WAliasOpt = struct { v: ?Off };
+const TUVoid = union(enum) { none, small: u8, big: [33]u8 };
+const WTUVoid = struct { a: u8, t: TUVoid, c: u8 };
+const Tag32 = enum(u32) { a = 1, b = 2, c = 3 };
+const TUTag32 = union(Tag32) { a, b: u8, c: [5]u8 };
+const TUEnum16 = union(enum(u16)) { x: u8, y: u8 };
+
 // Single-field wrappers have no field order to disagree about, so only their
 // size is compared (offset -1).
 fn w(comptime T: type) void {
@@ -136,6 +148,12 @@ pub fn main() void {
     w(WArrArr);
     w(WSlice);
     w(WStr);
+    p(WAlias, "d");
+    w(WAliasOpt);
+    w(TUVoid);
+    p(WTUVoid, "c");
+    w(TUTag32);
+    w(TUEnum16);
     std.debug.print("Un {d} 0\n", .{@sizeOf(Un)});
     std.debug.print("Pk {d} -1\n", .{@sizeOf(Pk)});
     std.debug.print("PkBits {d} -1\n", .{@sizeOf(PkBits)});

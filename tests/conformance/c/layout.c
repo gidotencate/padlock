@@ -95,8 +95,24 @@ struct Vec { char a; V4 v; char c; };
 #define MY_T WORD_T
 typedef MY_T word_t;
 struct MacTy { char a; word_t w; char c; };
+/* Union member alignment and #pragma pack with nested aggregates (found by fuzzing). */
+union UAlC { size_t f0 __attribute__((aligned(2))); };
+union UAlC2 { long double f2 __attribute__((aligned(4))); char c[3]; };
+struct S2p { unsigned f1; char f3[7]; unsigned b5 : 24; int b7 : 17; };
+#pragma pack(push, 1)
+struct PkUnionOuter { union { long double m0; struct S2p m1; } f3; struct { intptr_t m0; struct S2p m1; } f5; };
+#pragma pack(pop)
+#pragma pack(push, 4)
+struct PragmaAlC { unsigned long long b2 : 43; uint64_t f3 __attribute__((aligned(2))); };
+struct PragmaAlC2 { long long f4[6] __attribute__((aligned(2))); char f7; };
+#pragma pack(pop)
+/* `aligned` on a field of a packed struct is capped by an enclosing #pragma pack (found by fuzzing). */
+#pragma pack(push, 4)
+struct PkPragmaAl { char a; int b __attribute__((aligned(8))); } __attribute__((packed));
+#pragma pack(pop)
+
 #define P(T,L) printf(#T " %zu %zu " #L "\n", sizeof(struct T), offsetof(struct T, L))
 int main(){
-P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,t);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);P(Pp,c);P(Dup,c);P(BfDiff,t);P(BfAnon,t);P(BfZero,t);P(BfWide,c);P(BfPk,d);P(UsesFwd,c);P(MacMem,c);P(Vec,c);P(MacTy,c);
-printf("AlS %zu -1\nU %zu 0\n",sizeof(struct AlS),sizeof(union U));
+P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,t);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);P(Pp,c);P(Dup,c);P(BfDiff,t);P(BfAnon,t);P(BfZero,t);P(BfWide,c);P(BfPk,d);P(PkUnionOuter,f5);P(PragmaAlC,f3);P(PragmaAlC2,f7);P(UsesFwd,c);P(MacMem,c);P(Vec,c);P(MacTy,c);P(PkPragmaAl,b);
+printf("AlS %zu -1\nU %zu 0\nUAlC %zu -1\nUAlC2 %zu -1\n",sizeof(struct AlS),sizeof(union U),sizeof(union UAlC),sizeof(union UAlC2));
 }

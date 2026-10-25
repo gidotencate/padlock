@@ -2,6 +2,17 @@
 
 All notable changes to padlock are documented here.
 
+## [0.69.0] — 2026-10-25
+
+### Fixed
+- **C++ layouts with `packed` and inheritance match g++/clang.** Empty classes with an alignment attribute, tail-padding reuse by derived classes, base-class alignment (including `alignas`/`aligned` on the base), GCC's rule that `packed` is ignored for a non-POD member, bit-fields that start inside a base's tail padding, `#pragma pack` caps and union member alignment are modelled as the compilers do. Differential fuzzing against g++: 0 mismatches in thousands of seeds, up from rare mismatches.
+- **`aligned(N)` on a field of a `packed` struct under `#pragma pack(M)`** is capped at M, as GCC does (padlock kept the full value; found by C fuzzing).
+- **C headers using `#include <pshpack*.h>`/`<poppack.h>`** (Windows SDK, mingw) get the packing they imply; conditionals around them are resolved as the compiler would.
+- **Zig**: type aliases, `void` union fields, explicit tag types and tagged-union layout (tag after the payload when the payload is at least as aligned) follow the compiler; uncertain fields are reported as such.
+
+### Known limits
+- A header whose packing comes from the file that includes it (`mciapi.h` via `mmsystem.h`) is laid out unpacked when analyzed on its own.
+
 ## [0.68.0] — 2026-10-25
 
 ### Added

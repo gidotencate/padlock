@@ -60,8 +60,14 @@ fn zig_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
 }
 
 fn zig_type_size_align_uncapped(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
+    zig_primitive_size_align(ty, arch).unwrap_or((arch.pointer_size, arch.pointer_size))
+}
+
+/// Size and alignment of a Zig primitive type, `None` for any other name (a type
+/// from elsewhere, which only a compiler could size).
+fn zig_primitive_size_align(ty: &str, arch: &'static ArchConfig) -> Option<(usize, usize)> {
     let ty = ty.trim();
-    match ty {
+    Some(match ty {
         "bool" => (1, 1),
         "u8" | "i8" => (1, 1),
         "u16" | "i16" | "f16" => (2, 2),
@@ -101,12 +107,12 @@ fn zig_type_size_align_uncapped(ty: &str, arch: &'static ArchConfig) -> (usize, 
         {
             match ty[1..].parse::<usize>() {
                 Ok(bits) => int_abi_size_align(bits),
-                Err(_) => (arch.pointer_size, arch.pointer_size),
+                Err(_) => return None,
             }
         }
 
-        _ => (arch.pointer_size, arch.pointer_size),
-    }
+        _ => return None,
+    })
 }
 
 /// Return the exact bit width of a Zig type inside a `packed struct`.
@@ -308,8 +314,19 @@ fn collect_zig_decls(source: &str, root: Node<'_>, arch: &'static ArchConfig) ->
             "enum_declaration" => {
                 ctx.enums.insert(name, enum_backing_type(source, *init));
             }
+            "builtin_function" if node_text(source, *init).starts_with("@Vector") => {
+                ctx.type_aliases
+                    .insert(name, node_text(source, *init).to_string());
+            }
             "integer" | "binary_expression" | "builtin_function" | "parenthesized_expression" => {
                 ctx.consts
+                    .insert(name, node_text(source, *init).to_string());
+            }
+            // `const Word = u32;`, `const Ptr = *const T;`, `const Opt = ?u32;`:
+            // the alias stands for that type.
+            "builtin_type" | "identifier" | "pointer_type" | "nullable_type" | "slice_type"
+            | "array_type" | "field_expression" => {
+                ctx.type_aliases
                     .insert(name, node_text(source, *init).to_string());
             }
             // `const P = Pair(u8, 4);` names an instantiation.
@@ -474,9 +491,20 @@ fn type_node_size_align(source: &str, node: Node<'_>, ctx: &ZigCtx) -> ZSized {
                     ..ZSized::plain((ps, ps))
                 }
             } else {
-                ZSized::plain(zig_type_size_align(text, arch))
+                // A name that is no primitive, alias, enum or local container is a
+                // type from elsewhere (`std.mem.Allocator`, an imported file):
+                // its size is a guess.
+                ZSized {
+                    uncertain: zig_primitive_size_align(text, arch).is_none(),
+                    ..ZSized::plain(zig_type_size_align(text, arch))
+                }
             }
         }
+        // `std.os.linux.pid_t`, `mem.Allocator`: a type from another file.
+        "field_expression" => ZSized {
+            uncertain: true,
+            ..ZSized::plain((ps, ps))
+        },
         // *T — single pointer
         "pointer_type" => ZSized::plain((ps, ps)),
         // ?T — optional. A pointer or slice uses null as "none" (no extra space);
@@ -492,7 +520,10 @@ fn type_node_size_align(source: &str, node: Node<'_>, ctx: &ZigCtx) -> ZSized {
                 ZSized {
                     size: (e.size + 1).next_multiple_of(align),
                     align,
-                    ..e
+                    // The payload is a local struct, sized later by the resolver
+                    // — which would drop this optional's tag: only a guess.
+                    uncertain: e.uncertain || e.named.is_some(),
+                    named: None,
                 }
             } else {
                 ZSized::plain((ps, ps))
@@ -533,7 +564,9 @@ fn type_node_size_align(source: &str, node: Node<'_>, ctx: &ZigCtx) -> ZSized {
                     ZSized {
                         size: (p.size.next_multiple_of(2) + 2).next_multiple_of(align),
                         align,
-                        ..p
+                        // (see the optional above: a local-struct payload is a guess)
+                        uncertain: p.uncertain || p.named.is_some(),
+                        named: None,
                     }
                 }
                 _ => ZSized::plain((2, 2)),
@@ -548,7 +581,10 @@ fn type_node_size_align(source: &str, node: Node<'_>, ctx: &ZigCtx) -> ZSized {
                 let align = size.next_power_of_two().min(64).max(elem_al);
                 return ZSized::plain((size, align));
             }
-            ZSized::plain((ps, ps))
+            ZSized {
+                uncertain: true,
+                ..ZSized::plain((ps, ps))
+            }
         }
         // `Pair(u8, 4)`: an instantiation, sized by the nested-struct resolver.
         "call_expression" => match call_parts(source, node) {
@@ -556,9 +592,17 @@ fn type_node_size_align(source: &str, node: Node<'_>, ctx: &ZigCtx) -> ZSized {
                 named: Some((format!("{f}({})", args.join(", ")), 1)),
                 ..ZSized::plain((ps, ps))
             },
-            _ => ZSized::plain((ps, ps)),
+            _ => ZSized {
+                uncertain: true,
+                ..ZSized::plain((ps, ps))
+            },
         },
-        _ => ZSized::plain((ps, ps)),
+        // A type written some other way (`if (cond) A else B`, `@TypeOf(x)`, …):
+        // only the compiler can size it.
+        _ => ZSized {
+            uncertain: true,
+            ..ZSized::plain((ps, ps))
+        },
     }
 }
 
@@ -824,6 +868,44 @@ fn parse_union_declaration(
     let mut is_tagged = false;
     let mut raw_fields: Vec<(String, String, usize, usize, u32)> = Vec::new();
     let mut uncertain_fields: Vec<String> = Vec::new();
+    // The tag's integer type when the source states it: `union(enum(u8))` or
+    // `union(Tag)` with `const Tag = enum(u32)`.
+    let mut tag_type: Option<String> = None;
+    let mut tag_unknown = false;
+    {
+        let header_end = node
+            .child_by_field_name("body")
+            .map(|b| b.start_byte())
+            .or_else(|| {
+                (0..node.child_count())
+                    .filter_map(|i| node.child(i))
+                    .find(|c| c.kind() == "container_field")
+                    .map(|c| c.start_byte())
+            })
+            .unwrap_or(node.end_byte());
+        let header = &source[node.start_byte()..header_end.min(node.end_byte())];
+        if let Some(open) = header.find('(') {
+            let inner = header[open + 1..].trim_start();
+            if let Some(rest) = inner.strip_prefix("enum") {
+                is_tagged = true;
+                if let Some(t) = rest.trim_start().strip_prefix('(') {
+                    tag_type = t.split(')').next().map(|t| t.trim().to_string());
+                }
+            } else {
+                let name: String = inner
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    is_tagged = true;
+                    match ctx.enums.get(&name) {
+                        Some(backing) => tag_type = Some(backing.clone()),
+                        None => tag_unknown = true,
+                    }
+                }
+            }
+        }
+    }
 
     for i in 0..node.child_count() {
         let Some(child) = node.child(i) else { continue };
@@ -885,34 +967,50 @@ fn parse_union_declaration(
     // Its size is the smallest integer type that holds all variant indices.
     if is_tagged {
         let n = fields.len();
-        let tag_size: usize = if n <= 256 {
+        let counted: usize = if n <= 256 {
             1
         } else if n <= 65536 {
             2
         } else {
             4
         };
+        let (tag_size, tag_align) = tag_type
+            .as_deref()
+            .map(|t| zig_type_size_align(t, arch))
+            .unwrap_or((counted, counted));
+        if tag_unknown {
+            uncertain_fields.push("__tag".to_string());
+        }
         fields.push(Field {
             name: "__tag".to_string(),
             ty: TypeInfo::Primitive {
-                name: format!("u{}", tag_size * 8),
+                name: tag_type
+                    .clone()
+                    .unwrap_or_else(|| format!("u{}", counted * 8)),
                 size: tag_size,
-                align: tag_size,
+                align: tag_align,
             },
             offset: total_size, // tag lives after the union payload
             size: tag_size,
-            align: tag_size,
+            align: tag_align,
             source_file: None,
             source_line: None,
             access: padlock_core::ir::AccessPattern::Unknown,
         });
     }
 
-    let struct_align = max_align; // tag alignment is usually smaller than payload
+    let struct_align = max_align.max(
+        fields
+            .last()
+            .filter(|f| f.name == "__tag")
+            .map_or(1, |f| f.align),
+    );
 
     let final_size = if is_tagged {
         let tag_size = fields.last().map(|f| f.size).unwrap_or(0);
-        (total_size + tag_size).next_multiple_of(struct_align.max(1))
+        let tag_align = fields.last().map(|f| f.align).unwrap_or(1).max(1);
+        (total_size.next_multiple_of(tag_align) + tag_size)
+            .next_multiple_of(struct_align.max(tag_align).max(1))
     } else {
         total_size
     };
@@ -1084,7 +1182,6 @@ fn parse_container_field(
     ctx: &ZigCtx,
     uncertain: &mut Vec<String>,
 ) -> Option<(String, String, usize, usize, u32)> {
-    let arch = ctx.arch;
     let mut field_name: Option<String> = None;
     let mut type_text: Option<String> = None;
     let mut sized: Option<ZSized> = None;
@@ -1096,21 +1193,6 @@ fn parse_container_field(
             "identifier" if field_name.is_none() => {
                 field_name = Some(source[child.byte_range()].to_string());
             }
-            "builtin_type" | "pointer_type" | "nullable_type" | "slice_type" | "array_type"
-            | "error_union" | "error_union_type" | "builtin_function" | "identifier"
-            | "call_expression" => {
-                // A second identifier is a type name (e.g. a named struct or enum).
-                let text = node_text(source, child);
-                let sz = type_node_size_align(source, child, ctx);
-                // A bound parameter or `const P = Pair(…)` alias is shown (and
-                // resolved) as what it stands for.
-                type_text = Some(match (&sz.named, ctx.type_aliases.get(text)) {
-                    (Some((n, 1)), _) => n.clone(),
-                    (_, Some(bound)) => bound.clone(),
-                    _ => text.to_string(),
-                });
-                sized = Some(sz);
-            }
             // `align(N)` on a field overrides its natural alignment.
             "byte_alignment" => {
                 align_override = named_children(child)
@@ -1120,12 +1202,27 @@ fn parse_container_field(
             _ => {}
         }
     }
+    // The field's type, whatever its syntax (`u32`, `*T`, `posix.uid_t`,
+    // `if (cond) A else B`, …).
+    if let Some(child) = node.child_by_field_name("type") {
+        let text = node_text(source, child);
+        let sz = type_node_size_align(source, child, ctx);
+        // A bound parameter or `const P = Pair(…)` alias is shown (and
+        // resolved) as what it stands for.
+        type_text = Some(match (&sz.named, ctx.type_aliases.get(text)) {
+            (Some((n, 1)), _) => n.clone(),
+            (_, Some(bound)) => bound.clone(),
+            _ => text.to_string(),
+        });
+        sized = Some(sz);
+    }
 
     // Discard fields with empty names — tree-sitter-zig emits a zero-length
     // identifier node for `union {}` (empty union body), which is not a real field.
     let name = field_name.filter(|n| !n.is_empty())?;
-    let mut ty = type_text.unwrap_or_else(|| "anyopaque".to_string());
-    let sized = sized.unwrap_or_else(|| ZSized::plain((arch.pointer_size, arch.pointer_size)));
+    // A union field written without a type (`none,` in a `union(enum)`) is `void`.
+    let mut ty = type_text.unwrap_or_else(|| "void".to_string());
+    let sized = sized.unwrap_or_else(|| ZSized::plain((0, 1)));
     if sized.uncertain {
         uncertain.push(name.clone());
     }

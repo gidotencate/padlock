@@ -21,3 +21,7 @@ editors/vscode/*.vsix
 Thumbs.db
 # `padlock fix` writes a .bak backup of the rewritten file in place.
 *.bak
+
+# Python bytecode from the conformance scripts.
+__pycache__/
+*.pyc

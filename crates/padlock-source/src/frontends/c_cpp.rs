@@ -30,6 +30,11 @@ thread_local! {
     /// known here; that matters wherever an offset must be right during parsing
     /// (bit-field runs, anonymous aggregates), before the nested-struct resolver runs.
     static RECORD_SIZES: RefCell<HashMap<String, (usize, usize)>> = RefCell::new(HashMap::new());
+    /// Records of the current file whose size in `RECORD_SIZES` is not final:
+    /// classes with base classes (their base slots are sized later) and records
+    /// holding one. A bit-field placed after such a member must wait.
+    static UNRELIABLE_RECORDS: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
     /// Set when `c_type_size_align` had to guess (a type name it does not know).
     static UNKNOWN_TYPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// `#pragma pack` in effect for the record being parsed: it also applies to
@@ -1125,10 +1130,18 @@ fn collect_int_constants(
 
 /// Split a trailing run of `[..]` array suffixes off a type string.
 fn split_array_dims(ty: &str) -> (&str, &str) {
-    match ty.find('[') {
-        Some(i) => (ty[..i].trim_end(), &ty[i..]),
-        None => (ty, ""),
+    // The dimensions are the `[…]` groups at the end, outside any `<…>` or
+    // `(…)`: `std::unique_ptr<T[]>` has none.
+    let mut depth = 0i32;
+    for (i, c) in ty.char_indices() {
+        match c {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            '[' if depth <= 0 => return (ty[..i].trim_end(), &ty[i..]),
+            _ => {}
+        }
     }
+    (ty, "")
 }
 
 /// Resolve a raw field type string for sizing: apply the scalar typedef alias to
@@ -1285,6 +1298,7 @@ fn is_bitfield_type(ty: &str) -> bool {
 /// anonymous) and typed `__bits<N>` for the `N` bytes it spans. Returns the
 /// fields plus the strictest alignment demanded by a named bit-field's type,
 /// which the caller applies to the struct as a whole.
+#[allow(clippy::too_many_arguments)]
 fn resolve_bitfield_groups(
     raw_fields: Vec<RawField>,
     aliases: &HashMap<String, String>,
@@ -1293,6 +1307,7 @@ fn resolve_bitfield_groups(
     is_union: bool,
     attr_packed: bool,
     pragma_pack: usize,
+    start_byte: usize,
 ) -> (Vec<RawField>, usize) {
     if is_msvc(arch) {
         return (
@@ -1311,8 +1326,9 @@ fn resolve_bitfield_groups(
 
     let mut result: Vec<RawField> = Vec::new();
     let mut struct_align = 1usize;
-    // End of the last emitted field, in bytes.
-    let mut byte_off = 0usize;
+    // End of the last emitted field, in bytes (the members of a derived class
+    // start where its base classes end).
+    let mut byte_off = start_byte;
     // Bit position inside the current bit-field run (None outside a run).
     let mut cursor: Option<u64> = None;
     // The run's next bits were pushed to a `T : 0` boundary.
@@ -1482,6 +1498,157 @@ fn resolve_bitfield_groups(
     (result, struct_align)
 }
 
+/// Whether the recorded size of `name` is provisional (see `UNRELIABLE_RECORDS`).
+fn is_unreliable_record(name: &str) -> bool {
+    UNRELIABLE_RECORDS.with(|u| u.borrow().contains(name))
+}
+
+/// Group the bit-field runs of a class's members — or, for a class with base
+/// classes, record the member list for [`regroup_deferred`] and keep the members
+/// individual. Returns the members, the alignment the bit-fields contribute and
+/// the deferred member list (empty when grouped now).
+#[allow(clippy::too_many_arguments)]
+fn group_or_defer(
+    raw_fields: Vec<RawField>,
+    has_bases: bool,
+    aliases: &HashMap<String, String>,
+    arch: &'static ArchConfig,
+    pack_n: usize,
+    is_union: bool,
+    attr_packed: bool,
+    pragma_pack: usize,
+) -> (Vec<RawField>, usize, Vec<padlock_core::ir::DeferredMember>) {
+    if !raw_fields
+        .iter()
+        .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
+    {
+        return (raw_fields, 1, Vec::new());
+    }
+    // A member whose own size is not final (a derived class) moves everything
+    // after it, so the bit-fields behind it wait just like those behind a base.
+    let after_unsized_member = raw_fields.iter().any(|(_, ty, _, _, _)| {
+        !is_bitfield_type(ty) && {
+            let (sizing, _) = resolve_field_type(ty, aliases, arch);
+            is_unreliable_record(sizing.split('[').next().unwrap_or(&sizing).trim())
+        }
+    });
+    let defer = (has_bases || after_unsized_member) && !is_union && !is_msvc(arch);
+    let ungrouped = defer.then(|| raw_fields.clone());
+    let (grouped, align) = resolve_bitfield_groups(
+        raw_fields.clone(),
+        aliases,
+        arch,
+        pack_n,
+        is_union,
+        attr_packed,
+        pragma_pack,
+        0,
+    );
+    let Some(ungrouped) = ungrouped else {
+        return (grouped, align, Vec::new());
+    };
+    let deferred = ungrouped
+        .iter()
+        .map(|(name, ty, _, _, line)| {
+            if is_bitfield_type(ty) {
+                let width: u64 = ty[ty.rfind(':').unwrap_or(0) + 1..]
+                    .trim()
+                    .parse()
+                    .unwrap_or(0);
+                let (sizing, _) = resolve_field_type(strip_bitfield_suffix(ty), aliases, arch);
+                let (unit_size, unit_align) = c_type_size_align(&sizing, arch);
+                padlock_core::ir::DeferredMember::Bit {
+                    name: name.clone(),
+                    unit_size,
+                    unit_align,
+                    width,
+                    line: *line,
+                }
+            } else {
+                padlock_core::ir::DeferredMember::Plain { name: name.clone() }
+            }
+        })
+        .collect();
+    (ungrouped, align, deferred)
+}
+
+/// Place the bit-fields of a derived class: the members come in declaration
+/// order, `current` holds the ordinary ones with their present sizes, and the
+/// bit-field runs are laid out from `start_byte` (where the base classes end).
+/// Returns the members with each run replaced by its synthetic storage field,
+/// and the names of those whose alignment is explicit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn regroup_deferred(
+    deferred: &[padlock_core::ir::DeferredMember],
+    current: &[Field],
+    explicit_align: &[String],
+    start_byte: usize,
+    pack_n: usize,
+    attr_packed: bool,
+    pragma_pack: usize,
+    arch: &'static ArchConfig,
+) -> (Vec<Field>, Vec<String>) {
+    use padlock_core::ir::DeferredMember;
+    let by_name: HashMap<&str, &Field> = current.iter().map(|f| (f.name.as_str(), f)).collect();
+    let mut raw: Vec<RawField> = Vec::new();
+    for d in deferred {
+        match d {
+            DeferredMember::Plain { name } => {
+                let Some(f) = by_name.get(name.as_str()) else {
+                    continue;
+                };
+                let alignas = explicit_align.contains(name).then_some(f.align);
+                raw.push((
+                    name.clone(),
+                    format!("__anon_struct<{},{}>", f.size, f.ty.align()),
+                    None,
+                    alignas,
+                    f.source_line.unwrap_or(0),
+                ));
+            }
+            DeferredMember::Bit {
+                name,
+                unit_size,
+                unit_align,
+                width,
+                line,
+            } => raw.push((
+                name.clone(),
+                format!("__anon_struct<{unit_size},{unit_align}>:{width}"),
+                None,
+                None,
+                *line,
+            )),
+        }
+    }
+    let (grouped, _) = resolve_bitfield_groups(
+        raw,
+        &HashMap::new(),
+        arch,
+        pack_n,
+        false,
+        attr_packed,
+        pragma_pack,
+        start_byte,
+    );
+    let mut out = Vec::new();
+    let mut explicit = Vec::new();
+    for item in grouped {
+        if let Some(f) = by_name
+            .get(item.0.as_str())
+            .filter(|_| !item.1.starts_with("__bits<"))
+        {
+            out.push((*f).clone());
+            continue;
+        }
+        if item.3.is_some() {
+            explicit.push(item.0.clone());
+        }
+        out.push(make_field(item, &HashMap::new(), arch));
+    }
+    (out, explicit)
+}
+
 /// MSVC bit-field layout: consecutive bit-fields share a storage unit only while
 /// their declared types have the same size and the unit has room; each unit is
 /// a field of the declared type (so it is aligned and padded like one). A
@@ -1571,7 +1738,14 @@ fn simulate_layout(
         // attribute does not.
         let eff_align = if explicit_align.contains(&f.name) {
             if pragma_pack > 0 {
-                f.align.min(pragma_pack)
+                // `aligned(N)` only raises (in a `packed` struct it stands as
+                // written); `#pragma pack` then caps the result.
+                let base = if pack_n == 1 {
+                    f.align
+                } else {
+                    f.align.max(natural)
+                };
+                base.min(pragma_pack)
             } else if pack_n > 0 {
                 f.align
             } else {
@@ -1627,6 +1801,25 @@ fn simulate_union_layout(
 ) -> StructLayout {
     for f in fields.iter_mut() {
         f.offset = 0;
+        // An explicit `aligned(N)` can raise a member's alignment, never lower
+        // it below its type's; `packed` / `#pragma pack(N)` cap it (the later
+        // re-layout works from the members' alignments).
+        if pack_n == 0 {
+            // (Only for a type whose alignment is known: a class with bases is
+            // sized later, and its provisional alignment must not stick.)
+            let known = match &f.ty {
+                TypeInfo::Primitive { name, .. } => {
+                    !is_unreliable_record(name.split('[').next().unwrap_or(name).trim())
+                }
+                TypeInfo::Opaque { .. } => false,
+                _ => true,
+            };
+            if known {
+                f.align = f.align.max(f.ty.align());
+            }
+        } else {
+            f.align = f.align.min(pack_n);
+        }
     }
     let max_size = fields.iter().map(|f| f.size).max().unwrap_or(0);
     // `packed` / `#pragma pack` cap the union's alignment like a struct's.
@@ -1792,22 +1985,16 @@ fn parse_class_specifier_inner(
     // Pack consecutive bit-field members into their storage units.
     let pack_n = if is_packed { 1 } else { pragma_pack };
     let is_union = false;
-    let (raw_fields, bf_align) = if raw_fields
-        .iter()
-        .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
-    {
-        resolve_bitfield_groups(
-            raw_fields,
-            aliases,
-            arch,
-            pack_n,
-            is_union,
-            is_packed,
-            pragma_pack,
-        )
-    } else {
-        (raw_fields, 1)
-    };
+    let (raw_fields, bf_align, deferred) = group_or_defer(
+        raw_fields,
+        !base_names.is_empty(),
+        aliases,
+        arch,
+        pack_n,
+        is_union,
+        is_packed,
+        pragma_pack,
+    );
 
     let explicit_align: Vec<String> = raw_fields
         .iter()
@@ -1829,7 +2016,7 @@ fn parse_class_specifier_inner(
         Some(line),
         pack_n,
         &explicit_align,
-        if is_packed { 0 } else { pragma_pack },
+        pragma_pack,
     );
 
     apply_min_align(&mut layout, bf_align, pragma_pack);
@@ -1850,10 +2037,13 @@ fn parse_class_specifier_inner(
     layout.uncertain_fields.extend(macro_labels);
     if aliases.contains_key(CPP_KEY) {
         let is_class = node.kind() == "class_specifier";
-        layout.cpp = Some(cpp_class_info(source, node, body, aliases, is_class));
-        // C++ objects are never zero-sized.
+        let mut info = cpp_class_info(source, node, body, aliases, is_class);
+        info.deferred = deferred;
+        layout.cpp = Some(info);
+        // C++ objects are never zero-sized (an empty class with an explicit
+        // alignment is that large: its size is a multiple of its alignment).
         if layout.total_size == 0 {
-            layout.total_size = 1;
+            layout.total_size = layout.align.max(1);
         }
     }
 
@@ -1868,6 +2058,20 @@ fn parse_class_specifier_inner(
 fn contains_virtual_keyword(source: &str, node: Node<'_>) -> bool {
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
+        // A `virtual` in a nested class or inside a function body belongs to
+        // that class / function, not to this one.
+        if n.id() != node.id()
+            && matches!(
+                n.kind(),
+                "class_specifier"
+                    | "struct_specifier"
+                    | "union_specifier"
+                    | "compound_statement"
+                    | "lambda_expression"
+            )
+        {
+            continue;
+        }
         if n.kind() == "virtual" {
             return true;
         }
@@ -2325,6 +2529,7 @@ fn extract_structs_from_tree(
             r.extend(ctx.records.iter().map(|(k, v)| (k.clone(), *v)));
         }
     });
+    UNRELIABLE_RECORDS.with(|u| u.borrow_mut().clear());
     // Phase 0: collect within-file typedef scalar aliases for field type resolution
     // (on top of what the included headers declare; the file's own win).
     let mut aliases = include_ctx
@@ -2947,23 +3152,18 @@ fn parse_struct_or_union_specifier_inner(
     // When both apply, the more restrictive (smaller) wins.
     let pack_n = if is_packed { 1 } else { pragma_pack };
 
-    // Pack consecutive bit-field members into their storage units.
-    let (raw_fields, bf_align) = if raw_fields
-        .iter()
-        .any(|(_, ty, _, _, _)| is_bitfield_type(ty))
-    {
-        resolve_bitfield_groups(
-            raw_fields,
-            aliases,
-            arch,
-            pack_n,
-            is_union,
-            is_packed,
-            pragma_pack,
-        )
-    } else {
-        (raw_fields, 1)
-    };
+    // Pack consecutive bit-field members into their storage units (a class
+    // with base classes waits for them to be sized).
+    let (raw_fields, bf_align, deferred) = group_or_defer(
+        raw_fields,
+        !base_names.is_empty() && !is_union,
+        aliases,
+        arch,
+        pack_n,
+        is_union,
+        is_packed,
+        pragma_pack,
+    );
 
     let explicit_align: Vec<String> = raw_fields
         .iter()
@@ -3036,10 +3236,13 @@ fn parse_struct_or_union_specifier_inner(
     layout.uncertain_fields.extend(macro_labels);
     if aliases.contains_key(CPP_KEY) {
         let is_class = node.kind() == "class_specifier";
-        layout.cpp = Some(cpp_class_info(source, node, body, aliases, is_class));
-        // C++ objects are never zero-sized.
+        let mut info = cpp_class_info(source, node, body, aliases, is_class);
+        info.deferred = deferred;
+        layout.cpp = Some(info);
+        // C++ objects are never zero-sized (an empty class with an explicit
+        // alignment is that large: its size is a multiple of its alignment).
         if layout.total_size == 0 {
-            layout.total_size = 1;
+            layout.total_size = layout.align.max(1);
         }
     }
     layout.suppressed_findings =
@@ -3193,6 +3396,7 @@ fn cpp_class_info(
         has_virtual_methods: contains_virtual_keyword(source, body),
         non_pod,
         no_unique_address: nua,
+        deferred: Vec::new(),
     }
 }
 
@@ -3555,6 +3759,23 @@ fn parse_anonymous_nested(
 /// Remember a finished record's size for later members of its type (by its full
 /// and its unqualified name).
 fn record_size(layout: &StructLayout) {
+    let unreliable = layout
+        .cpp
+        .as_ref()
+        .is_some_and(|i| !i.bases.is_empty() || !i.deferred.is_empty())
+        || layout.fields.iter().any(|f| {
+            let (TypeInfo::Primitive { name, .. } | TypeInfo::Opaque { name, .. }) = &f.ty else {
+                return false;
+            };
+            is_unreliable_record(name.split('[').next().unwrap_or(name).trim())
+        });
+    if unreliable {
+        UNRELIABLE_RECORDS.with(|u| {
+            let mut u = u.borrow_mut();
+            u.insert(layout.name.clone());
+            u.insert(split_scope(&layout.name).1.to_string());
+        });
+    }
     RECORD_SIZES.with(|r| {
         let mut r = r.borrow_mut();
         let sa = (layout.total_size, layout.align);

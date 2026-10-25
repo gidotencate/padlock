@@ -186,6 +186,27 @@ pub struct CppClassInfo {
     pub non_pod: bool,
     /// Members declared `[[no_unique_address]]`.
     pub no_unique_address: Vec<String>,
+    /// For a class with base classes *and* bit-fields: its data members in
+    /// declaration order, so the bit-fields can be placed once the bases are
+    /// sized — they start where the bases end, not at a fresh storage unit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<DeferredMember>,
+}
+
+/// A data member of a class whose bit-field placement waits for its bases.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DeferredMember {
+    /// An ordinary member, by name (its size is whatever the layout holds).
+    Plain { name: String },
+    /// A bit-field: its declared type's size and alignment, its width in bits
+    /// (0 for a `T : 0` boundary) and its line. `name` is empty when anonymous.
+    Bit {
+        name: String,
+        unit_size: usize,
+        unit_align: usize,
+        width: u64,
+        line: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]

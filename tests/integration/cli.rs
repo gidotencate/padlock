@@ -991,3 +991,44 @@ fn go_types_from_sibling_files_are_sized_and_cached_per_package() {
     std::fs::write(&geom, "package image\n\ntype Rect struct{ A, B int }\n").unwrap();
     assert_eq!(size(), 40);
 }
+
+#[test]
+fn c_types_from_included_headers_are_sized_and_cached_with_their_headers() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let inc = dir.path().join("inc");
+    std::fs::create_dir(&inc).unwrap();
+    let hdr = inc.join("types.h");
+    std::fs::write(
+        &hdr,
+        "#define COMMON(p) int p##kind\ntypedef long stamp_t;\n#define SLOTS 4\n",
+    )
+    .unwrap();
+    let src = dir.path().join("main.c");
+    std::fs::write(
+        &src,
+        "#include <types.h>\nstruct S {\n  COMMON(s_);\n  stamp_t when;\n  char slots[SLOTS];\n};\n",
+    )
+    .unwrap();
+    let size = || {
+        let out = padlock()
+            .args(["analyze", "--json", "--target", "x86_64", "-I"])
+            .arg(&inc)
+            .arg(&src)
+            .output()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let s = &v["structs"][0];
+        assert!(s.get("uncertain_fields").is_none(), "{s}");
+        s["total_size"].as_u64().unwrap()
+    };
+    // int s_kind (4) + 4, long (8), char[4] + 4 = 24.
+    assert_eq!(size(), 24);
+    // Editing only the header must invalidate the cached result for main.c.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(
+        &hdr,
+        "#define COMMON(p) int p##kind\ntypedef long stamp_t;\n#define SLOTS 32\n",
+    )
+    .unwrap();
+    assert_eq!(size(), 48);
+}

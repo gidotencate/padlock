@@ -74,6 +74,13 @@ pub struct FilterArgs {
     #[arg(long = "define", short = 'D', value_name = "NAME[=VALUE]")]
     pub defines: Vec<String>,
 
+    /// Search this directory for C/C++ `#include`s, like a compiler's `-I`
+    /// (repeatable). Headers next to the including file and, for Linux targets,
+    /// the system include paths are always searched. Merged with `include_dirs`
+    /// from `.padlock.toml`.
+    #[arg(long = "include-dir", short = 'I', value_name = "DIR")]
+    pub include_dirs: Vec<std::path::PathBuf>,
+
     /// Exact C/C++ layouts: compile every translation unit in this
     /// `compile_commands.json` with debug info (using its own flags, defines and
     /// include paths) and read the layouts the compiler produced. Structs from
@@ -173,6 +180,14 @@ impl FilterArgs {
         defines.append(&mut self.defines);
         self.defines = defines;
         padlock_source::set_preprocessor_defines(&self.defines);
+        let mut include_dirs: Vec<std::path::PathBuf> = cfg
+            .include_dirs
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        include_dirs.append(&mut self.include_dirs);
+        self.include_dirs = include_dirs;
+        padlock_source::set_include_dirs(self.include_dirs.clone());
         self.declared_order |= cfg.declared_order;
         padlock_source::set_declared_order(self.declared_order);
         crate::paths::apply_configured_instantiations(cfg);
@@ -288,6 +303,7 @@ mod tests {
     ) -> FilterArgs {
         FilterArgs {
             defines: Vec::new(),
+            include_dirs: Vec::new(),
             declared_order: false,
             compile_commands: None,
             go_exact: false,

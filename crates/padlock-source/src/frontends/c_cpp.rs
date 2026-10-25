@@ -7,7 +7,7 @@
 use padlock_core::arch::ArchConfig;
 use padlock_core::ir::{AccessPattern, Field, StructLayout, TypeInfo};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Parser};
 
 use crate::CppStdlib;
@@ -35,6 +35,15 @@ thread_local! {
     /// `#pragma pack` in effect for the record being parsed: it also applies to
     /// anonymous aggregates defined inside it.
     static CURRENT_PACK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Declarations visible through the file's `#include`s (see `c_includes`),
+    /// applied by the next parse on this thread.
+    static INCLUDE_CONTEXT: RefCell<Option<std::sync::Arc<IncludeContext>>> =
+        const { RefCell::new(None) };
+    /// The alias map of the last file parsed on this thread, so a header's own
+    /// typedefs, constants and macros can be handed to the files including it.
+    static LAST_ALIASES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Whether the next parses should fill `LAST_ALIASES` (only header parses).
+    static CAPTURE_ALIASES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static C_PARSER: RefCell<Parser> = RefCell::new({
         let mut p = Parser::new();
         p.set_language(&tree_sitter_c::LANGUAGE.into())
@@ -47,6 +56,95 @@ thread_local! {
             .expect("C++ grammar is always valid");
         p
     });
+}
+
+/// What a file sees from the headers it includes: typedefs, integer constants,
+/// defined macros and records (alias-map entries, `$def:` values "0" since
+/// they are defined before the file starts), and the records' final sizes.
+#[derive(Default, Clone)]
+pub(crate) struct IncludeContext {
+    pub(crate) aliases: HashMap<String, String>,
+    pub(crate) records: HashMap<String, (usize, usize)>,
+    /// Macros defined before the file starts (predefined, `-D`, headers):
+    /// consulted by `#if` handling and constant lookups after the file's own.
+    pub(crate) macros: crate::c_preproc::Macros,
+}
+
+/// A macro defined before the current file starts (see [`IncludeContext`]):
+/// `Some(Some(value))` for an object-like macro with a body.
+fn context_macro(name: &str) -> Option<Option<String>> {
+    INCLUDE_CONTEXT.with(|c| {
+        let c = c.borrow();
+        let m = c.as_ref()?.macros.get(name)?;
+        Some((m.params.is_none() && !m.body.is_empty()).then(|| m.body.clone()))
+    })
+}
+
+/// Whether padlock sizes `name` natively (`uint8_t`, `size_t`, `long`): such
+/// names keep the built-in, per-target size even when a header typedefs them
+/// (glibc's and gcc's `stdint.h` spell them through compiler-predefined macros).
+pub(crate) fn is_builtin_c_type(name: &str, arch: &'static ArchConfig) -> bool {
+    let saved = UNKNOWN_TYPE.with(|u| u.replace(false));
+    let _ = c_type_size_align(name, arch);
+    let unknown = UNKNOWN_TYPE.with(|u| u.replace(saved));
+    !unknown && !name.ends_with('*') && RECORD_SIZES.with(|r| !r.borrow().contains_key(name))
+}
+
+/// Apply `ctx` to the parses on this thread until it is replaced (`None` clears).
+pub(crate) fn set_include_context(ctx: Option<std::sync::Arc<IncludeContext>>) {
+    INCLUDE_CONTEXT.with(|c| *c.borrow_mut() = ctx);
+}
+
+/// Make the following parses on this thread keep their alias maps.
+pub(crate) fn capture_aliases(on: bool) {
+    CAPTURE_ALIASES.with(|c| c.set(on));
+}
+
+/// The declarations of the file last parsed on this thread that an including
+/// file sees: its typedefs, records and non-macro constants (enumerators,
+/// `const` integers). Macros travel separately, branch-aware, through the
+/// preprocessor pass, so `$def:` entries and the constants of macro names
+/// (recorded from every branch) are left out.
+pub(crate) fn take_exported_aliases() -> HashMap<String, String> {
+    let mut map = LAST_ALIASES.with(|a| std::mem::take(&mut *a.borrow_mut()));
+    let macro_names: HashSet<String> = map
+        .keys()
+        .filter_map(|k| k.strip_prefix(DEF_KEY).map(str::to_string))
+        .collect();
+    map.retain(|k, _| {
+        k != CPP_KEY
+            && !k.starts_with(TPARAM_KEY)
+            && !k.starts_with(DEF_KEY)
+            && !k
+                .strip_prefix(CONST_KEY)
+                .is_some_and(|n| macro_names.contains(n))
+    });
+    map
+}
+
+/// The `#include` directives of a C/C++ source text: `(path, is_angle)`.
+pub(crate) fn include_directives(source: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let l = line.trim_start();
+        let Some(rest) = l.strip_prefix('#') else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix("include") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        if let Some(r) = rest.strip_prefix('<')
+            && let Some(end) = r.find('>')
+        {
+            out.push((r[..end].to_string(), true));
+        } else if let Some(r) = rest.strip_prefix('"')
+            && let Some(end) = r.find('"')
+        {
+            out.push((r[..end].to_string(), false));
+        }
+    }
+    out
 }
 
 /// Set the active C++ stdlib variant for all threads.  Called from `lib.rs::set_cpp_stdlib`.
@@ -233,6 +331,20 @@ fn c_type_size_align_uncapped(ty: &str, arch: &'static ArchConfig) -> (usize, us
     // C++ pointer-to-member-function: two words (function pointer + `this` adjustment).
     if ty == "__memfn_ptr" {
         return (arch.pointer_size * 2, arch.pointer_size);
+    }
+    // A `__vector_size__(N)` typedef: aligned to its size, except where the
+    // ABI caps vector alignment (AAPCS: 8 bytes; GCC aligns them fully even
+    // on AVR).
+    if let Some(n) = ty
+        .strip_prefix("__vector<")
+        .and_then(|r| r.strip_suffix('>'))
+        .and_then(|n| n.trim().parse::<usize>().ok())
+    {
+        let align = match arch.name {
+            "cortex_m" | "cortex_m4" => n.min(8),
+            _ => n,
+        };
+        return (n, align.max(1));
     }
     // Anonymous nested struct/union encoded as "__anon_struct<size,align>" /
     // "__anon_union<size,align>" by the field parser.
@@ -669,8 +781,11 @@ fn collect_pp_defines(source: &str, root: Node<'_>, aliases: &mut HashMap<String
 /// the file never defines it and it was not supplied externally — the answer
 /// then depends on the build's `-D` flags.
 fn pp_defined(name: &str, at: usize, aliases: &HashMap<String, String>) -> Option<bool> {
-    let pos: usize = aliases.get(&format!("{DEF_KEY}{name}"))?.parse().ok()?;
-    Some(pos < at)
+    match aliases.get(&format!("{DEF_KEY}{name}")) {
+        Some(pos) => Some(pos.parse::<usize>().ok()? < at),
+        // Defined by an included header (or predefined) before the file starts.
+        None => context_macro(name).map(|_| true),
+    }
 }
 
 /// Evaluate an `#if` / `#elif` condition. Undefined identifiers are 0, as in C.
@@ -718,6 +833,7 @@ fn eval_pp_condition(text: &str, at: usize, aliases: &HashMap<String, String>) -
             aliases
                 .get(&format!("{CONST_KEY}{id}"))
                 .cloned()
+                .or_else(|| context_macro(id).flatten())
                 .unwrap_or_else(|| "1".to_string()),
         ),
         Some(false) => Some("0".to_string()),
@@ -849,14 +965,39 @@ fn eval_const_expr(
     arch: &'static ArchConfig,
     depth: u8,
 ) -> Option<i64> {
-    let lookup = |id: &str| aliases.get(&format!("{CONST_KEY}{id}")).cloned();
+    let lookup = |id: &str| {
+        aliases
+            .get(&format!("{CONST_KEY}{id}"))
+            .cloned()
+            .or_else(|| context_macro(id).flatten())
+    };
     let sizeof = |t: &str| {
-        let t = aliases.get(t).map(String::as_str).unwrap_or(t);
-        // `sizeof(struct X)` and friends cannot be sized from here.
-        if t.starts_with("struct ") || t.starts_with("union ") || t.starts_with("class ") {
+        let mut t = t.trim();
+        for _ in 0..8 {
+            match aliases.get(t) {
+                Some(next) if next != t => t = next,
+                _ => break,
+            }
+        }
+        // `sizeof(struct X)`: a record laid out earlier in the file or in an
+        // included header.
+        if let Some(name) = ["struct ", "union ", "class "]
+            .iter()
+            .find_map(|p| t.strip_prefix(p))
+        {
+            let name = name.trim();
+            return RECORD_SIZES
+                .with(|r| r.borrow().get(name).copied())
+                .and_then(|(size, _)| i64::try_from(size).ok());
+        }
+        // A type padlock would only guess at gives no size.
+        let saved = UNKNOWN_TYPE.with(|u| u.replace(false));
+        let size = c_type_size_align(t, arch).0;
+        let unknown = UNKNOWN_TYPE.with(|u| u.replace(saved));
+        if unknown {
             return None;
         }
-        i64::try_from(c_type_size_align(t, arch).0).ok()
+        i64::try_from(size).ok()
     };
     super::consteval::eval(
         expr,
@@ -1003,7 +1144,15 @@ fn resolve_field_type(
     arch: &'static ArchConfig,
 ) -> (String, String) {
     let (base, mut rest) = split_array_dims(ty);
-    let resolved_base = aliases.get(base).map(String::as_str).unwrap_or(base);
+    // Follow typedef chains (`uint8_t` → `__uint8_t` → `unsigned char`), which
+    // span headers once includes are followed.
+    let mut resolved_base = base;
+    for _ in 0..8 {
+        match aliases.get(resolved_base) {
+            Some(next) if next != resolved_base => resolved_base = next,
+            _ => break,
+        }
+    }
     let mut dims = String::new();
     while let Some(s) = rest.strip_prefix('[') {
         let mut depth = 1;
@@ -1604,7 +1753,7 @@ fn parse_class_specifier_inner(
                 raw_fields.extend(anon_fields);
             } else {
                 let parsed = parse_field_declarations(source, child, arch, aliases);
-                if parsed.is_empty()
+                if (parsed.is_empty() || has_error_child(child))
                     && let Some(label) = unexpanded_macro_member(source, child)
                 {
                     macro_labels.push(label);
@@ -1752,6 +1901,27 @@ fn contains_virtual_keyword(source: &str, node: Node<'_>) -> bool {
 /// alias name in those cases lives in a nested declarator node and will not
 /// appear as a direct `type_identifier` child, so they naturally produce fewer
 /// than two type parts and are filtered out.
+/// The number in a GCC attribute such as `__vector_size__ (16)` or
+/// `aligned(8)` (`name` without underscores), when it is a plain literal.
+fn attribute_number(text: &str, name: &str) -> Option<usize> {
+    let mut rest = text;
+    while let Some(i) = rest.find(name) {
+        let after = rest[i + name.len()..].trim_start_matches('_').trim_start();
+        if let Some(inner) = after.strip_prefix('(') {
+            let num: String = inner
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(n) = num.parse() {
+                return Some(n);
+            }
+        }
+        rest = &rest[i + name.len()..];
+    }
+    None
+}
+
 fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, String> {
     let mut aliases = HashMap::new();
     let mut stack = vec![root];
@@ -1762,6 +1932,22 @@ fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, Stri
             }
         }
         if node.kind() != "type_definition" {
+            continue;
+        }
+        // `typedef float v4 __attribute__((__vector_size__(16), __aligned__(16)));`:
+        // a vector of that many bytes (aligned to its size unless stated).
+        let text = &source[node.byte_range()];
+        if let Some(size) = attribute_number(text, "vector_size")
+            && let Some(decl) = node.child_by_field_name("declarator")
+        {
+            let name = source[decl.byte_range()].trim();
+            if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                let ty = match attribute_number(text, "aligned") {
+                    Some(align) => format!("__anon_union<{size},{align}>"),
+                    None => format!("__vector<{size}>"),
+                };
+                aliases.insert(name.to_string(), ty);
+            }
             continue;
         }
         // Skip struct/union/class typedefs — those produce StructLayout entries.
@@ -1776,6 +1962,29 @@ fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, Stri
                 .unwrap_or(false)
         });
         if has_record {
+            // `typedef struct X Y;` (no body): `Y` names the record `X`, which
+            // is defined elsewhere (later in the file or in another header).
+            let rec = (0..node.child_count())
+                .filter_map(|i| node.child(i))
+                .find(|c| {
+                    matches!(
+                        c.kind(),
+                        "struct_specifier" | "union_specifier" | "class_specifier"
+                    )
+                });
+            let declarator = node.child_by_field_name("declarator");
+            if let Some(rec) = rec
+                && rec.child_by_field_name("body").is_none()
+                && let Some(tag) = rec.child_by_field_name("name")
+                && let Some(decl) = declarator
+                && decl.kind() == "type_identifier"
+            {
+                let tag = normalize_type_text(&source[tag.byte_range()]);
+                let alias = source[decl.byte_range()].trim().to_string();
+                if alias != tag {
+                    aliases.insert(alias, tag);
+                }
+            }
             continue;
         }
         // Collect direct-child type parts in declaration order:
@@ -2061,9 +2270,21 @@ fn extract_structs_from_tree(
     cpp: bool,
 ) {
     PENDING_ANON.with(|p| p.borrow_mut().clear());
-    RECORD_SIZES.with(|r| r.borrow_mut().clear());
-    // Phase 0: collect within-file typedef scalar aliases for field type resolution.
-    let mut aliases = collect_typedef_aliases(source, root);
+    let include_ctx = INCLUDE_CONTEXT.with(|c| c.borrow().clone());
+    RECORD_SIZES.with(|r| {
+        let mut r = r.borrow_mut();
+        r.clear();
+        if let Some(ctx) = &include_ctx {
+            r.extend(ctx.records.iter().map(|(k, v)| (k.clone(), *v)));
+        }
+    });
+    // Phase 0: collect within-file typedef scalar aliases for field type resolution
+    // (on top of what the included headers declare; the file's own win).
+    let mut aliases = include_ctx
+        .as_ref()
+        .map(|c| c.aliases.clone())
+        .unwrap_or_default();
+    aliases.extend(collect_typedef_aliases(source, root));
     // …and integer constants used in array-length expressions.
     collect_int_constants(source, root, arch, &mut aliases);
     // …and where macros are defined, to resolve `#if` branches.
@@ -2422,6 +2643,9 @@ fn extract_structs_from_tree(
     if cpp {
         qualify_cpp_references(layouts);
     }
+    if CAPTURE_ALIASES.with(|c| c.get()) {
+        LAST_ALIASES.with(|a| *a.borrow_mut() = aliases.clone());
+    }
     let _ = cursor;
     let _ = cursor2; // silence unused warnings
 }
@@ -2656,7 +2880,7 @@ fn parse_struct_or_union_specifier_inner(
                 raw_fields.extend(anon_fields);
             } else {
                 let parsed = parse_field_declarations(source, child, arch, aliases);
-                if parsed.is_empty()
+                if (parsed.is_empty() || has_error_child(child))
                     && let Some(label) = unexpanded_macro_member(source, child)
                 {
                     macro_labels.push(label);
@@ -3314,7 +3538,25 @@ fn register_anonymous(
 /// A member written as a macro invocation (`__SOCKADDR_COMMON (sin_);`,
 /// `DECLARE_BITMAP(bits, 64);`): its fields exist only after preprocessing, so
 /// the struct is incomplete. Returns a label for `uncertain_fields`.
+fn has_error_child(node: Node<'_>) -> bool {
+    (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .any(|c| c.is_error())
+}
+
 fn unexpanded_macro_member(source: &str, node: Node<'_>) -> Option<String> {
+    // A member the parser could not make sense of — typically a macro that
+    // expands to members (`PyObject_HEAD`) with nothing defining it here.
+    if has_error_child(node) {
+        let text = source[node.byte_range()]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Some(format!(
+            "member `{}` (could not be parsed; unexpanded macro?)",
+            text.trim_end_matches(';')
+        ));
+    }
     let has_declarator =
         (0..node.child_count()).any(|i| node.field_name_for_child(i) == Some("declarator"));
     if has_declarator {

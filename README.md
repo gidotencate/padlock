@@ -59,7 +59,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 | **Multi-arch** | x86-64 (SysV and Windows/MSVC), x86 (i386), AArch64, Apple Silicon (128-byte lines), WASM32, RISC-V 64, Cortex-M, AVR; `--target <triple>` lays sources out for that target (data model, `long double`, alignment caps, MSVC bit-fields) |
 | **Compiler-order layout** | `repr(Rust)` and plain Zig structs are laid out the way rustc/zig order them (largest alignment first), so their sizes match the compiled program; `--declared-order` shows source order instead; `--hide-repr-rust` excludes them |
 | **Generics & templates** | C++ class templates, Rust/Go generic structs and Zig `fn(comptime T) type` are analyzed once per concrete instantiation used anywhere in the analyzed files (or listed under `[instantiate]` in `.padlock.toml`) |
-| **Preprocessor** | `#if`/`#ifdef`/`#elif` branches are resolved like a compiler would; `-D NAME[=VALUE]` / `defines = [...]` choose them; members that depend on undefined macros, unknown typedefs or macro invocations are reported as uncertain instead of guessed |
+| **Preprocessor & includes** | A C/C++ file is laid out with what its `#include`s declare (typedefs, constants, records, macros), found next to the file, in `-I DIR` / `include_dirs = [...]` and, for Linux targets, the system include paths. Macros are expanded (object-like and function-like, `#`/`##`), the target's predefined macros (`__x86_64__`, `__SIZEOF_LONG__`, …) are known, and `#if` branches decided for the target are resolved; `-D NAME[=VALUE]` / `defines = [...]` set project macros. A header is processed in the context of the file that includes it (umbrella headers such as `Python.h`). Members that still depend on undefined project macros, unknown typedefs or unparsable macro invocations are reported as uncertain instead of guessed |
 | **C++ ABI** | Itanium inheritance: tail-padding reuse, empty-base optimisation, `[[no_unique_address]]`, virtual bases, primary base; namespaces and nested classes keep same-named types apart |
 | **Exact modes** | `--compile-commands compile_commands.json` (C/C++ via the real compiler), `--go-exact` (Go toolchain via a virtual probe test), `--rust-exact` (rustc `-Zprint-type-sizes`) replace estimates with the compiler's own layout |
 | **Verify against a binary** | `padlock verify --binary app src/` checks every source-level layout against the debug info of a build and fails CI on drift |
@@ -90,7 +90,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 
 ## How exact is it?
 
-Source analysis computes layouts the way the compiler would, and is checked against the real compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) on every change: a conformance suite of several hundred probe structs for each language and seven targets, plus differential fuzzing of random C/C++ structs (`tests/conformance/`). What source alone cannot know, padlock reports as `uncertain` rather than guessing silently — a typedef from a header that was not analyzed, a member written as a macro, a branch that depends on an undefined macro, a type from another Go package.
+Source analysis computes layouts the way the compiler would, and is checked against the real compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) on every change: a conformance suite of several hundred probe structs for each language and seven targets, plus differential fuzzing of random C/C++ structs (`tests/conformance/`). Go files are laid out together with the rest of their package, and C/C++ files with the headers they include, so types from other files are sized exactly. What source alone cannot know, padlock reports as `uncertain` rather than guessing silently — a typedef from a header it cannot find, a member written as an unknown macro, a branch that depends on an undefined project macro, a type from another Go package. Checked against the compilers on real code: 0 silently wrong sizes among 1,331 Go standard-library types (`--go-exact`) and among 325 glibc, Python and OpenSSL header types (gcc DWARF), with 93–97% exact.
 
 When you need the compiler's own answer:
 
@@ -478,6 +478,10 @@ custom_sync_types = []
 # C/C++ macros treated as defined when choosing #if/#ifdef branches (like -D).
 defines = []
 # Example: defines = ["CONFIG_SMP", "WORD_BITS=64"]
+
+# Extra directories searched for C/C++ #includes (same as -I DIR).
+include_dirs = []
+# Example: include_dirs = ["include", "third_party/foo/include"]
 
 # Show repr(Rust) and plain Zig structs in source order instead of the order
 # the compiler uses (same as --declared-order).

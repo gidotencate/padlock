@@ -18,6 +18,7 @@
 //   fail_below     = 60          # exit 1 if any struct scores below this
 //   ignore         = ["GeneratedStruct", "FfiLayout"]  # suppress by name
 //   defines        = ["CONFIG_SMP", "WORD_BITS=64"]   # C/C++ `-D` for #if branches
+//   include_dirs   = ["include", "third_party/foo"]  # C/C++ `-I` for #include lookups
 //
 //   [instantiate]                # generic types to analyze with these arguments
 //   Buf  = ["char, 8", "int"]    # C++ Buf<char, 8>, Buf<int>
@@ -93,6 +94,9 @@ pub struct Config {
     /// struct bodies, like a compiler's `-D`. Entries are `NAME` or `NAME=VALUE`.
     /// Example: `["CONFIG_SMP", "WORD_BITS=64"]`
     pub defines: Vec<String>,
+    /// Extra directories searched for C/C++ `#include`s, like a compiler's
+    /// `-I` (relative paths are taken from the current directory).
+    pub include_dirs: Vec<String>,
     /// Show Rust `repr(Rust)` / plain Zig structs in declaration order rather than
     /// the compiler's order (`--declared-order`).
     pub declared_order: bool,
@@ -118,6 +122,7 @@ impl Default for Config {
             exclude_paths: Vec::new(),
             custom_sync_types: Vec::new(),
             defines: Vec::new(),
+            include_dirs: Vec::new(),
             declared_order: false,
             instantiate: Vec::new(),
         }
@@ -264,6 +269,16 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let include_dirs = padlock
+            .and_then(|p| p.get("include_dirs"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let declared_order = padlock
             .and_then(|p| p.get("declared_order"))
             .and_then(|v| v.as_bool())
@@ -306,6 +321,7 @@ impl Config {
             exclude_paths,
             custom_sync_types,
             defines,
+            include_dirs,
             declared_order,
             instantiate,
         })

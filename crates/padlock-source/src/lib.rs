@@ -1,12 +1,15 @@
 // padlock-source/src/lib.rs
 
+mod c_includes;
+mod c_preproc;
 pub mod concurrency;
 pub mod fixgen;
 pub mod frontends;
 mod go_package;
+pub use c_includes::{include_dirs, set_include_dirs};
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use padlock_core::arch::ArchConfig;
 use padlock_core::findings::SkippedStruct;
@@ -31,7 +34,7 @@ pub enum CppStdlib {
 /// results (the Go package cache) know to rebuild.
 static SETTINGS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn bump_settings_generation() {
+pub(crate) fn bump_settings_generation() {
     SETTINGS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -326,6 +329,32 @@ fn looks_like_cpp(source: &str) -> bool {
     })
 }
 
+/// The headers a C/C++ file includes directly (resolved, canonical); empty for
+/// other languages. Lets callers analyze files that nothing else includes
+/// first, so headers are processed in the context of their includer.
+pub fn direct_includes(path: &Path, arch: &'static ArchConfig) -> Vec<PathBuf> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "inl" | "ipp") => {
+            c_includes::direct_includes(path, arch)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Other files whose content the parse of `path` depends on: the headers a
+/// C/C++ file includes (transitively). Callers caching results by file mtime
+/// should also check these.
+pub fn source_dependencies(path: &Path, arch: &'static ArchConfig) -> Vec<PathBuf> {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    match detect_language_from_source(path, &source) {
+        Some(SourceLanguage::C) => c_includes::dependencies(path, arch, false),
+        Some(SourceLanguage::Cpp) => c_includes::dependencies(path, arch, true),
+        _ => Vec::new(),
+    }
+}
+
 /// Parse a source file and return layouts plus any skipped types.
 pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<ParseOutput> {
     let source = std::fs::read_to_string(path)?;
@@ -334,12 +363,16 @@ pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<Pa
     // Clear any leftover thread-local state from previous direct parse_source_str calls.
     let _ = take_skipped();
     // A Go file is laid out together with the other files of its package.
+    // …and a C/C++ file with what its `#include`s declare.
     let package = match lang {
-        SourceLanguage::Go => go_package::parse_in_package(path, &source, arch),
+        SourceLanguage::Go => go_package::parse_in_package(path, &source, arch).map(Ok),
+        SourceLanguage::C | SourceLanguage::Cpp => {
+            c_includes::parse_with_includes(path, &source, &lang, arch)
+        }
         _ => None,
     };
     let mut layouts = match package {
-        Some(layouts) => finish_layouts(&source, &lang, layouts),
+        Some(layouts) => finish_layouts(&source, &lang, layouts?),
         None => parse_source_str(&source, &lang, arch)?,
     };
     let mut skipped = take_skipped();
@@ -669,7 +702,7 @@ fn apply_cpp_inheritance(layouts: &mut [StructLayout]) -> bool {
 /// Drop the synthetic layouts of anonymous member aggregates once they have done
 /// their job (sizing their parents), and show the members that use them as
 /// `struct { … }` / `union { … }`.
-fn hide_anonymous_aggregates(layouts: &mut Vec<StructLayout>) {
+pub(crate) fn hide_anonymous_aggregates(layouts: &mut Vec<StructLayout>) {
     let prefix = frontends::c_cpp::ANON_PREFIX;
     layouts.retain(|l| !l.name.starts_with(prefix));
     for l in layouts.iter_mut() {
@@ -690,7 +723,7 @@ fn hide_anonymous_aggregates(layouts: &mut Vec<StructLayout>) {
 
 /// Split `Name[2][3]` into (`Name`, 6). `[]` counts as 0 elements and an
 /// unevaluated `[?]` as 1; a name without a suffix is (`Name`, 1).
-fn split_c_array_suffix(ty: &str) -> (&str, usize) {
+pub(crate) fn split_c_array_suffix(ty: &str) -> (&str, usize) {
     let Some(open) = ty.find('[') else {
         return (ty, 1);
     };

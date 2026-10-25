@@ -107,12 +107,16 @@ Source analysis computes layouts the way the compiler would. Go files are laid o
 | Python 3.12 + OpenSSL headers | x86_64 Linux | 152 | 95% | 5% | **0** |
 | libuv headers | x86_64 Linux | 51 | 100% | 0% | **0** |
 | padlock's own Rust crates | x86_64 Linux | 97 | 93% | 7% | **0** |
+| V8 (C++ headers) | x86_64 Linux | — | 64% | 36% | **0** |
+| Zig standard library | x86_64 Linux | — | 78% | 22% | **0** |
+| Go standard library | windows/amd64 | — | 84% | 16% | **0** |
+| Windows SDK C headers (mingw) ² | x86_64 Windows | 2199 | 67% | 31% | 35 |
 
 ¹ Cross targets need `--target`, and for C the target's headers (`-I`, here zig's bundled glibc headers).
 
-Most flagged Go types hold a type from another package (`runtime/internal/atomic`, `internal/abi`), which source analysis does not follow; use `--go-exact` for those. Not yet measured on real code: C++, Zig, Windows/MSVC, macOS, and Rust on 32-bit targets — for these the evidence is the conformance suite below.
+Most flagged Go types hold a type from another package (`runtime/internal/atomic`, `internal/abi`), which source analysis does not follow; use `--go-exact` for those. ² The silent cases are headers whose packing comes from the file that includes them (`mciapi.h` via `mmsystem.h`), analyzed standalone. Not yet measured on real code: macOS and Rust on 32-bit targets — for these the evidence is the conformance suite below.
 
-Every change is also checked against the compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) with a conformance suite of probe structs per language — x86-64, aarch64, riscv64, i386, Cortex-M, AVR and Windows x64 for C; i386 for Go and Zig — plus differential fuzzing of random C/C++ structs (`tests/conformance/`). Known remaining gaps: C++ `packed` classes combined with inheritance (rare fuzzing mismatches). The editor server (`padlock-lsp`) lays out the open file's live text against its Go package, Rust crate or C/C++ includes when it can find them (Go directories over 400 files are skipped), and the file alone otherwise.
+Every change is also checked against the compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) with a conformance suite of probe structs per language — x86-64, aarch64, riscv64, i386, Cortex-M, AVR and Windows x64 for C; i386 for Go and Zig — plus differential fuzzing of random C/C++ structs (`tests/conformance/`). Differential fuzzing against g++ finds no mismatches in thousands of C++ seeds. The editor server (`padlock-lsp`) lays out the open file's live text against its Go package, Rust crate or C/C++ includes when it can find them (Go directories over 400 files are skipped), and the file alone otherwise.
 
 When you need the compiler's own answer:
 
@@ -1100,7 +1104,6 @@ This substitution is textual, not a real template instantiator: it does not unde
 - **Rust enums** — data enums are modeled with a synthetic `__payload` field (sized to the largest variant) and a `__discriminant` field; niche-filled enums and common niche types (`Option<NonZeroXxx>`, `Option<&T>`, `Option<Box<T>>`) are sized correctly. Unusual niches may still be approximate — use `--rust-exact` or binary analysis.
 - **Rust std sync types on macOS/Windows** — `Mutex`/`RwLock`/`Condvar` sizes differ per OS; on Apple and MSVC targets these fields are flagged as `uncertain`. Rust on 32-bit targets is not yet covered by the conformance suite.
 - **Go qualified interface fields** (`io.Reader`, `driver.Connector`, etc.) — cross-package interface types cannot be resolved from source alone; these fields are flagged as `uncertain` in output and sized as 2 words (the correct runtime representation). Use binary analysis for certainty.
-- **C++ `packed` combined with inheritance** — differential fuzzing still finds rare mismatches against g++ for packed classes with bases; use `--compile-commands` or binary analysis for those.
 - **`repr(Rust)` reordering** — sizes follow rustc's order, but individual field offsets are an estimate (rustc may place a large-niche field first). `--rust-exact` reports rustc's own order.
 
 ---

@@ -83,8 +83,20 @@ struct Dup { char a; long b; char c; };
 struct Dup { char a; char c; };
 #endif
 struct ZeroArr { char a; int z[0]; char c; };
+/* A forward struct typedef, macro-built members and macro-built types. */
+typedef struct FwdT FwdT_t;
+struct FwdT { char a; long b; };
+struct UsesFwd { char a; FwdT_t f; char c; };
+#define MEMBERS(p) int p##x; char p##y
+struct MacMem { char a; MEMBERS(m_); long c; };
+typedef float V4 __attribute__((__vector_size__(16)));
+struct Vec { char a; V4 v; char c; };
+#define WORD_T long int
+#define MY_T WORD_T
+typedef MY_T word_t;
+struct MacTy { char a; word_t w; char c; };
 #define P(T,L) printf(#T " %zu %zu " #L "\n", sizeof(struct T), offsetof(struct T, L))
 int main(){
-P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,t);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);P(Pp,c);P(Dup,c);P(BfDiff,t);P(BfAnon,t);P(BfZero,t);P(BfWide,c);P(BfPk,d);
+P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,t);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);P(Pp,c);P(Dup,c);P(BfDiff,t);P(BfAnon,t);P(BfZero,t);P(BfWide,c);P(BfPk,d);P(UsesFwd,c);P(MacMem,c);P(Vec,c);P(MacTy,c);
 printf("AlS %zu -1\nU %zu 0\n",sizeof(struct AlS),sizeof(union U));
 }

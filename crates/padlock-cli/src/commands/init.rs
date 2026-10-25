@@ -45,6 +45,9 @@ const TEMPLATE: &str = r#"# .padlock.toml — padlock project configuration
 # C/C++ macros treated as defined when choosing #if/#ifdef branches (like -D).
 # defines = ["CONFIG_SMP", "WORD_BITS=64"]
 
+# Extra directories searched for C/C++ #includes (like -I).
+# include_dirs = ["include", "third_party/foo/include"]
+
 # Show repr(Rust) / plain Zig structs in source order instead of compiler order.
 # declared_order = false
 

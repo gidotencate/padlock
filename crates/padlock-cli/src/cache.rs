@@ -30,6 +30,10 @@ struct CacheEntry {
     layouts: Vec<StructLayout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     skipped: Vec<SkippedStruct>,
+    /// Files the result also depends on (a C/C++ file's `#include`s), with
+    /// their mtimes when it was parsed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deps: Vec<(String, u64)>,
 }
 
 /// Everything besides the file itself that changes what the parser produces:
@@ -38,9 +42,10 @@ struct CacheEntry {
 fn cache_fingerprint() -> String {
     let defines: Vec<String> = padlock_source::preprocessor_defines_fingerprint();
     format!(
-        "{}|{}|{:?}|{}|{}|{}/{}",
+        "{}|{}|{:?}|{:?}|{}|{}|{}/{}",
         env!("CARGO_PKG_VERSION"),
         defines.join(","),
+        padlock_source::include_dirs(),
         padlock_source::cpp_stdlib(),
         padlock_source::declared_order(),
         padlock_source::configured_instantiations_fingerprint().join(";"),
@@ -97,7 +102,11 @@ impl ParseCache {
         let mtime = file_mtime(path)?;
         let key = path.to_string_lossy().into_owned();
         let entry = self.store.entries.get(&key)?;
-        if entry.mtime_secs == mtime {
+        let deps_unchanged = entry
+            .deps
+            .iter()
+            .all(|(dep, t)| mtime_secs(Path::new(dep)) == Some(*t));
+        if entry.mtime_secs == mtime && deps_unchanged {
             Some((entry.layouts.clone(), entry.skipped.clone()))
         } else {
             None
@@ -113,12 +122,17 @@ impl ParseCache {
             return;
         };
         let key = path.to_string_lossy().into_owned();
+        let deps = padlock_source::source_dependencies(path, crate::paths::source_arch())
+            .into_iter()
+            .filter_map(|d| Some((d.to_string_lossy().into_owned(), mtime_secs(&d)?)))
+            .collect();
         self.store.entries.insert(
             key,
             CacheEntry {
                 mtime_secs: mtime,
                 layouts,
                 skipped,
+                deps,
             },
         );
         self.dirty = true;
@@ -331,6 +345,7 @@ mod tests {
         store.entries.insert(
             key,
             CacheEntry {
+                deps: Vec::new(),
                 mtime_secs: 0, // will never match current file's mtime
                 layouts: vec![simple_layout()],
                 skipped: vec![],

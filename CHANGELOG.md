@@ -2,6 +2,21 @@
 
 All notable changes to padlock are documented here.
 
+## [0.62.0] — 2026-10-25
+
+### Fixed
+- **C/C++ types from included headers were guessed.** Each file was laid out on its own, so a typedef, constant or record from another header (`struct timespec`'s `__time_t`, `sem_t`'s `__SIZEOF_SEM_T`) got a pointer-sized placeholder. A C/C++ file is now laid out with what its `#include`s declare, processed in preprocessing order: headers are found next to the including file, in `-I DIR` / `include_dirs` and, for Linux targets, the system include paths, and each header is processed once per run in the context of the translation unit that first reaches it (so umbrella headers such as `Python.h` work). Against gcc's DWARF for glibc headers: exact 89 → 161 of 173 types, silently wrong 12 → 0; Python and OpenSSL headers: exact 28 → 144 of 152, silently wrong 16 → 0.
+- **Macros are expanded.** Object-like and function-like macros (with `#` and `##`) are expanded in declarations, in order (`#undef` respected), with the target's predefined macros (`__x86_64__`, `__SIZEOF_LONG__`, `__UINT8_TYPE__`, …); `#if` groups whose conditions involve only known or reserved macros are resolved as the compiler would, while those on project macros are still left to `-D` and flagged when undecided.
+- `typedef struct X Y;` (no body) made `Y` an unknown type even in the same file; it now names the record `X`.
+- `typedef float v4 __attribute__((__vector_size__(16)))` vectors are sized (16 bytes, aligned to their size, 8 on Cortex-M).
+- `sizeof(struct X)` in array lengths now uses the record's size; a `sizeof` of an unknown type no longer guesses one word.
+- Typedef chains (`uint8_t` → `__uint8_t` → `unsigned char`) are followed; header typedefs never override types padlock sizes natively.
+- A member the parser cannot make sense of (an unknown member macro such as `PyObject_HEAD`) is flagged uncertain instead of silently dropped.
+
+### Added
+- `-I DIR` / `--include-dir DIR` and `include_dirs = [...]` in `.padlock.toml`.
+- The parse cache records each C/C++ file's included headers and invalidates the file when one changes.
+
 ## [0.61.0] — 2026-10-25
 
 ### Fixed

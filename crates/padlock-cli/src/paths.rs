@@ -62,6 +62,24 @@ pub fn collect_layouts(
         crate::cache::ParseCache::load(&cache_root)
     };
 
+    // Explicitly named C/C++ files are parsed one by one below; process the
+    // translation units of those that no other one includes first, so headers
+    // are laid out in their includer's context whatever the argument order.
+    {
+        let arch = source_arch();
+        let named: Vec<PathBuf> = paths
+            .iter()
+            .filter(|p| p.is_file() && !padlock_source::direct_includes(p, arch).is_empty())
+            .cloned()
+            .collect();
+        if named.len() > 1 {
+            let (first, _) = include_roots_first(&named, arch);
+            first.par_iter().for_each(|f| {
+                let _ = padlock_source::parse_source(f, arch);
+            });
+        }
+    }
+
     for path in paths {
         if path.is_dir() {
             let mut files = walk_source_files(path);
@@ -138,15 +156,23 @@ pub fn collect_layouts(
                 .into_par_iter()
                 .for_each(|d| padlock_source::prepare_go_packages(d, arch));
 
+            // A C/C++ header is laid out in the context of the file that
+            // includes it (an umbrella header's macros, say), so files that no
+            // other analyzed file includes go first and process their headers.
+            let (first, later) = include_roots_first(&misses, arch);
+
             let counter_ref = parsed_count.clone();
-            let miss_results: Vec<_> = misses
-                .par_iter()
-                .map(|file| {
-                    let r = padlock_source::parse_source(file, arch);
-                    counter_ref.fetch_add(1, Ordering::Relaxed);
-                    (file.clone(), r)
-                })
-                .collect();
+            let parse = |file: &&PathBuf| {
+                let r = padlock_source::parse_source(file, arch);
+                counter_ref.fetch_add(1, Ordering::Relaxed);
+                ((*file).clone(), r)
+            };
+            let mut miss_results: Vec<_> = first.par_iter().map(parse).collect();
+            miss_results.extend(later.par_iter().map(parse).collect::<Vec<_>>());
+            // Back to the walk's (deterministic) order.
+            let order: std::collections::HashMap<&PathBuf, usize> =
+                misses.iter().enumerate().map(|(i, f)| (f, i)).collect();
+            miss_results.sort_by_key(|(f, _)| order.get(f).copied().unwrap_or(usize::MAX));
 
             stop_flag.store(true, Ordering::Relaxed);
             if let Some(handle) = progress_thread {
@@ -293,6 +319,35 @@ pub fn source_arch() -> &'static padlock_core::arch::ArchConfig {
 
 /// [`collect_layouts`], plus exact compiler layouts from `--compile-commands`
 /// when given: those replace the source-level layouts of the files compiled.
+/// Split C/C++ `files` into those no other file (transitively) includes —
+/// translation-unit roots such as `.c` files and umbrella headers — and the
+/// rest, so the roots can be parsed first.
+fn include_roots_first<'a>(
+    files: &'a [PathBuf],
+    arch: &'static padlock_core::arch::ArchConfig,
+) -> (Vec<&'a PathBuf>, Vec<&'a PathBuf>) {
+    let mut included: std::collections::HashSet<PathBuf> = files
+        .par_iter()
+        .flat_map_iter(|f| padlock_source::direct_includes(f, arch))
+        .collect();
+    // …transitively: a header reached through one that was not passed in
+    // still belongs to its includer's translation unit.
+    let mut frontier: Vec<PathBuf> = included.iter().cloned().collect();
+    while !frontier.is_empty() {
+        let next: Vec<PathBuf> = frontier
+            .par_iter()
+            .flat_map_iter(|f| padlock_source::direct_includes(f, arch))
+            .collect();
+        frontier = next
+            .into_iter()
+            .filter(|p| included.insert(p.clone()))
+            .collect();
+    }
+    files
+        .iter()
+        .partition(|f| !std::fs::canonicalize(f).is_ok_and(|c| included.contains(&c)))
+}
+
 pub fn collect_layouts_with(
     paths: &[PathBuf],
     filter: &crate::filter::FilterArgs,

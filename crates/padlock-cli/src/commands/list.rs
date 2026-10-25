@@ -87,6 +87,7 @@ mod tests {
     fn default_filter() -> FilterArgs {
         FilterArgs {
             defines: Vec::new(),
+            include_dirs: Vec::new(),
             declared_order: false,
             compile_commands: None,
             go_exact: false,

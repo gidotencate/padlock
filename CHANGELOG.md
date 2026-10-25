@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.66.0] — 2026-10-25
+
+### Fixed
+- **Deliberate cache-line padding was reported as waste.** `#[repr(align(64))]`, `alignas(64)` and `__attribute__((aligned(64)))` on a struct or a field — the standard fix *for* false sharing — produced "Padding waste: 56B (88%)" (High in C++). Only the padding the fields would need at their natural alignment is reported now; the part an explicit alignment request adds is not.
+
 ## [0.65.0] — 2026-10-25
 
 ### Fixed

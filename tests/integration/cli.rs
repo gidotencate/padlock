@@ -1057,3 +1057,31 @@ fn init_refuses_to_overwrite_unless_forced() {
     let text = std::fs::read_to_string(dir.path().join(".padlock.toml")).unwrap();
     assert!(text.parse::<toml::Table>().is_ok());
 }
+
+#[test]
+fn deliberate_cache_line_alignment_is_not_reported_as_padding_waste() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("a.cpp");
+    std::fs::write(
+        &file,
+        "struct alignas(64) Padded { long v; };\nstruct Plain { char a; long b; char c; };\n",
+    )
+    .unwrap();
+    let out = padlock()
+        .args(["analyze", "--json", "--no-cache", "--target", "x86_64"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let find = |n: &str| {
+        v["structs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["struct_name"] == n)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(find("Padded")["wasted_bytes"], 0);
+    assert!(find("Plain")["wasted_bytes"].as_u64().unwrap() > 0);
+}

@@ -209,28 +209,62 @@ pub fn find_padding(layout: &StructLayout) -> Vec<PaddingGap> {
     if layout.is_union {
         return Vec::new();
     }
+    // Padding an explicit alignment request adds on purpose — `#[repr(align(64))]`,
+    // `alignas(64)`, `__attribute__((aligned(64)))` on the struct or a field, the
+    // usual way to give hot data its own cache line — is not waste: only the
+    // part the fields would need at their natural alignment is reported.
+    let cap = |a: usize| {
+        if layout.is_packed {
+            1
+        } else {
+            layout.pack_limit.map_or(a, |p| a.min(p.max(1)))
+        }
+    };
+    let natural_align = |f: &Field| -> usize {
+        if layout.explicit_align.contains(&f.name) {
+            cap(f.ty.align().max(1)).min(f.align.max(1))
+        } else {
+            f.align.max(1)
+        }
+    };
     let mut gaps = Vec::new();
     for window in layout.fields.windows(2) {
         let current = &window[0];
         let next = &window[1];
         let end = current.offset + current.size;
         if next.offset > end {
-            gaps.push(PaddingGap {
-                after_field: current.name.clone(),
-                bytes: next.offset - end,
-                at_offset: end,
-            });
+            let natural = end.next_multiple_of(natural_align(next)).min(next.offset);
+            if natural > end {
+                gaps.push(PaddingGap {
+                    after_field: current.name.clone(),
+                    bytes: natural - end,
+                    at_offset: end,
+                });
+            }
         }
     }
     // Trailing padding: struct total_size > last field end
     if let Some(last) = layout.fields.last() {
         let end = last.offset + last.size;
         if layout.total_size > end {
-            gaps.push(PaddingGap {
-                after_field: last.name.clone(),
-                bytes: layout.total_size - end,
-                at_offset: end,
-            });
+            let explicit = layout.forced_align.is_some()
+                || layout
+                    .fields
+                    .iter()
+                    .any(|f| layout.explicit_align.contains(&f.name));
+            let natural_end = if explicit {
+                let struct_align = layout.fields.iter().map(natural_align).max().unwrap_or(1);
+                end.next_multiple_of(struct_align).min(layout.total_size)
+            } else {
+                layout.total_size
+            };
+            if natural_end > end {
+                gaps.push(PaddingGap {
+                    after_field: last.name.clone(),
+                    bytes: natural_end - end,
+                    at_offset: end,
+                });
+            }
         }
     }
     gaps

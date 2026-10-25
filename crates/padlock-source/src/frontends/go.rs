@@ -18,7 +18,7 @@ thread_local! {
     static PENDING_ANON: RefCell<Vec<StructLayout>> = const { RefCell::new(Vec::new()) };
     /// Distinguishes the anonymous-struct names of the files of one package,
     /// which are resolved together (0 = a lone file).
-    static ANON_SALT: Cell<usize> = const { Cell::new(0) };
+    static ANON_FILE_TAG: Cell<usize> = const { Cell::new(0) };
     static PARSER: RefCell<Parser> = RefCell::new({
         let mut p = Parser::new();
         p.set_language(&tree_sitter_go::LANGUAGE.into())
@@ -1005,10 +1005,10 @@ fn type_text_with_anon(source: &str, t: Node<'_>, ctx: &GoCtx) -> String {
             continue;
         }
         let (fields, size, align, uncertain) = simulate_go_layout(raw, ctx);
-        let name = match ANON_SALT.with(Cell::get) {
+        let name = match ANON_FILE_TAG.with(Cell::get) {
             0 => format!("{}struct#{}", super::c_cpp::ANON_PREFIX, n.start_byte()),
-            salt => format!(
-                "{}struct#{salt}_{}",
+            tag => format!(
+                "{}struct#{tag}_{}",
                 super::c_cpp::ANON_PREFIX,
                 n.start_byte()
             ),
@@ -1151,13 +1151,13 @@ pub(crate) fn file_declarations(
 }
 
 /// Parse one file of a package: its own declarations plus `package`'s (the
-/// other files'). `salt` keeps anonymous-struct names unique in the package;
+/// other files'). `file_tag` keeps anonymous-struct names unique in the package;
 /// `parsed` reuses the file's tree and declarations when already known.
 pub(crate) fn parse_go_in_package(
     source: &str,
     arch: &'static ArchConfig,
     package: &GoCtx,
-    salt: usize,
+    file_tag: usize,
     parsed: Option<&(GoCtx, tree_sitter::Tree)>,
 ) -> anyhow::Result<Vec<StructLayout>> {
     let fresh;
@@ -1171,9 +1171,9 @@ pub(crate) fn parse_go_in_package(
     };
     let mut ctx = own.clone();
     ctx.absorb(package);
-    ANON_SALT.with(|s| s.set(salt));
+    ANON_FILE_TAG.with(|s| s.set(file_tag));
     let layouts = extract_structs_with(source, tree.root_node(), &ctx);
-    ANON_SALT.with(|s| s.set(0));
+    ANON_FILE_TAG.with(|s| s.set(0));
     Ok(layouts)
 }
 

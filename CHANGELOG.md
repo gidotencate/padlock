@@ -2,6 +2,27 @@
 
 All notable changes to padlock are documented here.
 
+## [0.71.0] — 2026-10-30
+
+Found by checking mimalloc (C), typescript-go and microsoft/go against gcc's DWARF (`padlock verify`) and `go test` (`--go-exact`). mimalloc: 57 of 57 structs now match the compiler, up from 39 of 50.
+
+### Fixed
+- **C: a field typed with the typedef name of a tagged record was sized as a pointer.** For `typedef struct Tag { … } Name;` a member `Name x;` got 8 bytes instead of the record's size; only `typedef struct X { … } X;` worked. Struct sizes that contain such members were wrong without being reported as uncertain.
+- **C: `typedef __attribute__((aligned(N))) struct Tag { … } Name;`** (GNU attribute before `struct`, as `mi_decl_align`-style macros produce) is read; tree-sitter turned the whole typedef into an error node and the alignment was lost.
+- **C/C++: a multi-line `#define` with `/* … */` comments between its lines** (`MI_STAT_FIELDS()` in mimalloc) made tree-sitter drop the declarations after it, including enums whose constants size later arrays (`[?]`).
+- **C/C++: `_Atomic(T)` defined as a macro** (`#define _Atomic(tp) std::atomic<tp>` for C++, `… tp` for MSVC) is expanded; the C++ grammar cannot parse `_Atomic(T)` and the field vanished. A C++ translation unit now defines `__cplusplus`, and a `.h` reached from a C unit is read as C even when it mentions `std::` in a C++ branch.
+- **Go: generic arguments that are structs of the package** (`Box[Local]`, `Value T`) were sized as a pointer; a generic declared in one file is instantiated for the uses in every file of the package.
+- **Go: `sync.Map` is 48 bytes with Go 1.24+** (HashTrieMap), 32 before; padlock asks the installed toolchain (`go env GOVERSION`), and the parse cache is keyed on it.
+- **`padlock summary`: files with only zero-size structs were listed as the worst files with score 0.**
+- **`--go-exact` skipped whole packages** when one struct was declared inside a function or named a package-qualified type argument; those types are now left out of the probe and the rest is checked.
+- **`padlock verify` ignored `.padlock.toml` and had no `-I`/`-D`**, so C/C++ sources were compared without their headers. It takes `-I`/`--include-dir` and `-D`/`--define` and reads `include_dirs`/`defines` from the config.
+
+### Fixed (continued)
+- **Go: pointers, slices, maps, channels and funcs of package-qualified types** (`[]*ast.Node`, `map[tspath.Path]*Node`) were flagged as uncertain although their size does not depend on the element.
+
+### Measured
+- microsoft/TypeScript (the Go port, 1431 structs, compared with `go test` via `--go-exact`): 845 structs not flagged as uncertain, all 845 match the compiler; 586 flagged uncertain, 189 of those match. The flagged ones mostly hold types of other packages of the same module (`tspath`, `core`, `collections`, `lsproto`), which padlock does not resolve without `--go-exact`.
+
 ## [0.70.0] — 2026-10-25
 
 ### Fixed

@@ -242,6 +242,12 @@ pub fn set_preprocessor_defines<S: AsRef<str>>(defines: &[S]) {
     *DEFINES.write().unwrap_or_else(|e| e.into_inner()) = parsed;
 }
 
+/// The parts of the installed Go toolchain that change computed layouts (for
+/// cache fingerprints).
+pub fn go_toolchain_fingerprint() -> String {
+    frontends::go::go_toolchain_fingerprint()
+}
+
 /// The active defines as `NAME=VALUE` strings (for cache fingerprints).
 pub fn preprocessor_defines_fingerprint() -> Vec<String> {
     preprocessor_defines()

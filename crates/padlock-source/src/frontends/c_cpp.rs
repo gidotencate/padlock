@@ -2213,8 +2213,9 @@ fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, Stri
                 .unwrap_or(false)
         });
         if has_record {
-            // `typedef struct X Y;` (no body): `Y` names the record `X`, which
-            // is defined elsewhere (later in the file or in another header).
+            // `typedef struct X Y;` / `typedef struct X { … } Y;`: `Y` names the
+            // record `X` (laid out on its own, or defined elsewhere — later in
+            // the file or in another header).
             let rec = (0..node.child_count())
                 .filter_map(|i| node.child(i))
                 .find(|c| {
@@ -2225,7 +2226,6 @@ fn collect_typedef_aliases(source: &str, root: Node<'_>) -> HashMap<String, Stri
                 });
             let declarator = node.child_by_field_name("declarator");
             if let Some(rec) = rec
-                && rec.child_by_field_name("body").is_none()
                 && let Some(tag) = rec.child_by_field_name("name")
                 && let Some(decl) = declarator
                 && decl.kind() == "type_identifier"
@@ -4186,6 +4186,89 @@ pub fn template_uses(source: &str) -> Vec<(String, Vec<String>)> {
         .unwrap_or_default()
 }
 
+/// tree-sitter-c does not parse `typedef __attribute__((aligned(64))) struct Tag
+/// { … } Name;` (the attribute before the `struct` keyword; the whole typedef
+/// becomes an error node). Swap the pieces to the form it does parse,
+/// `typedef struct __attribute__((aligned(64))) Tag { … } Name;`, which GCC
+/// treats the same. The text keeps its length, so byte offsets stay valid.
+fn hoist_typedef_attributes(source: &str) -> std::borrow::Cow<'_, str> {
+    if !source.contains("typedef") || !source.contains("__attribute__") {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    let b = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(rel) = source[search..].find("typedef") {
+        let at = search + rel;
+        let mut i = at + "typedef".len();
+        search = i;
+        let is_word = |j: usize| {
+            b.get(j)
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        };
+        if at > 0 && is_word(at - 1) || is_word(i) {
+            continue;
+        }
+        let attrs_start = {
+            let mut j = i;
+            while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+                j += 1;
+            }
+            j
+        };
+        i = attrs_start;
+        // One or more `__attribute__((…))` groups.
+        while source[i..].starts_with("__attribute__") {
+            let mut j = i + "__attribute__".len();
+            while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+                j += 1;
+            }
+            if b.get(j) != Some(&b'(') {
+                break;
+            }
+            let mut depth = 0usize;
+            while j < b.len() {
+                match b[j] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            i = j;
+            while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+                i += 1;
+            }
+        }
+        let attrs_end = i;
+        if attrs_end == attrs_start {
+            continue;
+        }
+        let kw = ["struct", "union"]
+            .into_iter()
+            .find(|k| source[attrs_end..].starts_with(k) && !is_word(attrs_end + k.len()));
+        let Some(kw) = kw else { continue };
+        // typedef␣ATTRS␣struct  →  typedef␣struct␣ATTRS␣
+        let attrs = source[attrs_start..attrs_end].trim_end();
+        let gap = &source[attrs_start + attrs.len()..attrs_end];
+        out.push_str(&source[copied..attrs_start]);
+        out.push_str(kw);
+        out.push_str(gap);
+        out.push_str(attrs);
+        copied = attrs_end + kw.len();
+        search = copied;
+    }
+    out.push_str(&source[copied..]);
+    std::borrow::Cow::Owned(out)
+}
+
 /// tree-sitter-c/cpp do not know C23 `_BitInt(N)`; rewrite each use (with an
 /// optional `unsigned`/`signed`) to a same-length identifier `__bitintN_…` /
 /// `__ubitintN_…`, so byte offsets stay valid. `c_type_size_align` sizes those.
@@ -4240,6 +4323,7 @@ fn rewrite_bitint(source: &str) -> std::borrow::Cow<'_, str> {
 
 pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let source = &*rewrite_bitint(source);
+    let source = &*hoist_typedef_attributes(source);
     let tree = C_PARSER
         .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
@@ -4250,6 +4334,7 @@ pub fn parse_c(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<St
 
 pub fn parse_cpp(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let source = &*rewrite_bitint(source);
+    let source = &*hoist_typedef_attributes(source);
     let tree = CPP_PARSER
         .with(|p| p.borrow_mut().parse(source, None))
         .ok_or_else(|| anyhow::anyhow!("tree-sitter parse failed"))?;
@@ -5491,6 +5576,34 @@ struct Auth {
         let l = layouts.iter().find(|l| l.name == "Auth").expect("Auth");
         // prefix(1) + 3-byte pad + token(4) = 8B
         assert_eq!(l.total_size, 8, "alias-resolved layout should be 8 bytes");
+    }
+
+    #[test]
+    fn typedef_name_of_tagged_record_with_body_resolves() {
+        // `typedef struct Tag { … } Name;` — fields typed `Name` must get the
+        // record's real size (16B), not the pointer-size fallback (8B).
+        let src = r#"
+typedef struct Tag { void *base; unsigned long size; } Name;
+struct Outer { char a; Name r; int k; };
+"#;
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        let l = layouts.iter().find(|l| l.name == "Outer").expect("Outer");
+        assert_eq!(l.total_size, 32);
+        assert!(l.uncertain_fields.is_empty(), "{:?}", l.uncertain_fields);
+    }
+
+    #[test]
+    fn typedef_attribute_before_struct_keyword() {
+        let src = "typedef __attribute__((aligned(64))) struct Tag { unsigned long f[4]; } Name;\nstruct O { char c; Name n; };\n";
+        let layouts = parse_c(src, &X86_64_SYSV).unwrap();
+        assert_eq!(
+            layouts.iter().find(|l| l.name == "Tag").unwrap().total_size,
+            64
+        );
+        assert_eq!(
+            layouts.iter().find(|l| l.name == "O").unwrap().total_size,
+            128
+        );
     }
 
     #[test]

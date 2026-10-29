@@ -567,15 +567,17 @@ fn against_package(
     // The package's layouts are final; only those this file names are needed —
     // and not the saved versions of types the file itself (re)defines.
     let defined: HashSet<String> = own.iter().map(|l| l.name.clone()).collect();
+    // Both `Pair` and the full `Pair[int, string]`: a generic instantiation is a
+    // layout of its own, named with its arguments.
     let named: HashSet<&str> = own
         .iter()
         .flat_map(|l| &l.fields)
-        .filter_map(|f| match &f.ty {
+        .flat_map(|f| match &f.ty {
             padlock_core::ir::TypeInfo::Primitive { name, .. }
             | padlock_core::ir::TypeInfo::Opaque { name, .. } => {
-                Some(name.split('[').next().unwrap_or(name).trim())
+                vec![name.split('[').next().unwrap_or(name).trim(), name.trim()]
             }
-            _ => None,
+            _ => Vec::new(),
         })
         .collect();
     let context: Vec<StructLayout> = package
@@ -659,5 +661,23 @@ mod tests {
             rgba.uncertain_fields
         );
         assert!(layouts.iter().all(|l| l.name != "Point"));
+    }
+
+    #[test]
+    fn generic_declared_in_one_file_is_instantiated_for_uses_in_another() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("box.go"),
+            "package p\n\ntype Box[T any] struct { s string; ok bool; v T }\n",
+        )
+        .unwrap();
+        let path = dir.path().join("use.go");
+        let src = "package p\n\ntype Local struct{ a, b, c int64 }\ntype Holder struct { e Box[Local]; f Box[string] }\n";
+        std::fs::write(&path, src).unwrap();
+        let layouts = parse_in_package(&path, src, &padlock_core::arch::X86_64_SYSV).unwrap();
+        let holder = layouts.iter().find(|l| l.name == "Holder").unwrap();
+        // Box[Local] = 16 + 8 + 24 = 48; Box[string] = 16 + 8 + 16 = 40.
+        assert_eq!(holder.total_size, 88);
+        assert!(holder.uncertain_fields.is_empty());
     }
 }

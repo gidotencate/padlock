@@ -65,16 +65,18 @@ pub fn render_summary(input: &SummaryInput<'_>) -> String {
     let mut file_scores: Vec<(String, f64, usize, usize)> = file_map
         .iter()
         .map(|(file, structs)| {
-            let w: f64 = structs
-                .iter()
-                .map(|s| s.total_size as f64)
-                .sum::<f64>()
-                .max(1.0);
-            let score = structs
-                .iter()
-                .map(|s| s.score * s.total_size as f64)
-                .sum::<f64>()
-                / w;
+            let w: f64 = structs.iter().map(|s| s.total_size as f64).sum();
+            // A file holding only zero-size structs (e.g. Go `struct{}` types)
+            // has no size weight; fall back to the plain mean instead of 0.
+            let score = if w > 0.0 {
+                structs
+                    .iter()
+                    .map(|s| s.score * s.total_size as f64)
+                    .sum::<f64>()
+                    / w
+            } else {
+                structs.iter().map(|s| s.score).sum::<f64>() / structs.len() as f64
+            };
             let high_count = structs
                 .iter()
                 .filter(|s| {
@@ -361,5 +363,27 @@ mod tests {
             top: 5,
         });
         assert!(out.contains("No structs"));
+    }
+
+    #[test]
+    fn zero_size_struct_file_is_not_scored_zero() {
+        let mut report = Report::from_layouts(&[connection_layout(), packed_layout()]);
+        for sr in &mut report.structs {
+            sr.total_size = 0;
+            sr.wasted_bytes = 0;
+            sr.findings.clear();
+            sr.score = 100.0;
+        }
+        report.structs[0].source_file = Some("a.go".to_string());
+        report.structs[1].source_file = Some("b.go".to_string());
+        let out = render_summary(&SummaryInput {
+            report: &report,
+            top: 5,
+        });
+        assert!(
+            out.contains("a.go")
+                && !out.contains("a.go                                            0"),
+            "zero-size file must not score 0:\n{out}"
+        );
     }
 }

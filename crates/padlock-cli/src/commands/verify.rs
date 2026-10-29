@@ -107,7 +107,23 @@ pub fn run(
     binaries: &[PathBuf],
     json: bool,
     filter: Option<&str>,
+    defines: Vec<String>,
+    include_dirs: Vec<PathBuf>,
 ) -> anyhow::Result<bool> {
+    // The source side must see the same macros and headers the compiler did:
+    // `.padlock.toml` (searched upward from the first source) plus -D / -I.
+    let cfg = padlock_core::config::Config::for_path(
+        sources
+            .first()
+            .map(|p| p.as_path())
+            .unwrap_or(std::path::Path::new(".")),
+    );
+    let mut all_defines = cfg.defines.clone();
+    all_defines.extend(defines);
+    padlock_source::set_preprocessor_defines(&all_defines);
+    let mut all_dirs: Vec<PathBuf> = cfg.include_dirs.iter().map(PathBuf::from).collect();
+    all_dirs.extend(include_dirs);
+    padlock_source::set_include_dirs(all_dirs);
     let re = filter
         .map(regex::Regex::new)
         .transpose()

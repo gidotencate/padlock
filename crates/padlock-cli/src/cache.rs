@@ -37,12 +37,13 @@ struct CacheEntry {
 }
 
 /// Everything besides the file itself that changes what the parser produces:
-/// the padlock version, the preprocessor defines and the C++ stdlib variant.
+/// the padlock version, the preprocessor defines, the C++ stdlib variant and
+/// the Go toolchain's layout-relevant behaviour.
 /// A cache written under a different fingerprint is discarded.
 fn cache_fingerprint() -> String {
     let defines: Vec<String> = padlock_source::preprocessor_defines_fingerprint();
     format!(
-        "{}|{}|{:?}|{:?}|{}|{}|{}/{}",
+        "{}|{}|{:?}|{:?}|{}|{}|{}/{}|{}",
         env!("CARGO_PKG_VERSION"),
         defines.join(","),
         padlock_source::include_dirs(),
@@ -50,7 +51,8 @@ fn cache_fingerprint() -> String {
         padlock_source::declared_order(),
         padlock_source::configured_instantiations_fingerprint().join(";"),
         crate::paths::source_arch().name,
-        crate::paths::source_arch().pointer_size
+        crate::paths::source_arch().pointer_size,
+        padlock_source::go_toolchain_fingerprint()
     )
 }
 

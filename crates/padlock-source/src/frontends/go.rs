@@ -139,8 +139,18 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         | "driver.Rows"
         | "driver.Result"
         | "slog.Handler" => (arch.pointer_size * 2, arch.pointer_size),
-        // sync.Map (Go 1.19+): { mu Mutex(8); read atomic.Pointer(8);
-        //   dirty map(8); misses int(8) } = 4 words. Stable layout since 1.19.
+        // sync.Map depends on the toolchain. Go 1.19–1.23: { mu Mutex(8);
+        //   read atomic.Pointer; dirty map; misses int } = 8 + 3 words.
+        //   Go 1.24+ wraps an internal HashTrieMap: { inited Uint32(4); initMu
+        //   Mutex(8); root Pointer; keyHash, valEqual funcs; seed uintptr }
+        //   = 48B on 64-bit, 28B on 32-bit.
+        "sync.Map" if sync_map_is_hash_trie() => {
+            if arch.pointer_size >= 8 {
+                (48, 8)
+            } else {
+                (12 + arch.pointer_size * 4, arch.pointer_size)
+            }
+        }
         "sync.Map" => (8 + arch.pointer_size * 3, arch.pointer_size),
         // time.Time: { wall uint64; ext int64; loc *Location } = 24B, align 8.
         // Stable across all Go versions (Go 1 compatibility guarantee).
@@ -152,6 +162,44 @@ fn go_type_size_align(ty: &str, arch: &'static ArchConfig) -> (usize, usize) {
         "bytes.Buffer" => (arch.pointer_size * 5, arch.pointer_size),
         _ => (arch.pointer_size, arch.pointer_size),
     }
+}
+
+/// The installed Go toolchain's version (`go env GOVERSION`, e.g. `go1.27.3`),
+/// asked once. `None` without a toolchain.
+fn go_toolchain_version() -> Option<&'static str> {
+    static VERSION: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
+        std::process::Command::new("go")
+            .args(["env", "GOVERSION"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|v| !v.is_empty())
+    });
+    VERSION.as_deref()
+}
+
+/// The toolchain's minor version (27 for `go1.27.3`).
+fn go_toolchain_minor() -> Option<u32> {
+    go_toolchain_version()?
+        .strip_prefix("go1.")?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// What about the Go toolchain changes the layouts padlock computes (the
+/// `sync.Map` implementation, the standard-library sources types are read
+/// from), for the parse-cache fingerprint.
+pub fn go_toolchain_fingerprint() -> String {
+    go_toolchain_version().unwrap_or("none").to_string()
+}
+
+/// Whether the installed Go toolchain (1.24+) implements `sync.Map` with a
+/// `HashTrieMap`; with no toolchain, assume a current one.
+pub(crate) fn sync_map_is_hash_trie() -> bool {
+    go_toolchain_minor().is_none_or(|minor| minor >= 24)
 }
 
 /// Returns `true` for qualified external-package type names whose sizes are
@@ -242,9 +290,30 @@ pub(crate) struct GoCtx {
     generics: HashMap<String, Vec<String>>,
     /// Concrete uses `Name[args]` anywhere in the file.
     uses: Vec<(String, Vec<String>)>,
+    /// `import alias "path/to/pkg"` (the alias defaults to the last path element):
+    /// package name used in this file → import path.
+    imports: HashMap<String, String>,
+    /// Directory of the package, to find the packages it imports on disk.
+    pub(crate) pkg_dir: Option<std::path::PathBuf>,
 }
 
 impl GoCtx {
+    pub(crate) fn interfaces_contains(&self, name: &str) -> bool {
+        self.interfaces.contains(name)
+    }
+
+    /// Declare `type name target` unless the package already declares `name`.
+    pub(crate) fn add_alias(&mut self, name: String, target: String) {
+        if !self.declares(&name) {
+            self.aliases.insert(name, target);
+        }
+    }
+
+    /// What `type name = …` / `type name …` stands for, if declared here.
+    pub(crate) fn alias_target(&self, name: &str) -> Option<String> {
+        self.aliases.get(name).map(|t| t.trim().to_string())
+    }
+
     fn declares(&self, name: &str) -> bool {
         self.interfaces.contains(name)
             || self.structs.contains(name)
@@ -281,6 +350,20 @@ impl GoCtx {
                 self.generics.insert(n.clone(), v.clone());
             }
         }
+        for (alias, path) in &other.imports {
+            self.imports
+                .entry(alias.clone())
+                .or_insert_with(|| path.clone());
+        }
+        if self.pkg_dir.is_none() {
+            self.pkg_dir = other.pkg_dir.clone();
+        }
+        // A generic declared in one file is instantiated for the uses in all.
+        for u in &other.uses {
+            if !self.uses.contains(u) {
+                self.uses.push(u.clone());
+            }
+        }
     }
 }
 
@@ -304,6 +387,8 @@ fn collect_go_declarations(source: &str, root: Node<'_>, arch: &'static ArchConf
         consts: HashMap::new(),
         generics: HashMap::new(),
         uses: Vec::new(),
+        imports: HashMap::new(),
+        pkg_dir: None,
     };
     let mut all_params: Vec<String> = Vec::new();
     let mut stack = vec![root];
@@ -357,6 +442,19 @@ fn collect_go_declarations(source: &str, root: Node<'_>, arch: &'static ArchConf
                     }
                 }
             }
+            "import_spec" => {
+                let Some(path) = node.child_by_field_name("path") else {
+                    continue;
+                };
+                let path = source[path.byte_range()].trim().trim_matches(['"', '`']);
+                let alias = match node.child_by_field_name("name") {
+                    Some(n) => source[n.byte_range()].trim().to_string(),
+                    None => default_package_name(path),
+                };
+                if alias != "_" && alias != "." && !alias.is_empty() {
+                    ctx.imports.insert(alias, path.to_string());
+                }
+            }
             "const_declaration" => collect_consts(source, node, &mut ctx.consts),
             "generic_type" => {
                 if let (Some(t), Some(args)) = (
@@ -394,6 +492,22 @@ pub fn generic_uses(source: &str) -> Vec<(String, Vec<String>)> {
             collect_go_declarations(source, t.root_node(), &padlock_core::arch::X86_64_SYSV).uses
         })
         .unwrap_or_default()
+}
+
+/// The name a package is imported as when the import has no alias: the last
+/// path element, without a `/vN` major-version suffix and `.vN` / `go-` noise.
+pub(crate) fn default_package_name(import_path: &str) -> String {
+    let mut parts = import_path.rsplit('/');
+    let mut last = parts.next().unwrap_or("");
+    let is_major =
+        |s: &str| s.len() > 1 && s.starts_with('v') && s[1..].bytes().all(|b| b.is_ascii_digit());
+    if is_major(last)
+        && let Some(prev) = parts.next()
+    {
+        last = prev;
+    }
+    let last = last.split(".v").next().unwrap_or(last);
+    last.strip_prefix("go-").unwrap_or(last).replace('-', "_")
 }
 
 /// Record the constants of one `const (…)` / `const x = …` declaration,
@@ -571,6 +685,22 @@ fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
     if ty == "func" || ty.starts_with("func(") {
         return plain(ps, ps);
     }
+    // A type of an imported package of this module (or the standard library),
+    // sized from that package's source.
+    if let Some((pkg, name)) = ty.split_once('.')
+        && is_go_ident(pkg)
+        && is_go_ident(name)
+        && (!is_known_external_go_type(ty) || known_type_is_shadowed(ty, ctx))
+        && let (Some(dir), Some(path)) = (&ctx.pkg_dir, ctx.imports.get(pkg))
+        && let Some(f) = isolated(|| crate::go_package::foreign_type(dir, path, name, ctx.arch))
+    {
+        return Sized {
+            size: f.size,
+            align: f.align,
+            uncertain: f.uncertain,
+            named_elem: None,
+        };
+    }
     // Instantiated generic stdlib types such as `atomic.Pointer[T]`.
     let base = match ty.find('[') {
         Some(i) if i > 0 && ty.ends_with(']') => ty[..i].trim_end(),
@@ -583,14 +713,126 @@ fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
     // uncertain so the output layer can warn the user.
     // Exception: types in `is_known_external_go_type` have hardcoded accurate
     // sizes in `go_type_size_align` and must not be marked uncertain.
-    let uncertain = (!base.starts_with('*') && base.contains('.') && !is_known_external_go_type(base))
+    // Pointers, slices, maps, channels and funcs have one fixed size whatever
+    // they point to or hold (`[]*ast.Node` is 24B, `map[K]V` one pointer).
+    let fixed_shape = base.starts_with('*')
+        || base.starts_with("[]")
+        || base.starts_with("map[")
+        || base.starts_with("chan ")
+        || base.starts_with("<-chan ")
+        || base.starts_with("func(");
+    let uncertain = (!fixed_shape
+        && base.contains('.')
+        && (!is_known_external_go_type(base) || known_type_is_shadowed(base, ctx)))
         // A bare name that is neither predeclared nor declared in the package
         // (e.g. a type from a file excluded by build constraints).
-        || (base.chars().all(|c| c.is_alphanumeric() || c == '_') && !is_predeclared_go_type(base));
+        || (base.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !is_predeclared_go_type(base)
+            && !is_laid_out_instantiation(ty, base, ctx));
     Sized {
         uncertain,
         ..plain(size, align)
     }
+}
+
+/// `Pair[int, string]` naming a generic struct of this package that is laid out
+/// for exactly those arguments: the nested-struct resolver supplies its size.
+fn is_laid_out_instantiation(ty: &str, base: &str, ctx: &GoCtx) -> bool {
+    if !ctx.generics.contains_key(base) || !ty.ends_with(']') {
+        return false;
+    }
+    let wanted = super::c_cpp::normalize_type_text(ty);
+    ctx.uses.iter().any(|(name, args)| {
+        let args: Vec<String> = args
+            .iter()
+            .map(|a| super::c_cpp::normalize_type_text(a))
+            .collect();
+        *name == base && format!("{name}[{}]", args.join(", ")) == wanted
+    })
+}
+
+/// One-line `type Name Underlying` / `type Name = Underlying` declarations of a
+/// Go source text, found by line (no parsing): for files too large to parse.
+pub(crate) fn simple_type_lines(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("type ")?;
+            let rest = rest.split("//").next().unwrap_or(rest).trim();
+            if rest.contains(['{', '(']) {
+                return None;
+            }
+            let (name, target) = rest.split_once(char::is_whitespace)?;
+            let target = target.trim().trim_start_matches('=').trim();
+            // Generic declarations (`type Set[T any] …`) are not simple aliases.
+            let simple = !target.is_empty() && (!target.contains('[') || target.starts_with("[]"));
+            (is_go_ident(name) && simple).then(|| (name.to_string(), target.to_string()))
+        })
+        .collect()
+}
+
+/// Run `f` (which may parse other Go files on this thread) without disturbing
+/// the anonymous-struct state of the file being parsed.
+fn isolated<R>(f: impl FnOnce() -> R) -> R {
+    let pending = PENDING_ANON.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    let tag = ANON_FILE_TAG.with(Cell::get);
+    let result = f();
+    PENDING_ANON.with(|p| *p.borrow_mut() = pending);
+    ANON_FILE_TAG.with(|t| t.set(tag));
+    result
+}
+
+/// Import path each package name of [`is_known_external_go_type`] stands for.
+fn std_import_path(pkg: &str) -> Option<&'static str> {
+    Some(match pkg {
+        "sync" => "sync",
+        "atomic" => "sync/atomic",
+        "time" => "time",
+        "strings" => "strings",
+        "bytes" => "bytes",
+        "io" => "io",
+        "fmt" => "fmt",
+        "context" => "context",
+        "reflect" => "reflect",
+        "sort" => "sort",
+        "net" => "net",
+        "http" => "net/http",
+        "driver" => "database/sql/driver",
+        "slog" => "log/slog",
+        _ => return None,
+    })
+}
+
+/// `atomic.Bool` is 4 bytes in `sync/atomic` but 1 in `internal/runtime/atomic`:
+/// when the file imports a different package under the name of one of the
+/// standard types padlock knows, the known size does not apply.
+fn known_type_is_shadowed(ty: &str, ctx: &GoCtx) -> bool {
+    let Some((pkg, _)) = ty.split_once('.') else {
+        return false;
+    };
+    match (ctx.imports.get(pkg), std_import_path(pkg)) {
+        (Some(imported), Some(std)) => imported != std,
+        _ => false,
+    }
+}
+
+fn is_go_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !s.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// Size, alignment and certainty of the Go type written `ty` as seen from
+/// `ctx` (a package's merged declarations). Used for aliases declared in
+/// another package.
+pub(crate) fn size_in_ctx(ty: &str, ctx: &GoCtx) -> (usize, usize, bool) {
+    let sized = go_field_size(ty, ctx, 1);
+    // A local struct is sized later by the nested-struct resolver.
+    let unresolved_struct = sized.named_elem.is_some() || ctx.structs.contains(ty.trim());
+    (
+        sized.size,
+        sized.align,
+        sized.uncertain || unresolved_struct,
+    )
 }
 
 /// Whether a `struct_type` node declares any field.
@@ -838,6 +1080,16 @@ fn simulate_go_layout(
         // An array of a local struct is renamed `Name[count]` so the nested-struct
         // resolver can substitute the real element size; a generic instantiation
         // `Pair[int, string]` is spelled canonically so it matches its layout.
+        // A type parameter bound to a local struct (`Value T` in `Pair[Local]`) or
+        // an alias of one is named by that struct, so the resolver finds its size.
+        let ty_name = {
+            let resolved = resolve_alias_chain(&ty_name, ctx);
+            if resolved != ty_name && ctx.structs.contains(&resolved) {
+                resolved
+            } else {
+                ty_name
+            }
+        };
         let ty_name = match &sized.named_elem {
             Some((elem, count)) => format!("{elem}[{count}]"),
             None if ty_name
@@ -1334,6 +1586,30 @@ type Safe struct {
         let layouts = parse_go(src, &X86_64_SYSV).unwrap();
         assert_eq!(layouts[0].fields[0].size, 16); // 2 × 8B on x86-64
         assert_eq!(layouts[0].fields[0].align, 8);
+    }
+
+    #[test]
+    fn generic_argument_that_is_a_local_struct_is_sized() {
+        let src = "package p\ntype Local struct { a, b, c int64 }\ntype Box[T any] struct { s string; ok bool; v T }\ntype H struct { ok bool; e Box[Local] }\n";
+        let layouts = crate::parse_source_str(
+            src,
+            &crate::SourceLanguage::Go,
+            &padlock_core::arch::X86_64_SYSV,
+        )
+        .unwrap();
+        let get = |n: &str| layouts.iter().find(|l| l.name == n).unwrap();
+        assert_eq!(get("Box[Local]").total_size, 48);
+        assert_eq!(get("H").total_size, 56);
+        assert!(get("H").uncertain_fields.is_empty());
+    }
+
+    #[test]
+    fn pointers_slices_maps_of_external_types_are_not_uncertain() {
+        let src = "package p\ntype S struct { a []*ast.Node; b []ast.Diagnostic; c *ast.Node; d map[tspath.Path]*ast.Node; e chan ast.Node; g ast.Node; i [4]ast.Node }\n";
+        let layouts = parse_go(src, &padlock_core::arch::X86_64_SYSV).unwrap();
+        let mut unc = layouts[0].uncertain_fields.clone();
+        unc.sort();
+        assert_eq!(unc, vec!["g", "i"]);
     }
 
     #[test]

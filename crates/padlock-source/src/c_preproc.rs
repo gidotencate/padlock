@@ -652,6 +652,11 @@ fn process_impl(
                     match replacement {
                         // (Only when the include is visible: `shown` covers it.)
                         Some(pragma) => out.push_str(&pragma),
+                        // tree-sitter-c loses the declarations after a `#define`
+                        // with a `/* … */` comment in the middle of its value
+                        // (multi-line macros annotated per line), so emit it
+                        // comment-free.
+                        None if name == "define" && line.contains("/*") => out.push_str(code),
                         None => out.push_str(line),
                     }
                 }
@@ -813,10 +818,13 @@ fn expand_text(text: &str, macros: &Scope<'_>, active: &mut HashSet<String>, dep
                 i += 1;
             }
             let word = &text[start..i];
-            let Some(m) = macros
-                .get(word)
-                .filter(|_| !active.contains(word) && !KEEP.contains(&word))
-            else {
+            let Some(m) = macros.get(word).filter(|m| {
+                // `_Atomic` is kept for the C frontend unless the code defines it
+                // itself (`#define _Atomic(tp) std::atomic<tp>` for C++, `… tp`
+                // for MSVC), which the C++ grammar cannot parse otherwise.
+                !active.contains(word)
+                    && (!KEEP.contains(&word) || (word == "_Atomic" && m.params.is_some()))
+            }) else {
                 out.push_str(word);
                 continue;
             };

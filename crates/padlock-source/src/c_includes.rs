@@ -185,8 +185,11 @@ fn owned_elsewhere(path: &Path) -> bool {
 const WAIT_FOR_OTHER: Duration = Duration::from_millis(200);
 
 fn language_of(path: &Path, source: &str, cpp_hint: bool) -> SourceLanguage {
+    // A `.h` reached from a C translation unit is compiled as C, even when it
+    // carries a `#ifdef __cplusplus`-style C++ branch (`std::` in a `#define`).
+    let c_header_in_c_unit = !cpp_hint && path.extension().is_some_and(|e| e == "h");
     match crate::detect_language_from_source(path, source) {
-        Some(SourceLanguage::Cpp) => SourceLanguage::Cpp,
+        Some(SourceLanguage::Cpp) if !c_header_in_c_unit => SourceLanguage::Cpp,
         // A C++ file's headers are parsed as C++ (a `.h` may hold either).
         _ if cpp_hint => SourceLanguage::Cpp,
         _ => SourceLanguage::C,
@@ -296,6 +299,16 @@ impl Unit {
             macros: c_preproc::predefined(arch),
             ..Default::default()
         };
+        if cpp {
+            include.macros.insert(
+                "__cplusplus".to_string(),
+                c_preproc::Macro {
+                    params: None,
+                    variadic: false,
+                    body: "201703L".to_string(),
+                },
+            );
+        }
         for (name, value) in crate::preprocessor_defines() {
             include.macros.insert(
                 name.clone(),

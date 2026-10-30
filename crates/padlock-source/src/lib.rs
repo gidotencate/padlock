@@ -242,6 +242,12 @@ pub fn set_preprocessor_defines<S: AsRef<str>>(defines: &[S]) {
     *DEFINES.write().unwrap_or_else(|e| e.into_inner()) = parsed;
 }
 
+/// The parts of the installed Go toolchain that change computed layouts (for
+/// cache fingerprints).
+pub fn go_toolchain_fingerprint() -> String {
+    frontends::go::go_toolchain_fingerprint()
+}
+
 /// The active defines as `NAME=VALUE` strings (for cache fingerprints).
 pub fn preprocessor_defines_fingerprint() -> Vec<String> {
     preprocessor_defines()
@@ -377,7 +383,8 @@ pub fn direct_includes(path: &Path, arch: &'static ArchConfig) -> Vec<PathBuf> {
 }
 
 /// Other files whose content the parse of `path` depends on: the headers a
-/// C/C++ file includes (transitively). Callers caching results by file mtime
+/// C/C++ file includes (transitively), the files of a Go file's package and of
+/// the packages of its module it imports. Callers caching results by file mtime
 /// should also check these.
 pub fn source_dependencies(path: &Path, arch: &'static ArchConfig) -> Vec<PathBuf> {
     let Ok(source) = std::fs::read_to_string(path) else {
@@ -386,6 +393,7 @@ pub fn source_dependencies(path: &Path, arch: &'static ArchConfig) -> Vec<PathBu
     match detect_language_from_source(path, &source) {
         Some(SourceLanguage::C) => c_includes::dependencies(path, arch, false),
         Some(SourceLanguage::Cpp) => c_includes::dependencies(path, arch, true),
+        Some(SourceLanguage::Go) => go_package::dependencies(path),
         _ => Vec::new(),
     }
 }

@@ -111,8 +111,13 @@ struct PragmaAlC2 { long long f4[6] __attribute__((aligned(2))); char f7; };
 struct PkPragmaAl { char a; int b __attribute__((aligned(8))); } __attribute__((packed));
 #pragma pack(pop)
 
+/* `typedef struct tag {...} name_t;` used by its typedef name (tag differs). */
+typedef struct TagRec { void *base; size_t size; } TagRec_t;
+struct UsesTagTd { char a; TagRec_t r; int k; };
+struct UsesTagUnion { union { TagRec_t os; TagRec_t arena; } mem; int kind; _Bool pinned; };
+
 #define P(T,L) printf(#T " %zu %zu " #L "\n", sizeof(struct T), offsetof(struct T, L))
 int main(){
-P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,t);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);P(Pp,c);P(Dup,c);P(BfDiff,t);P(BfAnon,t);P(BfZero,t);P(BfWide,c);P(BfPk,d);P(PkUnionOuter,f5);P(PragmaAlC,f3);P(PragmaAlC2,f7);P(UsesFwd,c);P(MacMem,c);P(Vec,c);P(MacTy,c);P(PkPragmaAl,b);
+P(Arr,c);P(ArrMac,c);P(ArrEnum,c);P(ArrExpr,c);P(ArrSizeof,c);P(Arr2D,c);P(ArrStruct,c);P(Enum,c);P(LD,c);P(I128,c);P(Cx,c);P(CxF,c);P(Wc,c);P(Bool,c);P(Sz,c);P(LL,d);P(FP,c);P(Pk,c);P(PkOuter,c);P(Al,c);P(AlSO,c);P(NestedPtr,c);P(NestInl,c);P(NestInlArr,c);P(WithU,c);P(WithUInl,c);P(Flex,data);P(Flex2,data);P(Bits,c);P(BitsMix,d);P(BitsL,t);P(Const,c);P(Unsigned,d);P(Ptrs,b);P(Atom,c);P(Align,c);P(F16,c);P(Typedef,c);P(TD,e);P(Arr3,d);P(ZeroArr,c);P(Pp,c);P(Dup,c);P(BfDiff,t);P(BfAnon,t);P(BfZero,t);P(BfWide,c);P(BfPk,d);P(PkUnionOuter,f5);P(PragmaAlC,f3);P(PragmaAlC2,f7);P(UsesFwd,c);P(MacMem,c);P(Vec,c);P(MacTy,c);P(PkPragmaAl,b);P(UsesTagTd,k);P(UsesTagUnion,kind);
 printf("AlS %zu -1\nU %zu 0\nUAlC %zu -1\nUAlC2 %zu -1\n",sizeof(struct AlS),sizeof(union U),sizeof(union UAlC),sizeof(union UAlC2));
 }

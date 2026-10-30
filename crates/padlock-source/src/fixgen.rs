@@ -2077,7 +2077,13 @@ mod tests {
         let layouts = parse_source_str(src, &crate::SourceLanguage::Go, &X86_64_SYSV).unwrap();
         assert_eq!(layouts.len(), 1);
         let m = layouts[0].fields.iter().find(|f| f.name == "m").unwrap();
-        assert_eq!(m.size, 32, "sync.Map should be 32B on 64-bit");
+        // 32B before Go 1.24, 48B with the HashTrieMap implementation.
+        let want = if crate::frontends::go::sync_map_is_hash_trie() {
+            48
+        } else {
+            32
+        };
+        assert_eq!(m.size, want, "sync.Map size on 64-bit");
         assert!(!layouts[0].uncertain_fields.contains(&"m".to_string()));
     }
 

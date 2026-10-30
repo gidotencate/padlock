@@ -2,6 +2,36 @@
 
 All notable changes to padlock are documented here.
 
+## [0.71.0] — 2026-10-30
+
+Found by checking mimalloc (C), typescript-go and microsoft/go against gcc's DWARF (`padlock verify`) and `go test` (`--go-exact`). mimalloc: 57 of 57 structs now match the compiler, up from 39 of 50.
+
+### Fixed
+- **C: a field typed with the typedef name of a tagged record was sized as a pointer.** For `typedef struct Tag { … } Name;` a member `Name x;` got 8 bytes instead of the record's size; only `typedef struct X { … } X;` worked. Struct sizes that contain such members were wrong without being reported as uncertain.
+- **C: `typedef __attribute__((aligned(N))) struct Tag { … } Name;`** (GNU attribute before `struct`, as `mi_decl_align`-style macros produce) is read; tree-sitter turned the whole typedef into an error node and the alignment was lost.
+- **C/C++: a multi-line `#define` with `/* … */` comments between its lines** (`MI_STAT_FIELDS()` in mimalloc) made tree-sitter drop the declarations after it, including enums whose constants size later arrays (`[?]`).
+- **C/C++: `_Atomic(T)` defined as a macro** (`#define _Atomic(tp) std::atomic<tp>` for C++, `… tp` for MSVC) is expanded; the C++ grammar cannot parse `_Atomic(T)` and the field vanished. A C++ translation unit now defines `__cplusplus`, and a `.h` reached from a C unit is read as C even when it mentions `std::` in a C++ branch.
+- **Go: generic arguments that are structs of the package** (`Box[Local]`, `Value T`) were sized as a pointer; a generic declared in one file is instantiated for the uses in every file of the package.
+- **Go: `sync.Map` is 48 bytes with Go 1.24+** (HashTrieMap), 32 before; padlock asks the installed toolchain (`go env GOVERSION`), and the parse cache is keyed on it.
+- **`padlock summary`: files with only zero-size structs were listed as the worst files with score 0.**
+- **`--go-exact` skipped whole packages** when one struct was declared inside a function or named a package-qualified type argument; those types are now left out of the probe and the rest is checked.
+- **`padlock verify` ignored `.padlock.toml` and had no `-I`/`-D`**, so C/C++ sources were compared without their headers. It takes `-I`/`--include-dir` and `-D`/`--define` and reads `include_dirs`/`defines` from the config.
+
+### Fixed (continued)
+- **Go: pointers, slices, maps, channels and funcs of package-qualified types** (`[]*ast.Node`, `map[tspath.Path]*Node`) were flagged as uncertain although their size does not depend on the element.
+
+- **Go: types of imported packages are sized from their source.** A field typed `tspath.Path` or `ast.Kind` is read from the package it comes from — packages of the surrounding module(s) (`go.mod`, `go.work`), the standard library (`$GOROOT/src`, or its own tree when analyzing it) — instead of being guessed as one word and flagged. Aliases (`type Kind int16`), structs, interfaces and chains of them are followed, also through generated files too large to parse. Generic types of other packages are still flagged. The parse cache now tracks the sibling files and the imported packages' files, and the Go toolchain version.
+
+- **C: `_Atomic(T)` / `_Atomic T` fields were not treated as atomics**, so C11 code (mimalloc) could never get a false-sharing finding; they are now, and a field's displayed type reads `_Atomic uint64_t`.
+- **False sharing between locks alone is Low** (inferred from type names: two mutexes side by side only hurt when both are contended at once); it stays Medium when an atomic is involved and High when a guard is annotated. On microsoft/TypeScript 7 of 18 inferred findings move to Low, on microsoft/go 6 of 53; mimalloc goes from 0 to 9 (all involving atomics).
+
+- **Go: standard-library sizes are used only for the standard package.** `atomic.Bool` is 4 bytes in `sync/atomic` but 1 in `internal/runtime/atomic`; inside the runtime the hardcoded 4 produced silently wrong sizes (`g`, `mOS`, `gcCPULimiterState`).
+- **`padlock verify` skips blank Go fields (`_`)**: several share the name and were compared with the first one's offset.
+
+### Measured
+- Go standard library, 19 packages (708 types, Go 1.27, linux/amd64, `go test -c` DWARF as reference): 95% exact, 5% flagged, 0 silently wrong; the previous build gave 81% / 18% / 5 silent.
+- microsoft/TypeScript (the Go port; 1201 non-test structs compared with `go test` via `--go-exact`): 1125 sizes match without `--go-exact`, up from 825. 1090 structs are not flagged uncertain (up from 674) and every one that `go test` can probe matches; 111 remain flagged (generics of other packages such as `collections.Set[T]`).
+
 ## [0.70.0] — 2026-10-25
 
 ### Fixed

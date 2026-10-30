@@ -94,7 +94,7 @@ For each struct padlock:
 
 1. Identifies fields with a `Concurrent` access pattern. A field becomes `Concurrent` in one of two ways:
    - **Explicit annotation** — the developer annotates the field with a guard name (see below). This is the most reliable path.
-   - **Heuristic type-name inference** — `concurrency.rs` recognises known synchronisation types (`Mutex<T>`, `std::mutex`, `sync.Mutex`, `AtomicU64`, `std::atomic<T>`, etc.) and assigns `Concurrent` with the field's own name as the guard.
+   - **Heuristic type-name inference** — `concurrency.rs` recognises known synchronisation types (`Mutex<T>`, `std::mutex`, `sync.Mutex`, `AtomicU64`, `std::atomic<T>`, C11 `_Atomic(T)`, etc.) and assigns `Concurrent` with the field's own name as the guard.
 2. Groups `Concurrent` fields by cache-line bucket (`field.offset / cache_line_size`).
 3. If a bucket contains two or more concurrent fields with **different guard identifiers**, a `FalseSharing` finding is emitted.
 
@@ -169,7 +169,13 @@ To convert an inferred finding to a confirmed one, annotate the fields explicitl
 
 **Severity**
 
-Always **High**. False sharing is a confirmed concurrency performance hazard.
+| Severity | Condition |
+|---|---|
+| High | A conflicting field carries an explicit guard annotation (confirmed) |
+| Medium | Inferred from type names, and at least one conflicting field is an atomic: independently updated atomics bounce the line on every write |
+| Low | Inferred from type names, and the conflict is between lock words alone: two mutexes side by side only hurt when both are contended at the same moment |
+
+None of these knows how hot the code is. A confirmed finding is a real layout fact (the fields share a line); whether it costs anything depends on whether different cores write them concurrently. Measure first (`perf c2c`, or `--perf-types` to feed measured accesses back in).
 
 **How to fix**
 
@@ -321,4 +327,4 @@ Each struct receives an overall score from 0 to 100:
 | 50–79 | One or more Medium findings |
 | 0–49 | One or more High findings |
 
-The score is computed by the `scorer` analysis pass in `padlock-core`. High findings each deduct a larger penalty than Medium or Low findings. False sharing incurs the largest single deduction because it is a confirmed runtime hazard; padding waste deductions scale with the waste percentage.
+The score is computed by the `scorer` analysis pass in `padlock-core`. High findings each deduct a larger penalty than Medium or Low findings. False sharing incurs the largest single deduction (30 points when a guard is annotated, 15 when inferred from type names, whatever the severity shown); padding waste deductions scale with the waste percentage.

@@ -186,6 +186,14 @@ enum Commands {
         /// Include only structs whose names match this regex pattern
         #[arg(long, short = 'F', value_name = "PATTERN")]
         filter: Option<String>,
+        /// Treat a C/C++ macro as defined, like a compiler's `-D` (repeatable).
+        /// Merged with `defines` from `.padlock.toml`
+        #[arg(long = "define", short = 'D', value_name = "NAME[=VALUE]")]
+        defines: Vec<String>,
+        /// Search this directory for C/C++ `#include`s, like a compiler's `-I`
+        /// (repeatable). Merged with `include_dirs` from `.padlock.toml`
+        #[arg(long = "include-dir", short = 'I', value_name = "DIR")]
+        include_dirs: Vec<PathBuf>,
     },
 
     /// Check that Rust `#[repr(C)]` structs match the C/C++ structs of the same
@@ -379,8 +387,17 @@ fn main() -> anyhow::Result<()> {
             binaries,
             json,
             filter,
+            defines,
+            include_dirs,
         } => {
-            let all_match = commands::verify::run(&paths, &binaries, json, filter.as_deref())?;
+            let all_match = commands::verify::run(
+                &paths,
+                &binaries,
+                json,
+                filter.as_deref(),
+                defines,
+                include_dirs,
+            )?;
             if !all_match {
                 std::process::exit(1);
             }

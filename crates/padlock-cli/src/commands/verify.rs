@@ -67,7 +67,9 @@ fn compare(src: &StructLayout, bin: &StructLayout) -> Verdict {
     for f in &src.fields {
         // Synthetic fields (`[a:3|b:5]`, `__vptr`, `__base_X`) have no DWARF twin,
         // and a zero-size member's offset is unobservable.
-        if f.name.starts_with('[') || f.name.starts_with("__") || f.size == 0 {
+        // …and blank `_` fields (padding in Go): several share the name, so a
+        // lookup by name would compare each with the first.
+        if f.name.starts_with('[') || f.name.starts_with("__") || f.name == "_" || f.size == 0 {
             continue;
         }
         if let Some(&(bo, bs)) = bin_fields.get(f.name.as_str())
@@ -107,7 +109,23 @@ pub fn run(
     binaries: &[PathBuf],
     json: bool,
     filter: Option<&str>,
+    defines: Vec<String>,
+    include_dirs: Vec<PathBuf>,
 ) -> anyhow::Result<bool> {
+    // The source side must see the same macros and headers the compiler did:
+    // `.padlock.toml` (searched upward from the first source) plus -D / -I.
+    let cfg = padlock_core::config::Config::for_path(
+        sources
+            .first()
+            .map(|p| p.as_path())
+            .unwrap_or(std::path::Path::new(".")),
+    );
+    let mut all_defines = cfg.defines.clone();
+    all_defines.extend(defines);
+    padlock_source::set_preprocessor_defines(&all_defines);
+    let mut all_dirs: Vec<PathBuf> = cfg.include_dirs.iter().map(PathBuf::from).collect();
+    all_dirs.extend(include_dirs);
+    padlock_source::set_include_dirs(all_dirs);
     let re = filter
         .map(regex::Regex::new)
         .transpose()

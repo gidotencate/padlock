@@ -85,11 +85,27 @@ fn run_probe(
     if !out.status.success() && !stdout.contains("PADLOCK\t") {
         let err = String::from_utf8_lossy(&out.stderr);
         // The first real diagnostic, not the `# package` header line.
-        let first = err
+        let mut diagnostics = err
             .lines()
             .chain(stdout.lines())
-            .find(|l| !l.trim().is_empty() && !l.starts_with('#'));
-        anyhow::bail!("go test failed: {}", first.unwrap_or(""));
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'));
+        let first = diagnostics.next();
+        // Every `undefined: X` the compiler printed (it reports several at
+        // once), so the caller can drop those types and retry.
+        let undefined: Vec<&str> = err
+            .lines()
+            .chain(stdout.lines())
+            .filter(|l| l.contains("undefined: "))
+            .collect();
+        anyhow::bail!(
+            "go test failed: {}{}",
+            first.unwrap_or(""),
+            if undefined.len() > 1 {
+                format!(" [{}]", undefined.join(" | "))
+            } else {
+                String::new()
+            }
+        );
     }
     let mut probes: HashMap<String, Probe> = HashMap::new();
     for line in stdout.lines() {
@@ -118,6 +134,31 @@ fn run_probe(
         anyhow::bail!("the layout probe did not run (overlay not applied?)");
     }
     Ok(probes)
+}
+
+/// Whether `text` contains `ident` as a whole identifier (`Pair[tspath.Path]`
+/// mentions `tspath` and `Path`, not `ts`).
+fn mentions_ident(text: &str, ident: &str) -> bool {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|w| w == ident)
+}
+
+/// Names the Go compiler reported as `undefined: Name` in `text`.
+fn undefined_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("undefined: ") {
+        let after = &rest[i + "undefined: ".len()..];
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            names.push(name);
+        }
+        rest = after;
+    }
+    names
 }
 
 /// `canonicalize` on Windows returns a verbatim path (`\\?\C:\...`), which
@@ -156,8 +197,22 @@ pub fn refine(layouts: &mut [StructLayout]) {
         else {
             continue;
         };
-        let types: Vec<String> = idxs.iter().map(|&i| layouts[i].name.clone()).collect();
-        let probes = match run_probe(&dir, &pkg, &types) {
+        let mut types: Vec<String> = idxs.iter().map(|&i| layouts[i].name.clone()).collect();
+        // A type declared inside a function is not nameable from the probe and
+        // fails the whole package build ("undefined: X"): drop the names the
+        // compiler reports and probe the rest.
+        let mut probed = run_probe(&dir, &pkg, &types);
+        for _ in 0..8 {
+            let Err(e) = &probed else { break };
+            let undefined = undefined_names(&e.to_string());
+            let before = types.len();
+            types.retain(|t| !undefined.iter().any(|u| mentions_ident(t, u)));
+            if types.len() == before || types.is_empty() {
+                break;
+            }
+            probed = run_probe(&dir, &pkg, &types);
+        }
+        let probes = match probed {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("padlock: note: --go-exact skipped {}: {e}", dir.display());
@@ -187,6 +242,18 @@ pub fn refine(layouts: &mut [StructLayout]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualified_type_arguments_mention_their_package() {
+        assert!(mentions_ident("Pair[tspath.Path]", "tspath"));
+        assert!(!mentions_ident("Pair[tspath.Path]", "ts"));
+    }
+
+    #[test]
+    fn undefined_names_are_collected() {
+        let text = "x_test.go:3:4: undefined: fileEvents | y_test.go:4:5: undefined: declKey";
+        assert_eq!(undefined_names(text), vec!["fileEvents", "declKey"]);
+    }
 
     #[test]
     fn verbatim_drive_paths_lose_their_prefix() {

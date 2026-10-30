@@ -58,6 +58,9 @@ type (
 )
 type UC struct { a bool; x Const; b bool }
 
+type GLocal struct { a, b, c int64 }
+type GBox[T any] struct { s string; ok bool; v T }
+type GHolder struct { ok bool; e GBox[GLocal]; f GBox[int16] }
 func main() {
 	var h1 Iota; fmt.Println("Iota", unsafe.Sizeof(h1), unsafe.Offsetof(h1.y))
 	var h2 Hot; fmt.Println("Hot", unsafe.Sizeof(h2), unsafe.Offsetof(h2.c))
@@ -96,4 +99,5 @@ func main() {
 	var x24 MapT; fmt.Println("MapT", unsafe.Sizeof(x24), unsafe.Offsetof(x24.b))
 	var x25 UA; fmt.Println("UA", unsafe.Sizeof(x25), unsafe.Offsetof(x25.b))
 	var x26 UC; fmt.Println("UC", unsafe.Sizeof(x26), unsafe.Offsetof(x26.b))
+	var x27 GHolder; fmt.Println("GHolder", unsafe.Sizeof(x27), unsafe.Offsetof(x27.f))
 }

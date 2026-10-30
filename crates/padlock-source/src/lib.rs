@@ -7,6 +7,7 @@ pub mod fixgen;
 pub mod frontends;
 mod go_package;
 mod rust_crate;
+mod zig_imports;
 pub use c_includes::{include_dirs, set_include_dirs};
 
 use std::collections::HashMap;
@@ -58,6 +59,15 @@ pub fn prepare_rust_crate(path: &Path, arch: &'static ArchConfig) {
 /// The root of the crate whose `src/` holds `path` (for grouping files).
 pub fn rust_crate_root(path: &Path) -> Option<PathBuf> {
     rust_crate::crate_root(path)
+}
+
+/// Newest mtime among a Zig file and the files it imports (transitively); a
+/// Zig file's parse depends on all of them.
+pub fn zig_imports_newest_mtime(
+    path: &Path,
+    arch: &'static ArchConfig,
+) -> Option<std::time::SystemTime> {
+    zig_imports::newest_mtime(path, arch)
 }
 
 /// Newest mtime among the source files of the crate rooted at `root`; a Rust
@@ -450,7 +460,7 @@ pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<Pa
         SourceLanguage::C | SourceLanguage::Cpp => {
             c_includes::parse_with_includes(path, &source, &lang, arch)
         }
-        _ => None,
+        SourceLanguage::Zig => zig_imports::parse_with_imports(path, &source, arch),
     };
     let mut layouts = match package {
         Some(layouts) => finish_layouts(&source, &lang, layouts?),
@@ -485,7 +495,7 @@ pub fn parse_source_text(
         SourceLanguage::C | SourceLanguage::Cpp => {
             c_includes::parse_with_includes(path, text, lang, arch)
         }
-        SourceLanguage::Zig => None,
+        SourceLanguage::Zig => zig_imports::parse_with_imports(path, text, arch),
     };
     match with_context {
         Some(layouts) => Ok(finish_layouts(text, lang, layouts?)),

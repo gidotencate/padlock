@@ -192,6 +192,13 @@ fn file_mtime(path: &Path) -> Option<u64> {
             .unwrap_or(0);
         return Some(own.max(newest));
     }
+    // A Zig file is laid out with the files it imports.
+    if path.extension().is_some_and(|e| e == "zig")
+        && let Some(t) = padlock_source::zig_imports_newest_mtime(path, crate::paths::source_arch())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+    {
+        return Some(own.max(t.as_secs()));
+    }
     // A Go file is laid out with the other files of its package, so an edit,
     // addition or removal of a sibling `.go` file invalidates it too.
     if path.extension().is_some_and(|e| e == "go")

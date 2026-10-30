@@ -11,6 +11,38 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Parser};
 
 thread_local! {
+    /// Sizes of imported types for the file being parsed (`alias.Name` → size, align).
+    static EXTERN_SIZES: RefCell<HashMap<String, (usize, usize)>> = RefCell::new(HashMap::new());
+}
+
+/// `@import("a.zig")` → `a.zig`.
+fn import_string(text: &str) -> Option<String> {
+    let inner = text.strip_prefix("@import")?.trim();
+    let inner = inner.strip_prefix('(')?.strip_suffix(')')?.trim();
+    Some(inner.strip_prefix('"')?.strip_suffix('"')?.to_string())
+}
+
+/// `(alias, import string)` of every top-level `const alias = @import("…");`.
+pub fn imports(source: &str) -> Vec<(String, String)> {
+    let Some(tree) = PARSER.with(|p| p.borrow_mut().parse(source, None)) else {
+        return Vec::new();
+    };
+    collect_zig_decls(source, tree.root_node(), &padlock_core::arch::X86_64_SYSV)
+        .imports
+        .into_iter()
+        .collect()
+}
+
+/// Sizes of std types that do not change between Zig releases.
+fn std_type_size_align(path: &str, ptr: usize) -> Option<(usize, usize)> {
+    match path {
+        // `ptr` + `vtable`.
+        "std.mem.Allocator" => Some((2 * ptr, ptr)),
+        _ => None,
+    }
+}
+
+thread_local! {
     static PARSER: RefCell<Parser> = RefCell::new({
         let mut p = Parser::new();
         p.set_language(&tree_sitter_zig::LANGUAGE.into())
@@ -175,6 +207,10 @@ struct ZigCtx {
     type_aliases: HashMap<String, String>,
     /// Concrete calls `Pair(u8, 4)` of type-returning functions.
     uses: Vec<(String, Vec<String>)>,
+    /// `const a = @import("a.zig");` → alias → import string.
+    imports: HashMap<String, String>,
+    /// Sizes of types of imported files, keyed `alias.Name`.
+    extern_sizes: HashMap<String, (usize, usize)>,
 }
 
 /// Bit width of a type inside a `packed struct`: arbitrary-width integers are
@@ -255,6 +291,8 @@ fn collect_zig_decls(source: &str, root: Node<'_>, arch: &'static ArchConfig) ->
         generic_fns: HashMap::new(),
         type_aliases: HashMap::new(),
         uses: Vec::new(),
+        imports: HashMap::new(),
+        extern_sizes: EXTERN_SIZES.with(|e| e.borrow().clone()),
     };
     let mut all_params: Vec<String> = Vec::new();
     let mut stack = vec![root];
@@ -313,6 +351,11 @@ fn collect_zig_decls(source: &str, root: Node<'_>, arch: &'static ArchConfig) ->
             }
             "enum_declaration" => {
                 ctx.enums.insert(name, enum_backing_type(source, *init));
+            }
+            "builtin_function" if node_text(source, *init).starts_with("@import") => {
+                if let Some(path) = import_string(node_text(source, *init)) {
+                    ctx.imports.insert(name, path);
+                }
             }
             "builtin_function" if node_text(source, *init).starts_with("@Vector") => {
                 ctx.type_aliases
@@ -422,6 +465,30 @@ thread_local! {
 
 /// Size a type given as text (a bound comptime parameter), by parsing it as the
 /// type of a one-field probe struct.
+/// Expand the leading name of a dotted path through `const mem = std.mem;`
+/// style aliases, so `mem.Allocator` becomes `std.mem.Allocator`.
+fn canonical_path(text: &str, ctx: &ZigCtx) -> String {
+    let mut path = text.split_whitespace().collect::<String>();
+    for _ in 0..4 {
+        let (head, rest) = match path.split_once('.') {
+            Some((h, r)) => (h.to_string(), Some(r.to_string())),
+            None => (path.clone(), None),
+        };
+        let Some(bound) = ctx.type_aliases.get(&head) else {
+            break;
+        };
+        // Only a dotted alias (`std.mem`) extends the path.
+        if !bound.contains('.') || bound.contains('(') {
+            break;
+        }
+        path = match rest {
+            Some(r) => format!("{bound}.{r}"),
+            None => bound.clone(),
+        };
+    }
+    path
+}
+
 fn size_zig_type_text(text: &str, ctx: &ZigCtx) -> ZSized {
     let ps = ctx.arch.pointer_size;
     let depth = TEXT_DEPTH.with(|d| d.get());
@@ -500,11 +567,20 @@ fn type_node_size_align(source: &str, node: Node<'_>, ctx: &ZigCtx) -> ZSized {
                 }
             }
         }
-        // `std.os.linux.pid_t`, `mem.Allocator`: a type from another file.
-        "field_expression" => ZSized {
-            uncertain: true,
-            ..ZSized::plain((ps, ps))
-        },
+        // `std.os.linux.pid_t`, `mem.Allocator`, `other.Type`: a type from another file.
+        "field_expression" => {
+            let path = canonical_path(node_text(source, node), ctx);
+            if let Some(&sa) = ctx.extern_sizes.get(&path) {
+                ZSized::plain(sa)
+            } else if let Some(sa) = std_type_size_align(&path, ps) {
+                ZSized::plain(sa)
+            } else {
+                ZSized {
+                    uncertain: true,
+                    ..ZSized::plain((ps, ps))
+                }
+            }
+        }
         // *T — single pointer
         "pointer_type" => ZSized::plain((ps, ps)),
         // ?T — optional. A pointer or slice uses null as "none" (no extra space);
@@ -1245,6 +1321,18 @@ fn parse_container_field(
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
+
+/// Parse with the sizes of imported types (`alias.Name` → size, align) known.
+pub fn parse_zig_with_imports(
+    source: &str,
+    arch: &'static ArchConfig,
+    extern_sizes: HashMap<String, (usize, usize)>,
+) -> anyhow::Result<Vec<StructLayout>> {
+    EXTERN_SIZES.with(|e| *e.borrow_mut() = extern_sizes);
+    let out = parse_zig(source, arch);
+    EXTERN_SIZES.with(|e| e.borrow_mut().clear());
+    out
+}
 
 pub fn parse_zig(source: &str, arch: &'static ArchConfig) -> anyhow::Result<Vec<StructLayout>> {
     let tree = PARSER

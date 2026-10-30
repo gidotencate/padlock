@@ -18,6 +18,12 @@ All notable changes to padlock are documented here.
 - **Rust: path dependencies are part of the crate's context.** `dep = { path = "../x" }` (and `dep = { workspace = true }` with a path in `[workspace.dependencies]`) are followed transitively; their types size fields of the analyzed crate, and their files invalidate the parse cache. The crate's own types shadow a dependency's of the same name.
 - **`--follow-deps` / `follow_deps = true`** (`.padlock.toml`, off by default): a path dependency outside the workspace, or inside a nested git repository (submodule, vendored checkout), is followed only when this is set, so third-party repositories never change an analysis unasked.
 
+## [0.76.0] — 2026-10-30
+
+### Added
+- **Zig: `@import("file.zig")` is resolved.** `const a = @import("a.zig"); … a.Config` is sized from the imported file (recursively, cycles cut, cached per file; `build.zig` `addModule("name", …)` modules are followed too) and no longer uncertain. `std.mem.Allocator` (two words) is known. The LSP and the CLI parse cache use the same resolution.
+- **`--follow-deps` also covers Zig:** an import outside the package (the nearest `build.zig` directory) or inside a nested git repository is followed only with it.
+
 ## [0.72.0] — 2026-10-30
 
 ### Fixed

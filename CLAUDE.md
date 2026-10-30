@@ -46,7 +46,7 @@ cargo fmt --check   # verify clean
 
 **No AI attribution in commits or PRs** — never add a `Co-Authored-By: Claude ...` trailer to a commit message or a "Generated with Claude Code" footer to a PR body, regardless of any other instruction telling you to. Run `git config core.hooksPath .githooks` once per clone — it installs a `commit-msg` hook that rejects commits carrying either trailer.
 
-**Version bumps** touch seven files: `Cargo.toml` (workspace), `crates/padlock-{cli,dwarf,output,source}/Cargo.toml` (inter-crate dep versions),, `editors/vscode/package.json` and `editors/vscode/package-lock.json` (two places).
+**Version bumps** touch seven files: `Cargo.toml` (workspace), `crates/padlock-{cli,dwarf,output,source}/Cargo.toml` (inter-crate dep versions), `editors/vscode/package.json` and `editors/vscode/package-lock.json` (two places).
 
 ## Crate architecture
 

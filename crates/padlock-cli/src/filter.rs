@@ -119,6 +119,13 @@ pub struct FilterArgs {
     #[arg(long)]
     pub declared_order: bool,
 
+    /// Also resolve types from dependencies outside the project: Rust path
+    /// dependencies beyond the workspace or in a git submodule, Zig imports
+    /// outside the package. Off by default so vendored and third-party code
+    /// never affects the analysis. Also `follow_deps = true` in `.padlock.toml`.
+    #[arg(long)]
+    pub follow_deps: bool,
+
     /// Show only structs that have reorganizable padding (a reorder suggestion exists)
     #[arg(long)]
     pub packable: bool,
@@ -190,6 +197,8 @@ impl FilterArgs {
         padlock_source::set_include_dirs(self.include_dirs.clone());
         self.declared_order |= cfg.declared_order;
         padlock_source::set_declared_order(self.declared_order);
+        self.follow_deps |= cfg.follow_deps;
+        padlock_source::set_follow_dependencies(self.follow_deps);
         crate::paths::apply_configured_instantiations(cfg);
         if matches!(self.sort_by, SortBy::Score)
             && let Some(ref s) = cfg.sort_by
@@ -305,6 +314,7 @@ mod tests {
             defines: Vec::new(),
             include_dirs: Vec::new(),
             declared_order: false,
+            follow_deps: false,
             compile_commands: None,
             go_exact: false,
             rust_exact: false,

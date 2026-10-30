@@ -12,6 +12,12 @@ All notable changes to padlock are documented here.
 ### Fixed
 - **Rust: a name declared in several files of a crate resolves per file.** A file now sees its own declaration of `Config` instead of the name being dropped crate-wide; elsewhere it stays unknown (uncertain), as before.
 
+## [0.75.0] — 2026-10-30
+
+### Added
+- **Rust: path dependencies are part of the crate's context.** `dep = { path = "../x" }` (and `dep = { workspace = true }` with a path in `[workspace.dependencies]`) are followed transitively; their types size fields of the analyzed crate, and their files invalidate the parse cache. The crate's own types shadow a dependency's of the same name.
+- **`--follow-deps` / `follow_deps = true`** (`.padlock.toml`, off by default): a path dependency outside the workspace, or inside a nested git repository (submodule, vendored checkout), is followed only when this is set, so third-party repositories never change an analysis unasked.
+
 ## [0.72.0] — 2026-10-30
 
 ### Fixed

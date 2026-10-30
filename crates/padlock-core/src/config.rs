@@ -100,6 +100,10 @@ pub struct Config {
     /// Show Rust `repr(Rust)` / plain Zig structs in declaration order rather than
     /// the compiler's order (`--declared-order`).
     pub declared_order: bool,
+    /// Resolve types from dependencies outside the project (Rust path
+    /// dependencies beyond the workspace or in a git submodule, Zig imports
+    /// outside the package). `follow_deps` under `[padlock]`; off by default.
+    pub follow_deps: bool,
     /// Extra instantiations of generic types to analyze, from `[instantiate]`
     /// (`Buf = ["char, 8", "int"]`): `(TypeName, argument list text)`.
     pub instantiate: Vec<(String, String)>,
@@ -124,6 +128,7 @@ impl Default for Config {
             defines: Vec::new(),
             include_dirs: Vec::new(),
             declared_order: false,
+            follow_deps: false,
             instantiate: Vec::new(),
         }
     }
@@ -284,6 +289,11 @@ impl Config {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let follow_deps = padlock
+            .and_then(|p| p.get("follow_deps"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         // `[instantiate]` (any language) or `[cpp.instantiate]`.
         let mut instantiate = Vec::new();
         for table in [
@@ -323,6 +333,7 @@ impl Config {
             defines,
             include_dirs,
             declared_order,
+            follow_deps,
             instantiate,
         })
     }

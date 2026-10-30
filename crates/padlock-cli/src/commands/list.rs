@@ -89,6 +89,7 @@ mod tests {
             defines: Vec::new(),
             include_dirs: Vec::new(),
             declared_order: false,
+            follow_deps: false,
             compile_commands: None,
             go_exact: false,
             rust_exact: false,

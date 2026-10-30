@@ -25,6 +25,7 @@ pub fn run(
         crate::paths::set_source_arch(target.or(cfg.arch_override.as_deref()), None);
         padlock_source::set_preprocessor_defines(&cfg.defines);
         padlock_source::set_declared_order(cfg.declared_order);
+        padlock_source::set_follow_dependencies(cfg.follow_deps);
         crate::paths::apply_configured_instantiations(&cfg);
     }
     let (layouts, _, _skipped) = collect_layouts(paths, false, no_cache)?;

@@ -105,6 +105,42 @@ pub fn declared_order() -> bool {
     DECLARED_ORDER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static FOLLOW_DEPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Also resolve types from code outside the project: Rust path dependencies
+/// that live outside the workspace or in a git submodule, Zig imports that
+/// leave the package or sit in a submodule. Off by default, so vendored or
+/// third-party repositories never influence (or slow down) an analysis.
+/// Process-global.
+pub fn set_follow_dependencies(on: bool) {
+    bump_settings_generation();
+    FOLLOW_DEPS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `set_follow_dependencies(true)` is in effect.
+pub fn follow_dependencies() -> bool {
+    FOLLOW_DEPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True when `path` lies outside `boundary`, or inside a nested git repository
+/// (a submodule or vendored checkout) below it.
+pub(crate) fn is_external(path: &Path, boundary: &Path) -> bool {
+    if !path.starts_with(boundary) {
+        return true;
+    }
+    let mut cur = path;
+    while cur != boundary {
+        if cur.join(".git").exists() {
+            return true;
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    false
+}
+
 /// Put the fields of a struct whose order the compiler chooses (`is_repr_rust`:
 /// Rust `repr(Rust)`, plain Zig) in the order current rustc and zig use —
 /// largest alignment first, ties in declaration order — and lay it out again.

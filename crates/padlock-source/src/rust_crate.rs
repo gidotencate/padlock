@@ -31,10 +31,102 @@ pub(crate) fn crate_root(path: &Path) -> Option<PathBuf> {
 
 type Signature = Vec<(PathBuf, Option<SystemTime>, u64)>;
 
-/// Every `.rs` file under `root/src`, with mtime and size.
+/// Source roots of the crates `root` depends on by `path` (transitively),
+/// from `[dependencies]`, `[build-dependencies]` and target-specific tables;
+/// `dep = { workspace = true }` is looked up in the workspace's
+/// `[workspace.dependencies]`. Registry and git dependencies are not followed,
+/// and neither are path dependencies outside the workspace unless
+/// `follow_dependencies` is on.
+fn path_dependencies(root: &Path) -> Vec<PathBuf> {
+    const MAX_DEPS: usize = 64;
+    let mut found: Vec<PathBuf> = Vec::new();
+    // Dependencies outside the workspace (or in a nested git repository) count
+    // as external and are followed only with `follow_dependencies`.
+    let boundary = workspace_dependencies(root)
+        .map(|(w, _)| w)
+        .unwrap_or_else(|| root.to_path_buf());
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(dir) = queue.pop() {
+        let Some(manifest) = read_manifest(&dir) else {
+            continue;
+        };
+        let workspace = workspace_dependencies(&dir);
+        let mut tables: Vec<&toml::Table> = Vec::new();
+        for key in ["dependencies", "build-dependencies"] {
+            if let Some(t) = manifest.get(key).and_then(|v| v.as_table()) {
+                tables.push(t);
+            }
+        }
+        if let Some(targets) = manifest.get("target").and_then(|v| v.as_table()) {
+            for t in targets.values().filter_map(|v| v.as_table()) {
+                for key in ["dependencies", "build-dependencies"] {
+                    if let Some(t) = t.get(key).and_then(|v| v.as_table()) {
+                        tables.push(t);
+                    }
+                }
+            }
+        }
+        for table in tables {
+            for (name, dep) in table {
+                let Some(dep) = dep.as_table() else { continue };
+                let path = if dep.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
+                    workspace.as_ref().and_then(|(wroot, deps)| {
+                        let p = deps.get(name)?.get("path")?.as_str()?;
+                        Some(wroot.join(p))
+                    })
+                } else {
+                    dep.get("path")
+                        .and_then(|v| v.as_str())
+                        .map(|p| dir.join(p))
+                };
+                let Some(path) = path.and_then(|p| std::fs::canonicalize(p).ok()) else {
+                    continue;
+                };
+                if !crate::follow_dependencies() && crate::is_external(&path, &boundary) {
+                    continue;
+                }
+                if path != root && !found.contains(&path) && path.join("src").is_dir() {
+                    found.push(path.clone());
+                    queue.push(path);
+                }
+            }
+        }
+        if found.len() >= MAX_DEPS {
+            break;
+        }
+    }
+    found.sort();
+    found
+}
+
+fn read_manifest(dir: &Path) -> Option<toml::Table> {
+    std::fs::read_to_string(dir.join("Cargo.toml"))
+        .ok()?
+        .parse::<toml::Table>()
+        .ok()
+}
+
+/// `[workspace.dependencies]` of the nearest enclosing workspace manifest, with
+/// the directory it is relative to.
+fn workspace_dependencies(dir: &Path) -> Option<(PathBuf, toml::Table)> {
+    let mut cur = dir;
+    loop {
+        if let Some(m) = read_manifest(cur)
+            && let Some(ws) = m.get("workspace").and_then(|v| v.as_table())
+        {
+            let deps = ws.get("dependencies")?.as_table()?.clone();
+            return Some((cur.to_path_buf(), deps));
+        }
+        cur = cur.parent()?;
+    }
+}
+
+/// Every `.rs` file under `root/src` and under the `src/` of each path
+/// dependency, with mtime and size.
 fn signature(root: &Path) -> Signature {
     let mut out = Vec::new();
     let mut stack = vec![root.join("src")];
+    stack.extend(path_dependencies(root).into_iter().map(|d| d.join("src")));
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let p = entry.path();
@@ -80,13 +172,24 @@ const RECHECK_AFTER: Duration = Duration::from_secs(2);
 /// every syntax tree in memory at once).
 const MAX_FILES: usize = 5_000;
 
-fn build(signature: Signature, arch: &'static ArchConfig) -> Crate {
-    build_with_ctx(signature, arch).0
+fn build(root: &Path, signature: Signature, arch: &'static ArchConfig) -> Crate {
+    build_with_ctx(root, signature, arch).0
 }
 
-fn build_with_ctx(signature: Signature, arch: &'static ArchConfig) -> (Crate, RustCtx) {
-    let files: Vec<(String, String)> = signature
+fn build_with_ctx(
+    root: &Path,
+    signature: Signature,
+    arch: &'static ArchConfig,
+) -> (Crate, RustCtx) {
+    // The crate's own files come first; files of path dependencies follow and
+    // only supply declarations (laid out, but never reported for this crate).
+    let own_src = root.join("src");
+    let (own, external): (Vec<_>, Vec<_>) = signature
         .iter()
+        .partition(|(p, _, _)| p.starts_with(&own_src));
+    let files: Vec<(String, String)> = own
+        .into_iter()
+        .chain(external)
         .filter_map(|(p, _, len)| {
             // The CLI's generated-file limit: tables, not hand-written types.
             if *len > 500_000 {
@@ -98,8 +201,13 @@ fn build_with_ctx(signature: Signature, arch: &'static ArchConfig) -> (Crate, Ru
             ))
         })
         .collect();
+    let local_count = signature
+        .iter()
+        .filter(|(p, _, _)| p.starts_with(&own_src))
+        .count()
+        .min(files.len());
     let outer = crate::take_skipped();
-    let (per_file, ctx) = crate::frontends::rust::parse_rust_crate(&files, arch);
+    let (per_file, ctx) = crate::frontends::rust::parse_rust_crate(&files, local_count, arch);
     let skipped_all = crate::take_skipped();
     crate::restore_skipped(outer);
     let mut all: Vec<StructLayout> = Vec::new();
@@ -109,6 +217,22 @@ fn build_with_ctx(signature: Signature, arch: &'static ArchConfig) -> (Crate, Ru
         }
         all.extend(layouts);
     }
+    // A dependency's type of the same name as one of this crate's is shadowed.
+    let local_names: std::collections::HashSet<String> = all
+        .iter()
+        .filter(|l| {
+            l.source_file
+                .as_deref()
+                .is_some_and(|f| Path::new(f).starts_with(&own_src))
+        })
+        .map(|l| l.name.clone())
+        .collect();
+    all.retain(|l| {
+        l.source_file
+            .as_deref()
+            .is_some_and(|f| Path::new(f).starts_with(&own_src))
+            || !local_names.contains(&l.name)
+    });
     let layouts = resolve_per_file(all, ctx.ambiguous_names());
     // Skip notes are not attributed per file by the crate-wide parse; keep
     // them with the crate's first file so they are reported once.
@@ -207,7 +331,7 @@ fn crate_for(root: &Path, arch: &'static ArchConfig) -> Option<Arc<Crate>> {
     if sig.len() > MAX_FILES {
         return None;
     }
-    let c = Arc::new(build(sig, arch));
+    let c = Arc::new(build(root, sig, arch));
     *state = Some((c.clone(), Instant::now()));
     Some(c)
 }
@@ -292,7 +416,7 @@ pub(crate) fn parse_buffer_in_crate(
         if sig.len() > MAX_FILES {
             return None;
         }
-        let (c, ctx) = build_with_ctx(sig, arch);
+        let (c, ctx) = build_with_ctx(&root, sig, arch);
         let c = Arc::new(c);
         cache.insert(root.clone(), (c.clone(), ctx.clone(), Instant::now()));
         Some((c, ctx))
@@ -417,5 +541,103 @@ mod tests {
         let l = parse_in_crate(&lib, &text, &X86_64_SYSV).unwrap();
         let uses = l.iter().find(|l| l.name == "Uses").unwrap();
         assert_eq!(uses.total_size, 16, "{:?}", uses.fields);
+    }
+
+    #[test]
+    fn path_dependency_types_are_sized() {
+        let ws = tempfile::TempDir::new().unwrap();
+        let w = ws.path();
+        std::fs::create_dir_all(w.join("app/src")).unwrap();
+        std::fs::create_dir_all(w.join("core/src")).unwrap();
+        std::fs::write(
+            w.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"core\"]\n\n[workspace.dependencies]\ncore2 = { path = \"core\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ncore2 = { workspace = true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("core/Cargo.toml"),
+            "[package]\nname = \"core2\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("core/src/lib.rs"),
+            "pub struct Shared { pub a: u64, pub b: u64 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("app/src/lib.rs"),
+            "use core2::Shared;\npub struct Uses { pub s: Shared, pub f: u8 }\n",
+        )
+        .unwrap();
+        let lib = w.join("app/src/lib.rs");
+        let text = std::fs::read_to_string(&lib).unwrap();
+        let l = parse_in_crate(&lib, &text, &X86_64_SYSV).unwrap();
+        // Only the app crate's own structs are reported for the file.
+        assert!(l.iter().all(|l| l.name != "Shared"));
+        let uses = l.iter().find(|l| l.name == "Uses").unwrap();
+        assert_eq!(uses.total_size, 24, "{:?}", uses.fields);
+        assert!(
+            uses.uncertain_fields.is_empty(),
+            "{:?}",
+            uses.uncertain_fields
+        );
+    }
+
+    #[test]
+    fn dependency_outside_the_workspace_needs_follow_dependencies() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let w = dir.path();
+        std::fs::create_dir_all(w.join("app/src")).unwrap();
+        std::fs::create_dir_all(w.join("vendor/src")).unwrap();
+        std::fs::write(
+            w.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nvendor = { path = \"../vendor\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("vendor/Cargo.toml"),
+            "[package]\nname = \"vendor\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("vendor/src/lib.rs"),
+            "pub struct Shared { pub a: u64, pub b: u64 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("app/src/lib.rs"),
+            "use vendor::Shared;\npub struct Uses { pub s: Shared, pub f: u8 }\n",
+        )
+        .unwrap();
+        let lib = w.join("app/src/lib.rs");
+        let text = std::fs::read_to_string(&lib).unwrap();
+        let uses = |l: Vec<StructLayout>| l.into_iter().find(|l| l.name == "Uses").unwrap();
+
+        crate::set_follow_dependencies(false);
+        let off = uses(parse_in_crate(&lib, &text, &X86_64_SYSV).unwrap());
+        assert!(!off.uncertain_fields.is_empty(), "{:?}", off.fields);
+
+        crate::set_follow_dependencies(true);
+        let on = uses(parse_in_crate(&lib, &text, &X86_64_SYSV).unwrap());
+        crate::set_follow_dependencies(false);
+        assert_eq!(on.total_size, 24, "{:?}", on.fields);
+        assert!(on.uncertain_fields.is_empty());
+    }
+
+    #[test]
+    fn submodule_inside_the_workspace_is_external() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sub = dir.path().join("third_party/lib");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../../.git/modules/lib\n").unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let sub = std::fs::canonicalize(&sub).unwrap();
+        assert!(crate::is_external(&sub, &root));
+        assert!(!crate::is_external(&root.join("third_party"), &root));
     }
 }

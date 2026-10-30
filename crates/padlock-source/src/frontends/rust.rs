@@ -1760,6 +1760,7 @@ impl Fragment {
 /// Returns the layouts per input file, in order (empty for unparsable files).
 pub(crate) fn parse_rust_crate(
     files: &[(String, String)],
+    local_count: usize,
     arch: &'static ArchConfig,
 ) -> (Vec<Vec<StructLayout>>, RustCtx) {
     let parsed: Vec<Option<syn::File>> = files
@@ -1770,20 +1771,37 @@ pub(crate) fn parse_rust_crate(
             Some(f)
         })
         .collect();
-    let mut seen_in: HashMap<String, usize> = HashMap::new();
-    for f in parsed.iter().flatten() {
+    // Files from `local_count` on belong to dependencies: their declarations
+    // are visible, but a crate's own type of the same name shadows them.
+    let mut seen_local: HashMap<String, usize> = HashMap::new();
+    let mut seen_external: HashMap<String, usize> = HashMap::new();
+    for (i, f) in parsed.iter().enumerate() {
+        let Some(f) = f else { continue };
+        let seen = if i < local_count {
+            &mut seen_local
+        } else {
+            &mut seen_external
+        };
         for n in declared_names(f) {
-            *seen_in.entry(n).or_default() += 1;
+            *seen.entry(n).or_default() += 1;
         }
     }
-    let ambiguous: HashSet<String> = seen_in
-        .into_iter()
-        .filter(|(_, n)| *n > 1)
-        .map(|(k, _)| k)
+    let ambiguous: HashSet<String> = seen_local
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .map(|(k, _)| k.clone())
+        .chain(
+            seen_external
+                .iter()
+                .filter(|(k, n)| **n > 1 && !seen_local.contains_key(*k))
+                .map(|(k, _)| k.clone()),
+        )
         .collect();
     let mut ctx = RustCtx::new(arch);
     let mut params = Vec::new();
-    for f in parsed.iter().flatten() {
+    // Dependencies first, so the crate's own declarations overwrite theirs.
+    let order = (local_count..parsed.len()).chain(0..local_count.min(parsed.len()));
+    for f in order.filter_map(|i| parsed[i].as_ref()) {
         let mut collector = ItemCollector {
             ctx: &mut ctx,
             generic_params: Vec::new(),
@@ -1866,7 +1884,7 @@ mod tests {
                     .to_string(),
             ),
         ];
-        let (out, _) = parse_rust_crate(&files, &X86_64_SYSV);
+        let (out, _) = parse_rust_crate(&files, files.len(), &X86_64_SYSV);
         let mut all: Vec<StructLayout> = out.into_iter().flatten().collect();
         crate::resolve_nested_structs(&mut all);
         let uses = all.iter().find(|l| l.name == "Uses").unwrap();

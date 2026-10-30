@@ -34,6 +34,7 @@ pub fn analyze_text(
     // Parse settings from `.padlock.toml`, as the CLI applies them.
     padlock_source::set_preprocessor_defines(&config.defines);
     padlock_source::set_declared_order(config.declared_order);
+    padlock_source::set_follow_dependencies(config.follow_deps);
     padlock_source::set_configured_instantiations(
         config
             .instantiate

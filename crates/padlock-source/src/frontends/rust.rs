@@ -84,12 +84,20 @@ pub(crate) struct RustCtx {
     /// Names declared in more than one file of the crate. Each file sees only
     /// its own declaration of such a name; elsewhere it stays unknown.
     ambiguous: HashSet<String>,
+    /// Per file: ambiguous name → index of the file it refers to (see
+    /// `rust_modules`), for names the file does not declare itself.
+    bindings: Vec<HashMap<String, usize>>,
 }
 
 impl RustCtx {
     /// Names declared in more than one file of a crate (see `parse_rust_crate`).
     pub(crate) fn ambiguous_names(&self) -> &HashSet<String> {
         &self.ambiguous
+    }
+
+    /// Per file, which file each ambiguous name it uses refers to.
+    pub(crate) fn name_bindings(&self) -> &[HashMap<String, usize>] {
+        &self.bindings
     }
 
     fn new(arch: &'static ArchConfig) -> Self {
@@ -106,6 +114,7 @@ impl RustCtx {
             uses: Vec::new(),
             local_enums: HashMap::new(),
             ambiguous: HashSet::new(),
+            bindings: Vec::new(),
         }
     }
 }
@@ -1650,7 +1659,7 @@ pub(crate) fn parse_rust_in_ctx(
 }
 
 /// Names of the structs, enums, type aliases and consts a file declares.
-fn declared_names(file: &syn::File) -> HashSet<String> {
+pub(crate) fn declared_names(file: &syn::File) -> HashSet<String> {
     struct Names(HashSet<String>);
     impl<'ast> Visit<'ast> for Names {
         fn visit_item_struct(&mut self, n: &'ast ItemStruct) {
@@ -1742,6 +1751,29 @@ impl Fragment {
         ctx.struct_sizes.borrow_mut().clear();
     }
 
+    /// Install only this file's declaration of `name`.
+    fn install_name(&self, ctx: &mut RustCtx, name: &str) {
+        if let Some(v) = self.consts.get(name) {
+            ctx.consts.insert(name.to_string(), v.clone());
+        }
+        if let Some(v) = self.aliases.get(name) {
+            ctx.aliases.insert(name.to_string(), v.clone());
+        }
+        if self.local_types.contains(name) {
+            ctx.local_types.insert(name.to_string());
+        }
+        if let Some(v) = self.local_structs.get(name) {
+            ctx.local_structs.insert(name.to_string(), v.clone());
+        }
+        if self.generic_structs.contains(name) {
+            ctx.generic_structs.insert(name.to_string());
+        }
+        if let Some(v) = self.local_enums.get(name) {
+            ctx.local_enums.insert(name.to_string(), *v);
+        }
+        ctx.struct_sizes.borrow_mut().clear();
+    }
+
     fn forget(ctx: &mut RustCtx, n: &str) {
         ctx.consts.remove(n);
         ctx.aliases.remove(n);
@@ -1761,6 +1793,7 @@ impl Fragment {
 pub(crate) fn parse_rust_crate(
     files: &[(String, String)],
     local_count: usize,
+    src_root: Option<&std::path::Path>,
     arch: &'static ArchConfig,
 ) -> (Vec<Vec<StructLayout>>, RustCtx) {
     let parsed: Vec<Option<syn::File>> = files
@@ -1828,6 +1861,17 @@ pub(crate) fn parse_rust_crate(
             })
             .collect()
     };
+    let bindings: Vec<HashMap<String, usize>> = match src_root {
+        Some(src) if !ambiguous.is_empty() => {
+            let view: Vec<(String, Option<&syn::File>)> = files
+                .iter()
+                .zip(&parsed)
+                .map(|((p, _), f)| (p.clone(), f.as_ref()))
+                .collect();
+            crate::rust_modules::resolve_bindings(&view, local_count, src, &ambiguous)
+        }
+        _ => vec![HashMap::new(); files.len()],
+    };
     for n in &ambiguous {
         Fragment::forget(&mut ctx, n);
     }
@@ -1840,6 +1884,11 @@ pub(crate) fn parse_rust_crate(
         };
         if let Some(fragment) = fragments.get(i) {
             fragment.install(&mut ctx);
+        }
+        for (name, &target) in &bindings[i] {
+            if let Some(fragment) = fragments.get(target) {
+                fragment.install_name(&mut ctx, name);
+            }
         }
         let mut visitor = StructVisitor {
             ctx,
@@ -1855,11 +1904,15 @@ pub(crate) fn parse_rust_crate(
             for n in fragment.names() {
                 Fragment::forget(&mut ctx, n);
             }
+            for n in bindings[i].keys() {
+                Fragment::forget(&mut ctx, n);
+            }
             ctx.struct_sizes.borrow_mut().clear();
         }
         out.push(layouts);
     }
     ctx.ambiguous = ambiguous;
+    ctx.bindings = bindings;
     (out, ctx)
 }
 
@@ -1884,7 +1937,7 @@ mod tests {
                     .to_string(),
             ),
         ];
-        let (out, _) = parse_rust_crate(&files, files.len(), &X86_64_SYSV);
+        let (out, _) = parse_rust_crate(&files, files.len(), None, &X86_64_SYSV);
         let mut all: Vec<StructLayout> = out.into_iter().flatten().collect();
         crate::resolve_nested_structs(&mut all);
         let uses = all.iter().find(|l| l.name == "Uses").unwrap();

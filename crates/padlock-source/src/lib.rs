@@ -7,6 +7,7 @@ pub mod fixgen;
 pub mod frontends;
 mod go_package;
 mod rust_crate;
+mod rust_modules;
 mod zig_imports;
 pub use c_includes::{include_dirs, set_include_dirs};
 

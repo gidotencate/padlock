@@ -207,7 +207,8 @@ fn build_with_ctx(
         .count()
         .min(files.len());
     let outer = crate::take_skipped();
-    let (per_file, ctx) = crate::frontends::rust::parse_rust_crate(&files, local_count, arch);
+    let (per_file, ctx) =
+        crate::frontends::rust::parse_rust_crate(&files, local_count, Some(&own_src), arch);
     let skipped_all = crate::take_skipped();
     crate::restore_skipped(outer);
     let mut all: Vec<StructLayout> = Vec::new();
@@ -233,7 +234,12 @@ fn build_with_ctx(
             .is_some_and(|f| Path::new(f).starts_with(&own_src))
             || !local_names.contains(&l.name)
     });
-    let layouts = resolve_per_file(all, ctx.ambiguous_names());
+    let layouts = resolve_per_file(
+        all,
+        ctx.ambiguous_names(),
+        ctx.name_bindings(),
+        &files.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+    );
     // Skip notes are not attributed per file by the crate-wide parse; keep
     // them with the crate's first file so they are reported once.
     let mut skipped = HashMap::new();
@@ -257,6 +263,8 @@ fn build_with_ctx(
 fn resolve_per_file(
     mut all: Vec<StructLayout>,
     ambiguous: &std::collections::HashSet<String>,
+    bindings: &[HashMap<String, usize>],
+    paths: &[String],
 ) -> HashMap<PathBuf, Vec<StructLayout>> {
     let mut layouts: HashMap<PathBuf, Vec<StructLayout>> = HashMap::new();
     if ambiguous.is_empty() {
@@ -277,6 +285,58 @@ fn resolve_per_file(
         .filter(|l| !ambiguous.contains(&l.name))
         .map(|l| (l.name.clone(), l.clone()))
         .collect();
+    let unresolved = layouts.clone();
+    for own in layouts.values_mut() {
+        *own = resolve_file(own, &pool, Vec::new());
+    }
+    // A file that uses an ambiguous name declared elsewhere (found through its
+    // `use` items or qualified paths) sees that declaration, sized in its own
+    // file's context and frozen.
+    for (i, bound) in bindings.iter().enumerate() {
+        if bound.is_empty() {
+            continue;
+        }
+        let key = PathBuf::from(&paths[i]);
+        let Some(own) = unresolved.get(&key) else {
+            continue;
+        };
+        let mut extra = Vec::new();
+        for (name, &target) in bound {
+            if let Some(l) = layouts
+                .get(&PathBuf::from(&paths[target]))
+                .and_then(|ls| ls.iter().find(|l| &l.name == name))
+            {
+                extra.push(freeze(l));
+            }
+        }
+        layouts.insert(key, resolve_file(own, &pool, extra));
+    }
+    layouts
+}
+
+/// A copy of `l` whose fields no longer name other types, so resolving it
+/// again in another file's context keeps its size.
+fn freeze(l: &StructLayout) -> StructLayout {
+    let mut l = l.clone();
+    for f in &mut l.fields {
+        if let padlock_core::ir::TypeInfo::Opaque { size, align, .. } = &f.ty {
+            f.ty = padlock_core::ir::TypeInfo::Primitive {
+                name: "u8".to_string(),
+                size: *size,
+                align: *align,
+            };
+        }
+    }
+    l
+}
+
+/// Size `own` against the layouts of `extra` and the unambiguous `pool` types
+/// reachable from it; only `own`'s layouts are returned.
+fn resolve_file(
+    own: &[StructLayout],
+    pool: &HashMap<String, StructLayout>,
+    extra: Vec<StructLayout>,
+) -> Vec<StructLayout> {
     let referenced = |l: &StructLayout| -> Vec<String> {
         l.fields
             .iter()
@@ -289,29 +349,28 @@ fn resolve_per_file(
             })
             .collect()
     };
-    for own in layouts.values_mut() {
-        let n = own.len();
-        let own_names: std::collections::HashSet<String> =
-            own.iter().map(|l| l.name.clone()).collect();
-        let mut work: Vec<StructLayout> = own.clone();
-        let mut seen = own_names.clone();
-        let mut next = 0;
-        while next < work.len() {
-            for name in referenced(&work[next]) {
-                if !seen.contains(&name)
-                    && let Some(l) = pool.get(&name)
-                {
-                    seen.insert(name);
-                    work.push(l.clone());
-                }
-            }
-            next += 1;
-        }
-        crate::resolve_nested_structs(&mut work);
-        work.truncate(n);
-        *own = work;
+    let n = own.len();
+    let mut work: Vec<StructLayout> = own.to_vec();
+    let mut seen: std::collections::HashSet<String> = work.iter().map(|l| l.name.clone()).collect();
+    for l in extra {
+        seen.insert(l.name.clone());
+        work.push(l);
     }
-    layouts
+    let mut next = 0;
+    while next < work.len() {
+        for name in referenced(&work[next]) {
+            if !seen.contains(&name)
+                && let Some(l) = pool.get(&name)
+            {
+                seen.insert(name);
+                work.push(l.clone());
+            }
+        }
+        next += 1;
+    }
+    crate::resolve_nested_structs(&mut work);
+    work.truncate(n);
+    work
 }
 
 fn crate_for(root: &Path, arch: &'static ArchConfig) -> Option<Arc<Crate>> {
@@ -639,5 +698,68 @@ mod tests {
         let sub = std::fs::canonicalize(&sub).unwrap();
         assert!(crate::is_external(&sub, &root));
         assert!(!crate::is_external(&root.join("third_party"), &root));
+    }
+
+    #[test]
+    fn qualified_and_imported_names_pick_the_right_file() {
+        let dir = crate_dir(&[
+            ("lib.rs", "mod a;\nmod b;\nmod c;\nmod d;\n"),
+            ("a.rs", "pub struct Config { pub x: u64 }\n"),
+            ("b.rs", "pub struct Config { pub x: u8, pub y: u8 }\n"),
+            (
+                "c.rs",
+                "use crate::a::Config;\npub struct ViaUse { pub c: Config, pub f: u8 }\n",
+            ),
+            (
+                "d.rs",
+                "pub struct ViaPath { pub c: super::b::Config, pub f: u8 }\n",
+            ),
+        ]);
+        let get = |file: &str, name: &str| {
+            let p = dir.path().join("src").join(file);
+            let text = std::fs::read_to_string(&p).unwrap();
+            let l = parse_in_crate(&p, &text, &X86_64_SYSV).unwrap();
+            l.into_iter().find(|l| l.name == name).unwrap()
+        };
+        let via_use = get("c.rs", "ViaUse");
+        let via_path = get("d.rs", "ViaPath");
+        assert_eq!(via_use.total_size, 16, "{:?}", via_use.fields);
+        assert_eq!(via_path.total_size, 3, "{:?}", via_path.fields);
+        assert!(
+            via_use.uncertain_fields.is_empty(),
+            "{:?}",
+            via_use.uncertain_fields
+        );
+        assert!(
+            via_path.uncertain_fields.is_empty(),
+            "{:?}",
+            via_path.uncertain_fields
+        );
+    }
+
+    #[test]
+    fn path_attribute_module_is_resolved() {
+        let dir = crate_dir(&[
+            (
+                "lib.rs",
+                "#[path = \"impls/one.rs\"] mod a;\nmod b;\nmod user;\n",
+            ),
+            ("b.rs", "pub struct Config { pub x: u8 }\n"),
+            (
+                "user.rs",
+                "pub struct U { pub c: crate::a::Config, pub f: u8 }\n",
+            ),
+        ]);
+        std::fs::create_dir(dir.path().join("src/impls")).unwrap();
+        std::fs::write(
+            dir.path().join("src/impls/one.rs"),
+            "pub struct Config { pub x: u64 }\n",
+        )
+        .unwrap();
+        let p = dir.path().join("src/user.rs");
+        let text = std::fs::read_to_string(&p).unwrap();
+        let l = parse_in_crate(&p, &text, &X86_64_SYSV).unwrap();
+        let u = l.iter().find(|l| l.name == "U").unwrap();
+        assert_eq!(u.total_size, 16, "{:?}", u.fields);
     }
 }

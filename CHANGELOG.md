@@ -18,6 +18,11 @@ All notable changes to padlock are documented here.
 - **Rust: path dependencies are part of the crate's context.** `dep = { path = "../x" }` (and `dep = { workspace = true }` with a path in `[workspace.dependencies]`) are followed transitively; their types size fields of the analyzed crate, and their files invalidate the parse cache. The crate's own types shadow a dependency's of the same name.
 - **`--follow-deps` / `follow_deps = true`** (`.padlock.toml`, off by default): a path dependency outside the workspace, or inside a nested git repository (submodule, vendored checkout), is followed only when this is set, so third-party repositories never change an analysis unasked.
 
+## [0.77.0] — 2026-10-30
+
+### Added
+- **Rust: `use` items and qualified paths pick the file for a name declared in several files.** A crate's module tree (file locations, `mod.rs`, `src/bin/*`, `#[path = "…"] mod`) is built, and `use crate::a::Config;`, `a::Config`, `super::Config`, glob imports and `pub use` re-exports are resolved against it, so `a::Config` and `b::Config` are each sized from their own file. A file naming both candidates, a renamed import (`as`), or an extern crate stays unknown (uncertain).
+
 ## [0.76.0] — 2026-10-30
 
 ### Added

@@ -1105,7 +1105,7 @@ This substitution is textual, not a real template instantiator: it does not unde
 
 - **Rust enums** — data enums are modeled with a synthetic `__payload` field (sized to the largest variant) and a `__discriminant` field; niche-filled enums and common niche types (`Option<NonZeroXxx>`, `Option<&T>`, `Option<Box<T>>`) are sized correctly. Unusual niches may still be approximate — use `--rust-exact` or binary analysis.
 - **Rust std sync types on macOS/Windows** — `Mutex`/`RwLock`/`Condvar` sizes differ per OS; on Apple and MSVC targets these fields are flagged as `uncertain`. Rust on 32-bit targets is not yet covered by the conformance suite.
-- **Go qualified interface fields** (`io.Reader`, `driver.Connector`, etc.) — cross-package interface types cannot be resolved from source alone; these fields are flagged as `uncertain` in output and sized as 2 words (the correct runtime representation). Use binary analysis for certainty.
+- **Go types of packages outside the module and the standard library** (third-party modules) and **generic types of other packages** are not resolved from source; these fields are flagged as `uncertain` and sized as one word (an interface as two). Use `--go-exact` for certainty.
 - **`repr(Rust)` reordering** — sizes follow rustc's order, but individual field offsets are an estimate (rustc may place a large-niche field first). `--rust-exact` reports rustc's own order.
 
 ---

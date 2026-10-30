@@ -1218,7 +1218,17 @@ fn make_field(
     arch: &'static ArchConfig,
 ) -> Field {
     let (fname, ty_name, guard, alignas, field_line) = raw;
+    let (atomic, ty_name) = match ty_name.strip_prefix("_Atomic ") {
+        Some(rest) => (true, rest.to_string()),
+        None => (false, ty_name),
+    };
     let (sizing_ty, display_ty) = resolve_field_type(&ty_name, aliases, arch);
+    // Keep the qualifier visible in the type name (the concurrency pass reads it).
+    let display_ty = if atomic {
+        format!("_Atomic {display_ty}")
+    } else {
+        display_ty
+    };
     UNKNOWN_TYPE.with(|u| u.set(false));
     let (size, natural_align) = c_type_size_align(&sizing_ty, arch);
     // A type padlock could not size (a typedef from a header that was not
@@ -3948,6 +3958,9 @@ fn parse_field_declarations(
     aliases: &HashMap<String, String>,
 ) -> Vec<RawField> {
     let mut ty_parts: Vec<String> = Vec::new();
+    // `_Atomic(T)` / `_Atomic T`: the field is accessed atomically (kept in the
+    // type name as an `_Atomic ` prefix so the concurrency pass can see it).
+    let mut atomic = false;
     let mut declarators: Vec<Node<'_>> = Vec::new();
     // Bit-field width, e.g. `int flags : 3;` → Some("3")
     let mut bit_width: Option<String> = None;
@@ -3989,6 +4002,7 @@ fn parse_field_declarations(
             // node wrapping the inner type in parentheses.  Extract the inner type so
             // `_Atomic(int)` is sized as `int` (4B), not as pointer-size.
             "atomic_type" => {
+                atomic = true;
                 for j in 0..child.child_count() {
                     if let Some(sub) = child.child(j) {
                         match sub.kind() {
@@ -4011,6 +4025,7 @@ fn parse_field_declarations(
                     .child_by_field_name("name")
                     .is_none_or(|n| n.is_missing() || source[n.byte_range()] == *"_Atomic") =>
             {
+                atomic = true;
                 if let Some(t) = child.child_by_field_name("type") {
                     ty_parts.push(source[t.byte_range()].trim().to_string());
                 }
@@ -4078,6 +4093,7 @@ fn parse_field_declarations(
             }
             // type_qualifier wraps alignas_qualifier for field declarations:
             // `alignas(8) char c;` → type_qualifier { alignas_qualifier { ... } }
+            "type_qualifier" if source[child.byte_range()].trim() == "_Atomic" => atomic = true,
             "type_qualifier" if alignas_override.is_none() => {
                 for j in 0..child.child_count() {
                     if let Some(sub) = child.child(j)
@@ -4095,6 +4111,9 @@ fn parse_field_declarations(
     let mut base_ty = ty_parts.join(" ");
     if base_ty.is_empty() {
         return Vec::new();
+    }
+    if atomic && !base_ty.starts_with("_Atomic ") {
+        base_ty = format!("_Atomic {base_ty}");
     }
     // Undo the `_BitInt(N)` parsing workaround for display (see `rewrite_bitint`).
     for (prefix, spelled) in [("__ubitint", "unsigned _BitInt"), ("__bitint", "_BitInt")] {

@@ -96,6 +96,7 @@ fn is_concurrent_type(name: &str, lang: &SourceLanguage) -> bool {
         SourceLanguage::C | SourceLanguage::Cpp => {
             name.contains("mutex")
                 || name.contains("atomic")
+                || name.starts_with("_Atomic ")
                 || name.contains("spinlock")
                 || name.contains("critical_section")
                 || name.contains("pthread_mutex")
@@ -119,7 +120,9 @@ fn is_concurrent_type(name: &str, lang: &SourceLanguage) -> bool {
 fn is_atomic_type(name: &str, lang: &SourceLanguage) -> bool {
     match lang {
         SourceLanguage::Rust => name.contains("Atomic"),
-        SourceLanguage::C | SourceLanguage::Cpp => name.contains("atomic"),
+        SourceLanguage::C | SourceLanguage::Cpp => {
+            name.contains("atomic") || name.starts_with("_Atomic ")
+        }
         SourceLanguage::Go => name.contains("atomic"),
         SourceLanguage::Zig => name.contains("atomic.Value") || name.contains("Atomic"),
     }
@@ -279,5 +282,55 @@ mod tests {
         } else {
             panic!("expected Concurrent");
         }
+    }
+
+    #[test]
+    fn c11_atomic_fields_are_concurrent_and_two_of_them_conflict() {
+        use padlock_core::findings::{Finding, Report, Severity};
+        let src = "struct C { _Atomic(unsigned long) hits; _Atomic unsigned long misses; char pad[48]; };";
+        let layouts =
+            crate::parse_source_str(src, &SourceLanguage::C, &padlock_core::arch::X86_64_SYSV)
+                .unwrap();
+        for f in &layouts[0].fields[..2] {
+            assert!(
+                matches!(
+                    f.access,
+                    AccessPattern::Concurrent {
+                        is_atomic: true,
+                        ..
+                    }
+                ),
+                "{}: {:?}",
+                f.name,
+                f.access
+            );
+        }
+        // The size is still that of the underlying type.
+        assert_eq!(layouts[0].fields[0].size, 8);
+        let report = Report::from_layouts(&layouts);
+        let fs = report.structs[0]
+            .findings
+            .iter()
+            .find_map(|f| match f {
+                Finding::FalseSharing { severity, .. } => Some(severity.clone()),
+                _ => None,
+            })
+            .expect("false sharing between the two atomics");
+        assert_eq!(fs, Severity::Medium);
+    }
+
+    #[test]
+    fn two_locks_alone_are_a_low_severity_conflict() {
+        use padlock_core::findings::{Finding, Report, Severity};
+        let src = "struct C { pthread_mutex_t a; pthread_mutex_t b; };";
+        let layouts =
+            crate::parse_source_str(src, &SourceLanguage::C, &padlock_core::arch::X86_64_SYSV)
+                .unwrap();
+        let report = Report::from_layouts(&layouts);
+        let fs = report.structs[0].findings.iter().find_map(|f| match f {
+            Finding::FalseSharing { severity, .. } => Some(severity.clone()),
+            _ => None,
+        });
+        assert_eq!(fs, Some(Severity::Low));
     }
 }

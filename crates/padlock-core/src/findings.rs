@@ -296,16 +296,21 @@ fn analyze_one(layout: &StructLayout) -> StructReport {
         let conflicts = false_sharing::find_concurrent_conflicts(layout);
         // is_inferred = true when no conflicting field carries an explicit
         // annotation: the guards come from type names, so the hazard is
-        // likely but unconfirmed — Medium rather than High.
+        // likely but unconfirmed — Medium rather than High, and Low when the
+        // conflict is between lock words only (two mutexes side by side hurt
+        // only when both are contended at once).
         let is_inferred = !false_sharing::is_annotated(layout);
+        let severity = if !is_inferred {
+            Severity::High
+        } else if false_sharing::conflict_involves_atomic(layout) {
+            Severity::Medium
+        } else {
+            Severity::Low
+        };
         findings.push(Finding::FalseSharing {
             struct_name: layout.name.clone(),
             conflicts,
-            severity: if is_inferred {
-                Severity::Medium
-            } else {
-                Severity::High
-            },
+            severity,
             is_inferred,
         });
     }

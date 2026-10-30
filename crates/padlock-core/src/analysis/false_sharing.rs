@@ -113,6 +113,27 @@ pub fn is_annotated(layout: &StructLayout) -> bool {
     })
 }
 
+/// Whether an atomic is among the fields that conflict. Two independently
+/// updated atomics bounce their line on every write; two lock words only do
+/// when both locks are contended at the same moment, so a conflict made of
+/// locks alone is the weaker signal.
+pub fn conflict_involves_atomic(layout: &StructLayout) -> bool {
+    let conflicting: std::collections::HashSet<String> = find_concurrent_conflicts(layout)
+        .into_iter()
+        .flat_map(|c| c.fields)
+        .collect();
+    layout.fields.iter().any(|f| {
+        conflicting.contains(&f.name)
+            && matches!(
+                f.access,
+                AccessPattern::Concurrent {
+                    is_atomic: true,
+                    ..
+                }
+            )
+    })
+}
+
 /// Return `true` if any cache line holds 2+ fields where at least one is
 /// `Concurrent`, but the pair didn't meet `has_false_sharing`'s stricter bar
 /// (same guard, or only one of the pair is concurrent, or both are pure
@@ -338,6 +359,19 @@ mod tests {
     }
 
     // ── normalize_guard ───────────────────────────────────────────────────────
+
+    #[test]
+    fn conflict_of_locks_alone_does_not_involve_an_atomic() {
+        let layout = make_layout(vec![concurrent("a", 0, "a"), concurrent("b", 8, "b")]);
+        assert!(has_false_sharing(&layout));
+        assert!(!conflict_involves_atomic(&layout));
+    }
+
+    #[test]
+    fn conflict_with_an_atomic_involves_one() {
+        let layout = make_layout(vec![atomic("a", 0), concurrent("b", 8, "b")]);
+        assert!(conflict_involves_atomic(&layout));
+    }
 
     #[test]
     fn normalize_strips_self_prefix() {

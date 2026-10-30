@@ -22,6 +22,9 @@ Found by checking mimalloc (C), typescript-go and microsoft/go against gcc's DWA
 
 - **Go: types of imported packages are sized from their source.** A field typed `tspath.Path` or `ast.Kind` is read from the package it comes from — packages of the surrounding module(s) (`go.mod`, `go.work`), the standard library (`$GOROOT/src`, or its own tree when analyzing it) — instead of being guessed as one word and flagged. Aliases (`type Kind int16`), structs, interfaces and chains of them are followed, also through generated files too large to parse. Generic types of other packages are still flagged. The parse cache now tracks the sibling files and the imported packages' files, and the Go toolchain version.
 
+- **C: `_Atomic(T)` / `_Atomic T` fields were not treated as atomics**, so C11 code (mimalloc) could never get a false-sharing finding; they are now, and a field's displayed type reads `_Atomic uint64_t`.
+- **False sharing between locks alone is Low** (inferred from type names: two mutexes side by side only hurt when both are contended at once); it stays Medium when an atomic is involved and High when a guard is annotated. On microsoft/TypeScript 7 of 18 inferred findings move to Low, on microsoft/go 6 of 53; mimalloc goes from 0 to 9 (all involving atomics).
+
 ### Measured
 - microsoft/TypeScript (the Go port; 1201 non-test structs compared with `go test` via `--go-exact`): 1125 sizes match without `--go-exact`, up from 825. 1090 structs are not flagged uncertain (up from 674) and every one that `go test` can probe matches; 111 remain flagged (generics of other packages such as `collections.Set[T]`).
 

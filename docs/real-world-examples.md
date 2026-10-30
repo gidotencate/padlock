@@ -14,6 +14,7 @@ padlock run against popular open-source projects — all findings reflect declar
 | [grpc-go](https://github.com/grpc/grpc-go) | Go | latest | — | — | — | 4 structs fixed — 72B saved/RPC, false sharing eliminated on `mu` | All merged³ |
 | Linux kernel `net/` | C | 6.x | 2 066 | 5 093B | 84/100 B | `virtio_vsock` — score 45, all 4 finding types | — |
 | [DPDK](https://www.dpdk.org) | C | 26.07.0 | 12 780 | 21 737B | 88/100 B | `rte_hash_parameters` — 23% waste, saves 8B | Limitation found⁴ |
+| [TypeScript](https://github.com/microsoft/TypeScript) (Go port) | Go | 7.1.0-dev | 2 748 | 4 581B | 99/100 A | `accessibleChainCacheKey` — 46% waste, saves 8B | No measurable gain⁵ |
 
 ¹ repr(Rust) structs are severity-downgraded (compiler may already reorder). Use `--hide-repr-rust` to focus on ABI-stable findings only. The per-struct average score is 91; the weighted project score is higher due to the majority of clean small structs.
 
@@ -26,6 +27,8 @@ The Go stdlib score is B (86/100) across 607 structs. 71% are clean; 12% have Hi
 The Linux `net/` subsystem score is B (84/100) across 2 066 structs. 57% are clean; 12% have High findings — primarily false sharing in driver and protocol structs that have grown organically over many kernel versions.
 
 ⁴ padlock silently drops `rte_mbuf`, `rte_mempool`, and `rte_eth_dev_data` — DPDK's three most-allocated structs — because tree-sitter-c misparses `struct __rte_cache_aligned rte_mbuf { ... }` as a *function definition* (`__rte_cache_aligned` read as an anonymous struct return type, `rte_mbuf` as the function name, the field list as a function body). See the DPDK section below for the full AST and why it isn't a quick fix.
+
+⁵ DWARF analysis of the `tsc` binary (types under `tsc/internal/` only), validated end-to-end with `perf mem record` → `--perf-types`. The two High findings, `accessibleChainCacheKey` (24B→16B) and `InferenceTypeMapper` (32B→24B), were applied and benchmarked on 300 generic-heavy files (30 interleaved runs each): wall time, CPU time and peak RSS were all within noise, and neither struct shows up in the allocation profile. See the TypeScript section below.
 
 ---
 
@@ -532,3 +535,40 @@ Moving the 8-byte-aligned `hash_func` pointer ahead of the 4-byte fields removes
 ```
 
 This struct is built once per hash table (not per lookup), so the 8B saving is about allocator sizeclass, not a per-packet hot-path win — included here because it's a clean, trustworthy parse rather than DPDK's most performance-critical path. Candidates like `rte_ring` and `rte_eth_conf` were checked and excluded from this writeup: `rte_ring`'s real fields include a `char name[RTE_RING_NAMESIZE]` array sized by a macro expression (not a literal) and `RTE_CACHE_GUARD` padding macros, both of which padlock can't resolve without a preprocessor — the 32B/5-field result it reports is a parse artifact, not the real ~192B/3-cache-line layout, so it isn't fit to publish as a finding.
+
+---
+
+## Go — TypeScript compiler (Go port, 7.1.0-dev)
+
+Checked three ways: source analysis, DWARF (`padlock verify` / `analyze` on the built `tsc`), and measured access with `perf mem record` fed to `--perf-types`.
+
+```
+$ go build -o tsc ./cmd/tsc
+$ padlock summary tsc -F '^github.com/microsoft/TypeScript/tsc/'
+Score 99 / 100  A    2748 structs · 4581B wasted
+```
+
+```
+$ perf mem record -d --call-graph dwarf -o perf.data -- tsc --noEmit
+$ perf report --stdio -s type,typeoff -i perf.data > types.txt
+$ padlock analyze --perf-types types.txt internal/ast internal/scanner internal/parser
+```
+
+| Struct | Measured hot fields (perf) |
+|---|---|
+| `scanner.Scanner` | `text`, `skipTrivia`, `ScannerState` |
+| `parser.Parser` | `scanner` |
+| `ast.Node` | `Kind`, `Loc`, `id` |
+
+All of these sit at the start of their struct, so the hot data already shares the first cache line.
+
+| Struct | Size | Best order | DWARF | Effect |
+|---|---|---|---|---|
+| `accessibleChainCacheKey` | 24B | 16B | confirmed | none measurable |
+| `InferenceTypeMapper` | 32B | 24B | confirmed | none measurable |
+
+Benchmark: 300 files using `effect`, `rxjs` and `zod`, 30 interleaved runs per build. Wall 0.404s vs 0.404s, user CPU 1.60s vs 1.59s, peak RSS 390MB vs 391MB, all inside one standard deviation. The whole run allocates about 192MB and all `TypeMapper` allocations together are under 1.5MB, so 8B per instance cannot show. These are real layout savings that do not matter in practice; no upstream PR was opened.
+
+`TypeMapperBase` is a 1-byte kind header that must stay at offset 0 (`castTypeMapper` casts through `unsafe.Pointer`), so the 7B of padding after it in the other mappers cannot be removed.
+
+**Known limitation:** source analysis sized `fileLoader.factory` (`ast.NodeFactory`) as 8B because that type lives in a generated file over padlock's 500 KB parse limit. The real field is 1192B, so the source-only false-sharing finding for `fileLoader` was wrong; DWARF shows none. Use DWARF for structs that embed types from oversize files.

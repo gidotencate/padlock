@@ -193,6 +193,16 @@ fn render_struct_with_embed(
             "    note: uncertain field size(s): {fields} — \
              use binary analysis (DWARF/BTF) or provide type info for accurate results\n"
         ));
+        // Rust and Zig size types from dependencies outside the project only on request.
+        if sr
+            .source_file
+            .as_deref()
+            .is_some_and(|f| f.ends_with(".rs") || f.ends_with(".zig"))
+        {
+            out.push_str(
+                "          (a type from a dependency outside the project is sized with --follow-deps)\n",
+            );
+        }
     }
 
     // Embedding context: if this struct has padding waste and is embedded in

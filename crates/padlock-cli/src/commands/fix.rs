@@ -158,6 +158,10 @@ fn fix_file(
         SourceLanguage::Zig => fixgen::apply_fixes_zig(&source, &layouts_to_fix),
     };
 
+    if fixed_source == source {
+        println!("{}: nothing rewritten (see notes above).", path.display());
+        return Ok(false);
+    }
     std::fs::write(path, &fixed_source)?;
     println!(
         "Rewrote {} struct(s) in {}.",

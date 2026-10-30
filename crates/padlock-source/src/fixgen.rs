@@ -698,10 +698,39 @@ fn zig_field_name_from_chunk(chunk: &str) -> Option<String> {
 /// Preserves `#[serde(...)]`, `pub`, `pub(crate)`, doc comments (`///`), and
 /// any other leading attribute/comment lines verbatim.
 pub fn generate_rust_fix_from_source(layout: &StructLayout, struct_source: &str) -> String {
+    // A field behind `#[cfg(...)]` that is off for the target is not in the
+    // layout; rewriting from the layout would silently delete it. Leave such a
+    // struct alone.
+    if !rust_source_matches_layout(layout, struct_source) {
+        eprintln!(
+            "padlock: note: not reordering '{}': it has fields behind #[cfg] that are \
+             disabled for this target; reorder it by hand",
+            layout.name
+        );
+        return struct_source.to_string();
+    }
     if let Some(result) = try_source_aware_rust(layout, struct_source) {
         return result;
     }
     generate_rust_fix(layout)
+}
+
+/// True when every field written in the struct's source is a field of the
+/// layout (none was dropped by `#[cfg]` evaluation).
+fn rust_source_matches_layout(layout: &StructLayout, struct_source: &str) -> bool {
+    let Some(brace_open) = struct_source.find('{') else {
+        // Tuple struct: positional, so any `#[cfg]` makes the numbering differ.
+        return !struct_source.contains("#[cfg");
+    };
+    let Some(len) = match_braces(&struct_source[brace_open..]) else {
+        return true;
+    };
+    let body = &struct_source[brace_open + 1..brace_open + len - 1];
+    let names: std::collections::HashSet<&str> =
+        layout.fields.iter().map(|f| f.name.as_str()).collect();
+    extract_rust_field_chunks(body)
+        .iter()
+        .all(|(n, _)| names.contains(n.as_str()))
 }
 
 fn try_source_aware_rust(layout: &StructLayout, struct_source: &str) -> Option<String> {
@@ -2097,5 +2126,20 @@ mod tests {
         let b = layouts[0].fields.iter().find(|f| f.name == "b").unwrap();
         assert_eq!(b.size, 32, "strings.Builder should be 32B on 64-bit");
         assert!(!layouts[0].uncertain_fields.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn rust_fix_leaves_a_struct_with_a_cfg_disabled_field_alone() {
+        let src = "#[repr(C)]\npub struct S {\n    pub a: u8,\n    pub b: u64,\n    #[cfg(windows)]\n    pub w: u32,\n    pub c: u8,\n}\n";
+        let layouts = crate::parse_source_str(
+            src,
+            &crate::SourceLanguage::Rust,
+            &padlock_core::arch::X86_64_SYSV,
+        )
+        .unwrap();
+        let span = find_rust_struct_span(src, "S").unwrap();
+        let out = generate_rust_fix_from_source(&layouts[0], &src[span.clone()]);
+        assert_eq!(out, &src[span]);
+        assert!(out.contains("pub w: u32"));
     }
 }

@@ -18,6 +18,18 @@ All notable changes to padlock are documented here.
 - **Rust: path dependencies are part of the crate's context.** `dep = { path = "../x" }` (and `dep = { workspace = true }` with a path in `[workspace.dependencies]`) are followed transitively; their types size fields of the analyzed crate, and their files invalidate the parse cache. The crate's own types shadow a dependency's of the same name.
 - **`--follow-deps` / `follow_deps = true`** (`.padlock.toml`, off by default): a path dependency outside the workspace, or inside a nested git repository (submodule, vendored checkout), is followed only when this is set, so third-party repositories never change an analysis unasked.
 
+## [0.80.0] — 2026-10-30
+
+### Fixed
+- **`padlock fix` (and the LSP reorder action) deleted a Rust field behind a disabled `#[cfg]`.** Since 0.73.0 such a field is not in the layout, and the rewrite is built from the layout. A struct whose source has fields the layout lacks is now left unchanged, with a note; `fix` says "nothing rewritten" instead of "Rewrote 1 struct(s)".
+- **`padlock diff --against` reported a struct as changed because its old version was sized without the types it uses from other files.** The old text is now parsed with the working tree's other files as context, as the new side is (this also covers Go packages and C includes).
+
+### Changed
+- The "uncertain field size(s)" note for Rust and Zig files mentions `--follow-deps`.
+
+### Docs
+- README: modules and dependencies row, `--follow-deps`, `follow_deps` in the config example.
+
 ## [0.79.0] — 2026-10-30
 
 ### Changed

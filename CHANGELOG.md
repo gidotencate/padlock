@@ -18,6 +18,11 @@ All notable changes to padlock are documented here.
 - **Rust: path dependencies are part of the crate's context.** `dep = { path = "../x" }` (and `dep = { workspace = true }` with a path in `[workspace.dependencies]`) are followed transitively; their types size fields of the analyzed crate, and their files invalidate the parse cache. The crate's own types shadow a dependency's of the same name.
 - **`--follow-deps` / `follow_deps = true`** (`.padlock.toml`, off by default): a path dependency outside the workspace, or inside a nested git repository (submodule, vendored checkout), is followed only when this is set, so third-party repositories never change an analysis unasked.
 
+## [0.78.0] — 2026-10-30
+
+### Added
+- **Rust: `tests/`, `examples/`, `benches/` and `build.rs` see the package's library.** These files are crates of their own that name the library's types (`use mycrate::Config`); they were analyzed alone, so those fields were guessed. They are now laid out with the library's declarations in scope (the library's own structs are not repeated in their report).
+
 ## [0.77.0] — 2026-10-30
 
 ### Added

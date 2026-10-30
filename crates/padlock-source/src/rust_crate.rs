@@ -17,13 +17,24 @@ use padlock_core::ir::StructLayout;
 
 use crate::frontends::rust::RustCtx;
 
-/// The directory holding the crate's `Cargo.toml`, for a file under its `src/`.
+/// A file of the package at `dir`: under `src/` (the library or a binary), or
+/// an integration test, example, benchmark or `build.rs`, which are crates of
+/// their own that name the library's types.
+fn is_crate_file(dir: &Path, path: &Path) -> bool {
+    ["src", "tests", "examples", "benches"]
+        .iter()
+        .any(|d| path.starts_with(dir.join(d)))
+        || path == dir.join("build.rs")
+}
+
+/// The directory holding the crate's `Cargo.toml`, for a file under its `src/`
+/// (or `tests/`, `examples/`, `benches/`).
 pub(crate) fn crate_root(path: &Path) -> Option<PathBuf> {
     let path = std::fs::canonicalize(path).ok()?;
     let mut dir = path.parent()?;
     loop {
         if dir.join("Cargo.toml").is_file() {
-            return path.starts_with(dir.join("src")).then(|| dir.to_path_buf());
+            return is_crate_file(dir, &path).then(|| dir.to_path_buf());
         }
         dir = dir.parent()?;
     }
@@ -420,7 +431,9 @@ pub(crate) fn parse_in_crate(
     let file = path.to_string_lossy().into_owned();
     let found = c.signature.iter().any(|(p, _, _)| *p == canonical);
     if !found {
-        return None;
+        // A test, example or benchmark: its own file, with the package's
+        // library declarations in scope.
+        return parse_buffer_in_crate(path, source, arch);
     }
     crate::restore_skipped(c.skipped.get(&canonical).cloned().unwrap_or_default());
     Some(
@@ -761,5 +774,26 @@ mod tests {
         let l = parse_in_crate(&p, &text, &X86_64_SYSV).unwrap();
         let u = l.iter().find(|l| l.name == "U").unwrap();
         assert_eq!(u.total_size, 16, "{:?}", u.fields);
+    }
+
+    #[test]
+    fn integration_tests_and_examples_see_the_library() {
+        let dir = crate_dir(&[("lib.rs", "pub struct Shared { pub a: u64, pub b: u64 }\n")]);
+        for sub in ["tests", "examples"] {
+            std::fs::create_dir(dir.path().join(sub)).unwrap();
+            let f = dir.path().join(sub).join("t.rs");
+            std::fs::write(
+                &f,
+                "use t::Shared;\nstruct Local { f: u8, s: Shared, g: u8 }\n",
+            )
+            .unwrap();
+            let text = std::fs::read_to_string(&f).unwrap();
+            let l = parse_in_crate(&f, &text, &X86_64_SYSV).unwrap();
+            let local = l.iter().find(|l| l.name == "Local").unwrap();
+            assert_eq!(local.total_size, 24, "{sub}: {:?}", local.fields);
+            assert!(local.uncertain_fields.is_empty(), "{sub}");
+            // The library's own struct is not reported for the test file.
+            assert!(l.iter().all(|l| l.name != "Shared"), "{sub}");
+        }
     }
 }

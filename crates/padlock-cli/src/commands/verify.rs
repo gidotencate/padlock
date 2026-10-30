@@ -67,7 +67,9 @@ fn compare(src: &StructLayout, bin: &StructLayout) -> Verdict {
     for f in &src.fields {
         // Synthetic fields (`[a:3|b:5]`, `__vptr`, `__base_X`) have no DWARF twin,
         // and a zero-size member's offset is unobservable.
-        if f.name.starts_with('[') || f.name.starts_with("__") || f.size == 0 {
+        // …and blank `_` fields (padding in Go): several share the name, so a
+        // lookup by name would compare each with the first.
+        if f.name.starts_with('[') || f.name.starts_with("__") || f.name == "_" || f.size == 0 {
             continue;
         }
         if let Some(&(bo, bs)) = bin_fields.get(f.name.as_str())

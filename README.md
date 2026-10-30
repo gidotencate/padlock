@@ -18,7 +18,6 @@ Analyzed 2 structs — 10 bytes wasted across all structs
 [✗] Connection (src/connection.rs:4)  24B  fields=4  holes=2  score=33
     [HIGH] Padding waste: 10B (41%) — 7B after `is_active` (offset 1), 3B after `is_tls` (offset 13)
     [HIGH] Reorder fields: 24B → 16B (saves 8B): timeout, port, is_active, is_tls  (~8 MB/1M instances)
-    [HIGH] False sharing: cache line 0: [read_mu, write_mu]  (inferred from type names — add guard annotations or verify with profiling)
 
 [✓] ConnectionOptimal (src/connection.rs:22)  16B  fields=4  score=100
     (no issues found)
@@ -39,9 +38,9 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 
 ── src/stats.cpp ───────────────────────────────────────────
 
-[✗] Stats :12  96B  fields=4  score=55
-    [HIGH] False sharing: cache line 0: [read_mu, write_mu]
-    [MEDIUM] Locality: hot [read_mu, write_mu] interleaved with cold [read_count, write_count]
+[~] Stats :5  96B  fields=4  score=70
+    [LOW] False sharing: cache line 0: [read_mu, write_mu]  (inferred from type names — add guard annotations or verify with profiling)
+    [MEDIUM] Locality: hot [read_mu, write_mu] mixed with cold [read_count, write_count] on same cache line(s)  (inferred from type names — verify with profiling)
 ```
 
 ---
@@ -52,7 +51,7 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 |---|---|
 | **Padding waste** | Finds gaps from poor field ordering; shows per-gap offset and size so you know exactly where to look |
 | **Reorder suggestions** | Computes optimal declaration order; shows before/after struct size and byte savings |
-| **False sharing** | Detects concurrent fields with different guards on the same cache line; shows field names involved |
+| **False sharing** | Detects concurrent fields with different guards on the same cache line (locks, `std::atomic`, C11 `_Atomic`, Go/Rust atomics); shows field names involved. High when a guard is annotated, Medium when inferred from type names with an atomic involved, Low when inferred between lock words alone |
 | **Evidence labels** | Findings from explicit annotations are confirmed; findings from type-name inference are labeled `(inferred — verify with profiling)` |
 | **Explicit guard annotation** | `#[lock_protected_by]`, `GUARDED_BY()`, `// padlock:guard=` — converts inferred findings to confirmed |
 | **Locality** | Flags hot/cold field interleaving that hurts cache utilisation |
@@ -92,15 +91,16 @@ Analyzed 3 files, 5 structs — 26 bytes wasted across all structs
 
 ## How exact is it?
 
-Source analysis computes layouts the way the compiler would. Go files are laid out together with the rest of their package, Rust files with the rest of their crate, and C/C++ files with the headers they include (macros expanded), so types from other files are sized, not guessed. What source alone cannot know, padlock marks as **uncertain** instead of guessing silently — a type from another Go package or Rust crate, a header it cannot find, a member written as an unknown macro, a branch on an undefined project macro.
+Source analysis computes layouts the way the compiler would. Go files are laid out together with the rest of their package, Rust files with the rest of their crate, and C/C++ files with the headers they include (macros expanded), so types from other files are sized, not guessed. A Go file also reads the packages it imports — those of its module (`go.mod`, `go.work`) and the standard library — so a field typed `tspath.Path` or `ast.Kind` is sized from that package's source. What source alone cannot know, padlock marks as **uncertain** instead of guessing silently — a generic type of another Go package, a type from another Rust crate, a header it cannot find, a member written as an unknown macro, a branch on an undefined project macro.
 
 **Measured on real code** with the default `padlock analyze <path>` — no options — against the layouts the compiler actually produced (its DWARF debug info, or rustc's `-Zprint-type-sizes`). *Exact* means the struct's size matches; *flagged* means padlock got it wrong but said so; *silently wrong* is the number that matters for trusting the output:
 
 | Code | Target | Types | Exact | Flagged | Silently wrong |
 |---|---|---:|---:|---:|---:|
-| Go standard library (19 packages incl. `runtime`, `net/http`, `crypto/tls`) | linux/amd64 | 400 | 83% | 17% | **0** |
-| | linux/arm64 ¹ | 394 | 83% | 17% | **0** |
-| | linux/386 ¹ | 391 | 83% | 17% | **0** |
+| Go standard library (19 packages incl. `runtime`, `net/http`, `crypto/tls`; Go 1.27) | linux/amd64 | 708 | 95% | 5% | **0** |
+| | linux/arm64 ¹ ³ | 394 | 83% | 17% | **0** |
+| | linux/386 ¹ ³ | 391 | 83% | 17% | **0** |
+| [microsoft/TypeScript](https://github.com/microsoft/TypeScript) (the Go port; non-test structs, `go test` probes as reference) | linux/amd64 | 1201 | 94% | 6% | **0** ⁴ |
 | glibc headers (stdio, pthread, socket, signal, ucontext, elf, …) | x86_64 Linux | 153 | 91% | 9% | **0** |
 | | aarch64 Linux ¹ | 181 | 96% | 4% | **0** |
 | | riscv64 Linux ¹ | 169 | 93% | 7% | **0** |
@@ -114,7 +114,7 @@ Source analysis computes layouts the way the compiler would. Go files are laid o
 
 ¹ Cross targets need `--target`, and for C the target's headers (`-I`, here zig's bundled glibc headers).
 
-Most flagged Go types hold a type from another package (`runtime/internal/atomic`, `internal/abi`), which source analysis does not follow; use `--go-exact` for those. ² The silent cases are headers whose packing comes from the file that includes them (`mciapi.h` via `mmsystem.h`), analyzed standalone. Not yet measured on real code: macOS and Rust on 32-bit targets — for these the evidence is the conformance suite below.
+Most flagged Go types are generics of another package (`collections.Set[T]`) or hold one; use `--go-exact` for those. ² The silent cases are headers whose packing comes from the file that includes them (`mciapi.h` via `mmsystem.h`), analyzed standalone. ³ Measured before padlock read imported Go packages (0.70); the amd64 row shows the effect. ⁴ `--go-exact` does not probe types declared inside functions or generic instances; the handful of such structs are not counted. Not yet measured on real code: macOS and Rust on 32-bit targets — for these the evidence is the conformance suite below.
 
 Every change is also checked against the compilers (`gcc`, `g++`, `clang`, `rustc`, `go`, `zig`) with a conformance suite of probe structs per language — x86-64, aarch64, riscv64, i386, Cortex-M, AVR and Windows x64 for C; i386 for Go and Zig — plus differential fuzzing of random C/C++ structs (`tests/conformance/`). Differential fuzzing against g++ finds no mismatches in thousands of C++ seeds. The editor server (`padlock-lsp`) lays out the open file's live text against its Go package, Rust crate or C/C++ includes when it can find them (Go directories over 400 files are skipped), and the file alone otherwise.
 
@@ -123,7 +123,7 @@ When you need the compiler's own answer:
 | Language | Exact mode | How |
 |---|---|---|
 | C / C++ | `--compile-commands build/compile_commands.json` | Recompiles each translation unit with its own flags plus debug info and reads the layouts the compiler produced — macros, `#if` configuration, templates and platform ABI included |
-| Go | `--go-exact` | Adds a probe test to each package *virtually* (`go test -overlay`; nothing is written) and uses `reflect`'s sizes and offsets — exact even for types from other packages |
+| Go | `--go-exact` | Adds a probe test to each package *virtually* (`go test -overlay`; nothing is written) and uses `reflect`'s sizes and offsets — exact even for generics of other packages |
 | Rust | `--rust-exact` | Builds the crate once with `-Zprint-type-sizes` (via `RUSTC_BOOTSTRAP=1`, into `target/padlock-rust-exact`) and uses rustc's field order and sizes |
 | Any | `padlock analyze <binary>` | Reads DWARF (including split DWARF, type units, compressed sections), BTF or PDB from a debug build. Build with `-fno-eliminate-unused-debug-types` (gcc/clang) so unused types are described too |
 
@@ -444,6 +444,8 @@ padlock verify --binary conn.o conn.c
 # 12/12 structs match the binary's debug info
 ```
 
+C/C++ sources are read with the same headers and macros the build used: pass `-I DIR` / `-D NAME[=VALUE]`, or set `include_dirs` / `defines` in `.padlock.toml` (read from the first source's directory upward), exactly as for `analyze`. Blank Go fields (`_`) are not compared.
+
 ---
 
 ### `padlock ffi <path>…`
@@ -627,7 +629,7 @@ Two atomics updated by different threads (`std::atomic<long> produced, consumed;
 
 Fix: pad each independently-locked group (or each hot atomic) to its own cache line.
 
-Severity: **High** when a conflicting field carries a guard annotation (below); **Medium** when the guards are inferred from type names — likely, but verify with profiling before restructuring.
+Severity: **High** when a conflicting field carries a guard annotation (below); **Medium** when the guards are inferred from type names and an atomic is involved (independently updated atomics bounce the line on every write); **Low** when the inferred conflict is between lock words alone (two mutexes side by side only hurt when both are contended at the same moment). Inferred findings are likely but unconfirmed — verify with profiling before restructuring.
 
 #### Explicit guard annotation
 
@@ -1069,8 +1071,8 @@ padlock is a **layout waste detector and optimizer**. It focuses on padding, fie
 | Rust stdlib | `RefCell<T>` — modelled as `isize` borrow counter + `UnsafeCell<T>` at aligned offset | |
 | Rust stdlib | Transparent newtypes: `Cell<T>`, `MaybeUninit<T>`, `UnsafeCell<T>`, `Wrapping<T>`, `Saturating<T>`, `ManuallyDrop<T>` | sized as inner `T` |
 | Rust stdlib | Niche-optimized options: `Option<NonZeroU8/I8>` – `Option<NonZeroUsize/Isize>`, `Option<&T>`, `Option<&mut T>`, `Option<Box<T>>`, `Option<NonNull<T>>`, `Option<Arc<T>>`, `Option<Rc<T>>` | sized as inner type — no extra discriminant byte |
-| Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words), `complex128`, locally-declared named interfaces | qualified cross-package types (e.g. `io.Reader`) flagged as uncertain |
-| Go stdlib | `sync.Mutex` (8B), `sync.RWMutex` (24B), `sync.Once` (12B), `sync.WaitGroup` (12B), `sync.Map` (32B), `time.Time` (24B), `atomic.Bool`/`Int32`/`Uint32` (4B), `atomic.Int64`/`Uint64` (8B), `atomic.Value` (16B), `strings.Builder` (32B), `bytes.Buffer` (40B) | stable under Go 1 compatibility guarantee |
+| Go | All primitives, `string` (2 words), `[]T` slices (3 words), `map[K]V` (1 word), `chan T` (1 word), `error`/`interface{}`/`any` (2 words), `complex128`, locally-declared named interfaces; types of imported packages of the module or the standard library, read from their source | generic types of other packages flagged as uncertain |
+| Go stdlib | `sync.Mutex` (8B), `sync.RWMutex` (24B), `sync.Once` (12B), `sync.WaitGroup` (12B), `sync.Map` (48B with Go 1.24+, 32B before — follows the installed toolchain), `time.Time` (24B), `atomic.Bool`/`Int32`/`Uint32` (4B), `atomic.Int64`/`Uint64` (8B), `atomic.Value` (16B), `strings.Builder` (32B), `bytes.Buffer` (40B) | stable under Go 1 compatibility guarantee, except `sync.Map`; used only when the file imports the standard package of that name (`internal/runtime/atomic.Bool` is 1B, `sync/atomic.Bool` 4B) |
 | Zig | All standard integer/float types, C interop types (`c_int`, `c_uint`, `c_long`, etc.), arbitrary-width integers (`u1`–`u65535`, `i1`–`i65535`) | in `packed struct`, arbitrary-width fields occupy exact bits; total = `ceil(bits/8)`; in normal structs, `ceil(N/8)` bytes aligned to next power-of-two; comptime-only field types (`type`, `anytype`, `comptime_int`, `comptime_float`) are flagged as uncertain; regular Zig structs (not `extern`/`packed`) have implementation-defined field order — findings are downgraded one severity level (like Rust `repr(Rust)`) |
 
 ### What source analysis skips (instead of showing wrong data)

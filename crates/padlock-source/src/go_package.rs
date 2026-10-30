@@ -1041,4 +1041,26 @@ mod tests {
         assert_eq!(n("gopkg.in/yaml.v3"), "yaml");
         assert_eq!(n("github.com/x/go-foo"), "foo");
     }
+
+    #[test]
+    fn a_package_named_like_a_std_one_is_not_given_the_std_size() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("go.mod"), "module example.com/m\n\ngo 1.24\n").unwrap();
+        std::fs::create_dir_all(root.join("internal/atomic")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        // sync/atomic.Bool is 4 bytes; this one is 1.
+        std::fs::write(
+            root.join("internal/atomic/a.go"),
+            "package atomic\n\ntype Bool struct{ u uint8 }\n",
+        )
+        .unwrap();
+        let path = root.join("b/b.go");
+        let src = "package b\n\nimport \"example.com/m/internal/atomic\"\n\ntype S struct {\n\ta atomic.Bool\n\tb bool\n}\n";
+        std::fs::write(&path, src).unwrap();
+        let layouts = parse_in_package(&path, src, &padlock_core::arch::X86_64_SYSV).unwrap();
+        let s = layouts.iter().find(|l| l.name == "S").unwrap();
+        assert_eq!(s.total_size, 2);
+        assert!(s.uncertain_fields.is_empty());
+    }
 }

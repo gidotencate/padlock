@@ -25,7 +25,11 @@ Found by checking mimalloc (C), typescript-go and microsoft/go against gcc's DWA
 - **C: `_Atomic(T)` / `_Atomic T` fields were not treated as atomics**, so C11 code (mimalloc) could never get a false-sharing finding; they are now, and a field's displayed type reads `_Atomic uint64_t`.
 - **False sharing between locks alone is Low** (inferred from type names: two mutexes side by side only hurt when both are contended at once); it stays Medium when an atomic is involved and High when a guard is annotated. On microsoft/TypeScript 7 of 18 inferred findings move to Low, on microsoft/go 6 of 53; mimalloc goes from 0 to 9 (all involving atomics).
 
+- **Go: standard-library sizes are used only for the standard package.** `atomic.Bool` is 4 bytes in `sync/atomic` but 1 in `internal/runtime/atomic`; inside the runtime the hardcoded 4 produced silently wrong sizes (`g`, `mOS`, `gcCPULimiterState`).
+- **`padlock verify` skips blank Go fields (`_`)**: several share the name and were compared with the first one's offset.
+
 ### Measured
+- Go standard library, 19 packages (708 types, Go 1.27, linux/amd64, `go test -c` DWARF as reference): 95% exact, 5% flagged, 0 silently wrong; the previous build gave 81% / 18% / 5 silent.
 - microsoft/TypeScript (the Go port; 1201 non-test structs compared with `go test` via `--go-exact`): 1125 sizes match without `--go-exact`, up from 825. 1090 structs are not flagged uncertain (up from 674) and every one that `go test` can probe matches; 111 remain flagged (generics of other packages such as `collections.Set[T]`).
 
 ## [0.70.0] — 2026-10-25

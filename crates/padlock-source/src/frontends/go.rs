@@ -690,7 +690,7 @@ fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
     if let Some((pkg, name)) = ty.split_once('.')
         && is_go_ident(pkg)
         && is_go_ident(name)
-        && !is_known_external_go_type(ty)
+        && (!is_known_external_go_type(ty) || known_type_is_shadowed(ty, ctx))
         && let (Some(dir), Some(path)) = (&ctx.pkg_dir, ctx.imports.get(pkg))
         && let Some(f) = isolated(|| crate::go_package::foreign_type(dir, path, name, ctx.arch))
     {
@@ -721,7 +721,9 @@ fn go_field_size(ty: &str, ctx: &GoCtx, depth: u8) -> Sized {
         || base.starts_with("chan ")
         || base.starts_with("<-chan ")
         || base.starts_with("func(");
-    let uncertain = (!fixed_shape && base.contains('.') && !is_known_external_go_type(base))
+    let uncertain = (!fixed_shape
+        && base.contains('.')
+        && (!is_known_external_go_type(base) || known_type_is_shadowed(base, ctx)))
         // A bare name that is neither predeclared nor declared in the package
         // (e.g. a type from a file excluded by build constraints).
         || (base.chars().all(|c| c.is_alphanumeric() || c == '_')
@@ -777,6 +779,40 @@ fn isolated<R>(f: impl FnOnce() -> R) -> R {
     PENDING_ANON.with(|p| *p.borrow_mut() = pending);
     ANON_FILE_TAG.with(|t| t.set(tag));
     result
+}
+
+/// Import path each package name of [`is_known_external_go_type`] stands for.
+fn std_import_path(pkg: &str) -> Option<&'static str> {
+    Some(match pkg {
+        "sync" => "sync",
+        "atomic" => "sync/atomic",
+        "time" => "time",
+        "strings" => "strings",
+        "bytes" => "bytes",
+        "io" => "io",
+        "fmt" => "fmt",
+        "context" => "context",
+        "reflect" => "reflect",
+        "sort" => "sort",
+        "net" => "net",
+        "http" => "net/http",
+        "driver" => "database/sql/driver",
+        "slog" => "log/slog",
+        _ => return None,
+    })
+}
+
+/// `atomic.Bool` is 4 bytes in `sync/atomic` but 1 in `internal/runtime/atomic`:
+/// when the file imports a different package under the name of one of the
+/// standard types padlock knows, the known size does not apply.
+fn known_type_is_shadowed(ty: &str, ctx: &GoCtx) -> bool {
+    let Some((pkg, _)) = ty.split_once('.') else {
+        return false;
+    };
+    match (ctx.imports.get(pkg), std_import_path(pkg)) {
+        (Some(imported), Some(std)) => imported != std,
+        _ => false,
+    }
 }
 
 fn is_go_ident(s: &str) -> bool {

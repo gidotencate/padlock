@@ -43,12 +43,13 @@ struct CacheEntry {
 fn cache_fingerprint() -> String {
     let defines: Vec<String> = padlock_source::preprocessor_defines_fingerprint();
     format!(
-        "{}|{}|{:?}|{:?}|{}|{}|{}/{}|{}",
+        "{}|{}|{:?}|{:?}|{}|{}|{}|{}/{}|{}",
         env!("CARGO_PKG_VERSION"),
         defines.join(","),
         padlock_source::include_dirs(),
         padlock_source::cpp_stdlib(),
         padlock_source::declared_order(),
+        padlock_source::follow_dependencies(),
         padlock_source::configured_instantiations_fingerprint().join(";"),
         crate::paths::source_arch().name,
         crate::paths::source_arch().pointer_size,
@@ -190,6 +191,13 @@ fn file_mtime(path: &Path) -> Option<u64> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         return Some(own.max(newest));
+    }
+    // A Zig file is laid out with the files it imports.
+    if path.extension().is_some_and(|e| e == "zig")
+        && let Some(t) = padlock_source::zig_imports_newest_mtime(path, crate::paths::source_arch())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+    {
+        return Some(own.max(t.as_secs()));
     }
     // A Go file is laid out with the other files of its package, so an edit,
     // addition or removal of a sibling `.go` file invalidates it too.

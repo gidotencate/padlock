@@ -12,6 +12,7 @@ jobs:
   auto-merge:
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    timeout-minutes: 75
     steps:
       - name: Dependabot metadata
         id: metadata
@@ -26,12 +27,33 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr comment "$PR_URL" --body "Major version bump — not auto-merging, needs manual review."
 
-      - name: Wait for required checks
+      - name: Wait for the other checks
         if: steps.metadata.outputs.update-type != 'version-update:semver-major'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr checks "$PR_URL" --watch --interval 15
+        # `gh pr checks --watch` would also wait for this very job (it stays
+        # pending while the step runs), so poll the other checks ourselves.
+        run: |
+          for _ in $(seq 1 120); do
+            checks=$(gh pr checks "$PR_URL" --json name,bucket \
+              --jq '[.[] | select(.name != "auto-merge")]')
+            failed=$(jq '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length' <<<"$checks")
+            pending=$(jq '[.[] | select(.bucket == "pending")] | length' <<<"$checks")
+            # CI registers its jobs a little after the PR opens: wait for the main ones.
+            seen=$(jq '[.[] | select(.name == "Lint" or .name == "Test (ubuntu-latest)")] | length' <<<"$checks")
+            if [ "$failed" -gt 0 ]; then
+              echo "A check failed:"; jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | .name' <<<"$checks"
+              exit 1
+            fi
+            if [ "$seen" -ge 2 ] && [ "$pending" -eq 0 ]; then
+              echo "All checks passed."
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Timed out waiting for checks."
+          exit 1
 
       - name: Merge patch/minor updates
         if: steps.metadata.outputs.update-type != 'version-update:semver-major'

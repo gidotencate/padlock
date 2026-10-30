@@ -119,7 +119,11 @@ pub fn run_against(paths: &[PathBuf], git_ref: &str, filter: Option<&str>) -> an
         // simply older than its introduction) has no old content — every
         // struct in it will correctly show up as added, below.
         if let Some(old_source) = git_show(&repo_root, git_ref, file)?
-            && let Ok(layouts) = padlock_source::parse_source_str(
+            // The old text with the working tree's other files as context, so a
+            // struct is not reported as changed merely because its old version
+            // was sized without the types it uses from elsewhere.
+            && let Ok(layouts) = padlock_source::parse_source_text(
+                file,
                 &old_source,
                 &padlock_source::detect_language_from_source(file, &old_source).unwrap_or(lang),
                 arch,

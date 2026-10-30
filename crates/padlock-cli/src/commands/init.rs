@@ -51,6 +51,11 @@ const TEMPLATE: &str = r#"# .padlock.toml — padlock project configuration
 # Show repr(Rust) / plain Zig structs in source order instead of compiler order.
 # declared_order = false
 
+# Also resolve types from dependencies outside the project (Rust path
+# dependencies beyond the workspace or in a git submodule, Zig imports outside
+# the package). Off by default so third-party code never affects the analysis.
+# follow_deps = false
+
 # [instantiate]
 # Generic types to analyze with these arguments, besides those used in the code.
 # Buf  = ["char, 8", "int"]       # C++ Buf<char, 8>, Buf<int>

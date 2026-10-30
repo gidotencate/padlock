@@ -2,6 +2,58 @@
 
 All notable changes to padlock are documented here.
 
+## [0.80.0] — 2026-10-30
+
+### Fixed
+- **`padlock fix` (and the LSP reorder action) deleted a Rust field behind a disabled `#[cfg]`.** Since 0.73.0 such a field is not in the layout, and the rewrite is built from the layout. A struct whose source has fields the layout lacks is now left unchanged, with a note; `fix` says "nothing rewritten" instead of "Rewrote 1 struct(s)".
+- **`padlock diff --against` reported a struct as changed because its old version was sized without the types it uses from other files.** The old text is now parsed with the working tree's other files as context, as the new side is (this also covers Go packages and C includes).
+
+### Changed
+- The "uncertain field size(s)" note for Rust and Zig files mentions `--follow-deps`.
+
+### Docs
+- README: modules and dependencies row, `--follow-deps`, `follow_deps` in the config example.
+
+## [0.79.0] — 2026-10-30
+
+### Changed
+- **Rust: a path dependency is parsed once and shared.** Every crate of a workspace used to re-parse the sources of all crates it depends on, so a core crate was read once per dependent (analyzing padlock's own `crates/` took 0.30 s and 160 MB). Dependencies are now built through the crate cache — keyed by the dependency's directory, so crates of one workspace and checkouts of the same submodule share one parse — and a dependent starts from their declarations and resolved layouts (0.19 s, 98 MB; same results). A crate reached through two paths is no longer counted as a name conflict.
+
+### Fixed
+- **Rust: sibling crates of a workspace without `[workspace.dependencies]` were treated as external** (and so skipped without `--follow-deps`); the workspace root is now found from its `[workspace]` table alone.
+
+## [0.78.0] — 2026-10-30
+
+### Added
+- **Rust: `tests/`, `examples/`, `benches/` and `build.rs` see the package's library.** These files are crates of their own that name the library's types (`use mycrate::Config`); they were analyzed alone, so those fields were guessed. They are now laid out with the library's declarations in scope (the library's own structs are not repeated in their report).
+
+## [0.77.0] — 2026-10-30
+
+### Added
+- **Rust: `use` items and qualified paths pick the file for a name declared in several files.** A crate's module tree (file locations, `mod.rs`, `src/bin/*`, `#[path = "…"] mod`) is built, and `use crate::a::Config;`, `a::Config`, `super::Config`, glob imports and `pub use` re-exports are resolved against it, so `a::Config` and `b::Config` are each sized from their own file. A file naming both candidates, a renamed import (`as`), or an extern crate stays unknown (uncertain).
+
+## [0.76.0] — 2026-10-30
+
+### Added
+- **Zig: `@import("file.zig")` is resolved.** `const a = @import("a.zig"); … a.Config` is sized from the imported file (recursively, cycles cut, cached per file; `build.zig` `addModule("name", …)` modules are followed too) and no longer uncertain. `std.mem.Allocator` (two words) is known. The LSP and the CLI parse cache use the same resolution.
+- **`--follow-deps` also covers Zig:** an import outside the package (the nearest `build.zig` directory) or inside a nested git repository is followed only with it.
+
+## [0.75.0] — 2026-10-30
+
+### Added
+- **Rust: path dependencies are part of the crate's context.** `dep = { path = "../x" }` (and `dep = { workspace = true }` with a path in `[workspace.dependencies]`) are followed transitively; their types size fields of the analyzed crate, and their files invalidate the parse cache. The crate's own types shadow a dependency's of the same name.
+- **`--follow-deps` / `follow_deps = true`** (`.padlock.toml`, off by default): a path dependency outside the workspace, or inside a nested git repository (submodule, vendored checkout), is followed only when this is set, so third-party repositories never change an analysis unasked.
+
+## [0.74.0] — 2026-10-30
+
+### Fixed
+- **Rust: a name declared in several files of a crate resolves per file.** A file now sees its own declaration of `Config` instead of the name being dropped crate-wide; elsewhere it stays unknown (uncertain), as before.
+
+## [0.73.0] — 2026-10-30
+
+### Added
+- **Rust: `#[cfg(...)]` is evaluated for the target.** Structs, enums, aliases, consts, fields and variants whose predicate is known false (`target_pointer_width`, `target_arch`, `target_endian`, `target_os`, `unix`, `windows`, `test`, `all`/`any`/`not`) are dropped before analysis, so `#[cfg(target_pointer_width = "32")] struct X` is no longer laid out on a 64-bit target. Predicates padlock cannot decide (`feature = "…"`, `target_os` on a bare `x86_64`) keep the item, as before.
+
 ## [0.72.0] — 2026-10-30
 
 ### Fixed
@@ -924,11 +976,6 @@ Found via a deliberate audit of the scorer's internal consistency, verified agai
   - `cache.rs`: nested `if let Some(dir)` / `if err` collapsed to let-chain
   - `commands/analyze.rs`: 8-argument `run` refactored — output and arch options moved into `AnalyzeOpts` struct, bringing the function back under the 7-argument limit
 
-## [0.7.2] — 2026-04-11
-
-### Fixed
-- `cargo fmt`: long-line reformatting in `go.rs` and `rust.rs`
-
 ## [0.8.0] — 2026-04-11
 
 ### Added
@@ -940,6 +987,11 @@ Found via a deliberate audit of the scorer's internal consistency, verified agai
 - **Cache-line boundary markers in `explain`**: when a struct's fields span more than one cache line, `padlock explain` inserts a visual separator row (`╞── cache line N (offset O) ════╡`) at each boundary. Single-cache-line structs show no separator.
 - **Parallel file parsing**: directory walks now parse source files in parallel using `rayon`, significantly reducing wall-clock time on large codebases.
 - **On-disk parse cache**: unchanged source files are served from `.padlock-cache/layouts.json` (keyed by path + mtime) and skipped on repeat runs. The cache is silently invalidated on mtime change and ignored if corrupt. Binary and DWARF paths bypass the cache.
+
+## [0.7.2] — 2026-04-11
+
+### Fixed
+- `cargo fmt`: long-line reformatting in `go.rs` and `rust.rs`
 
 ## [0.7.1] — 2026-04-11
 

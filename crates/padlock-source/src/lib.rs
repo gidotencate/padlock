@@ -7,6 +7,8 @@ pub mod fixgen;
 pub mod frontends;
 mod go_package;
 mod rust_crate;
+mod rust_modules;
+mod zig_imports;
 pub use c_includes::{include_dirs, set_include_dirs};
 
 use std::collections::HashMap;
@@ -60,6 +62,15 @@ pub fn rust_crate_root(path: &Path) -> Option<PathBuf> {
     rust_crate::crate_root(path)
 }
 
+/// Newest mtime among a Zig file and the files it imports (transitively); a
+/// Zig file's parse depends on all of them.
+pub fn zig_imports_newest_mtime(
+    path: &Path,
+    arch: &'static ArchConfig,
+) -> Option<std::time::SystemTime> {
+    zig_imports::newest_mtime(path, arch)
+}
+
 /// Newest mtime among the source files of the crate rooted at `root`; a Rust
 /// file's parse depends on all of them.
 pub fn rust_crate_newest_mtime(root: &Path) -> Option<std::time::SystemTime> {
@@ -103,6 +114,42 @@ pub fn set_declared_order(on: bool) {
 /// Whether `set_declared_order(true)` is in effect.
 pub fn declared_order() -> bool {
     DECLARED_ORDER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static FOLLOW_DEPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Also resolve types from code outside the project: Rust path dependencies
+/// that live outside the workspace or in a git submodule, Zig imports that
+/// leave the package or sit in a submodule. Off by default, so vendored or
+/// third-party repositories never influence (or slow down) an analysis.
+/// Process-global.
+pub fn set_follow_dependencies(on: bool) {
+    bump_settings_generation();
+    FOLLOW_DEPS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `set_follow_dependencies(true)` is in effect.
+pub fn follow_dependencies() -> bool {
+    FOLLOW_DEPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True when `path` lies outside `boundary`, or inside a nested git repository
+/// (a submodule or vendored checkout) below it.
+pub(crate) fn is_external(path: &Path, boundary: &Path) -> bool {
+    if !path.starts_with(boundary) {
+        return true;
+    }
+    let mut cur = path;
+    while cur != boundary {
+        if cur.join(".git").exists() {
+            return true;
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    false
 }
 
 /// Put the fields of a struct whose order the compiler chooses (`is_repr_rust`:
@@ -414,7 +461,7 @@ pub fn parse_source(path: &Path, arch: &'static ArchConfig) -> anyhow::Result<Pa
         SourceLanguage::C | SourceLanguage::Cpp => {
             c_includes::parse_with_includes(path, &source, &lang, arch)
         }
-        _ => None,
+        SourceLanguage::Zig => zig_imports::parse_with_imports(path, &source, arch),
     };
     let mut layouts = match package {
         Some(layouts) => finish_layouts(&source, &lang, layouts?),
@@ -449,7 +496,7 @@ pub fn parse_source_text(
         SourceLanguage::C | SourceLanguage::Cpp => {
             c_includes::parse_with_includes(path, text, lang, arch)
         }
-        SourceLanguage::Zig => None,
+        SourceLanguage::Zig => zig_imports::parse_with_imports(path, text, arch),
     };
     match with_context {
         Some(layouts) => Ok(finish_layouts(text, lang, layouts?)),

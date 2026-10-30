@@ -303,4 +303,34 @@ mod tests {
             uses.uncertain_fields
         );
     }
+
+    fn crate_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        for (name, text) in files {
+            std::fs::write(src.join(name), text).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn cfg_disabled_definition_is_ignored() {
+        let dir = crate_dir(&[(
+            "lib.rs",
+            "#[cfg(target_pointer_width = \"32\")]\npub struct Handle { pub a: u32 }\n\
+             #[cfg(target_pointer_width = \"64\")]\npub struct Handle { pub a: u64 }\n\
+             pub struct Uses { pub h: Handle, pub f: u8 }\n",
+        )]);
+        let lib = dir.path().join("src/lib.rs");
+        let text = std::fs::read_to_string(&lib).unwrap();
+        let l = parse_in_crate(&lib, &text, &X86_64_SYSV).unwrap();
+        let uses = l.iter().find(|l| l.name == "Uses").unwrap();
+        assert_eq!(uses.total_size, 16, "{:?}", uses.fields);
+    }
 }

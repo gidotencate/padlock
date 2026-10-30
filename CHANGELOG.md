@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.73.0] — 2026-10-30
+
+### Added
+- **Rust: `#[cfg(...)]` is evaluated for the target.** Structs, enums, aliases, consts, fields and variants whose predicate is known false (`target_pointer_width`, `target_arch`, `target_endian`, `target_os`, `unix`, `windows`, `test`, `all`/`any`/`not`) are dropped before analysis, so `#[cfg(target_pointer_width = "32")] struct X` is no longer laid out on a 64-bit target. Predicates padlock cannot decide (`feature = "…"`, `target_os` on a bare `x86_64`) keep the item, as before.
+
 ## [0.72.0] — 2026-10-30
 
 ### Fixed

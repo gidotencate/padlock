@@ -1617,7 +1617,8 @@ pub(crate) fn parse_rust_in_ctx(
     source: &str,
     mut ctx: RustCtx,
 ) -> anyhow::Result<Vec<StructLayout>> {
-    let file: syn::File = syn::parse_str(source)?;
+    let mut file: syn::File = syn::parse_str(source)?;
+    super::rust_cfg::strip_disabled(&mut file, ctx.arch);
     let mut collector = ItemCollector {
         ctx: &mut ctx,
         generic_params: Vec::new(),
@@ -1676,7 +1677,11 @@ pub(crate) fn parse_rust_crate(
 ) -> (Vec<Vec<StructLayout>>, RustCtx) {
     let parsed: Vec<Option<syn::File>> = files
         .iter()
-        .map(|(_, src)| syn::parse_str::<syn::File>(src).ok())
+        .map(|(_, src)| {
+            let mut f = syn::parse_str::<syn::File>(src).ok()?;
+            super::rust_cfg::strip_disabled(&mut f, arch);
+            Some(f)
+        })
         .collect();
     let mut seen_in: HashMap<String, usize> = HashMap::new();
     for f in parsed.iter().flatten() {

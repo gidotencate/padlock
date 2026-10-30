@@ -109,12 +109,7 @@ fn build_with_ctx(signature: Signature, arch: &'static ArchConfig) -> (Crate, Ru
         }
         all.extend(layouts);
     }
-    crate::resolve_nested_structs(&mut all);
-    let mut layouts: HashMap<PathBuf, Vec<StructLayout>> = HashMap::new();
-    for l in all {
-        let key = PathBuf::from(l.source_file.clone().unwrap_or_default());
-        layouts.entry(key).or_default().push(l);
-    }
+    let layouts = resolve_per_file(all, ctx.ambiguous_names());
     // Skip notes are not attributed per file by the crate-wide parse; keep
     // them with the crate's first file so they are reported once.
     let mut skipped = HashMap::new();
@@ -129,6 +124,70 @@ fn build_with_ctx(signature: Signature, arch: &'static ArchConfig) -> (Crate, Ru
         },
         ctx,
     )
+}
+
+/// Group layouts by file and size nested types. A name declared in several
+/// files (`ambiguous`) means different things in each, so a file is resolved
+/// against its own layouts plus the unambiguous ones it reaches; an ambiguous
+/// name declared elsewhere stays unresolved (and so uncertain).
+fn resolve_per_file(
+    mut all: Vec<StructLayout>,
+    ambiguous: &std::collections::HashSet<String>,
+) -> HashMap<PathBuf, Vec<StructLayout>> {
+    let mut layouts: HashMap<PathBuf, Vec<StructLayout>> = HashMap::new();
+    if ambiguous.is_empty() {
+        crate::resolve_nested_structs(&mut all);
+        for l in all {
+            let key = PathBuf::from(l.source_file.clone().unwrap_or_default());
+            layouts.entry(key).or_default().push(l);
+        }
+        return layouts;
+    }
+    for l in all {
+        let key = PathBuf::from(l.source_file.clone().unwrap_or_default());
+        layouts.entry(key).or_default().push(l);
+    }
+    let pool: HashMap<String, StructLayout> = layouts
+        .values()
+        .flatten()
+        .filter(|l| !ambiguous.contains(&l.name))
+        .map(|l| (l.name.clone(), l.clone()))
+        .collect();
+    let referenced = |l: &StructLayout| -> Vec<String> {
+        l.fields
+            .iter()
+            .filter_map(|f| match &f.ty {
+                padlock_core::ir::TypeInfo::Primitive { name, .. }
+                | padlock_core::ir::TypeInfo::Opaque { name, .. } => {
+                    Some(crate::split_c_array_suffix(name).0.to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    for own in layouts.values_mut() {
+        let n = own.len();
+        let own_names: std::collections::HashSet<String> =
+            own.iter().map(|l| l.name.clone()).collect();
+        let mut work: Vec<StructLayout> = own.clone();
+        let mut seen = own_names.clone();
+        let mut next = 0;
+        while next < work.len() {
+            for name in referenced(&work[next]) {
+                if !seen.contains(&name)
+                    && let Some(l) = pool.get(&name)
+                {
+                    seen.insert(name);
+                    work.push(l.clone());
+                }
+            }
+            next += 1;
+        }
+        crate::resolve_nested_structs(&mut work);
+        work.truncate(n);
+        *own = work;
+    }
+    layouts
 }
 
 fn crate_for(root: &Path, arch: &'static ArchConfig) -> Option<Arc<Crate>> {
@@ -317,6 +376,32 @@ mod tests {
             std::fs::write(src.join(name), text).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn same_name_in_two_files_resolves_per_file() {
+        let dir = crate_dir(&[
+            ("lib.rs", "mod a;\nmod b;\n"),
+            (
+                "a.rs",
+                "pub struct Config { pub x: u64 }\npub struct UsesA { pub c: Config, pub f: u8 }\n",
+            ),
+            (
+                "b.rs",
+                "pub struct Config { pub x: u8, pub y: u8 }\npub struct UsesB { pub c: Config, pub f: u8 }\n",
+            ),
+        ]);
+        let get = |file: &str, name: &str| {
+            let p = dir.path().join("src").join(file);
+            let text = std::fs::read_to_string(&p).unwrap();
+            let l = parse_in_crate(&p, &text, &X86_64_SYSV).unwrap();
+            l.into_iter().find(|l| l.name == name).unwrap()
+        };
+        let a = get("a.rs", "UsesA");
+        let b = get("b.rs", "UsesB");
+        assert_eq!(a.total_size, 16, "{:?}", a.fields);
+        assert_eq!(b.total_size, 3, "{:?}", b.fields);
+        assert!(a.uncertain_fields.is_empty() && b.uncertain_fields.is_empty());
     }
 
     #[test]

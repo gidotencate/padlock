@@ -81,9 +81,17 @@ pub(crate) struct RustCtx {
     /// Non-generic fieldless enums without explicit discriminants:
     /// `(size in bytes, variant count)` — enough to size `Option` of them.
     local_enums: HashMap<String, (usize, u128)>,
+    /// Names declared in more than one file of the crate. Each file sees only
+    /// its own declaration of such a name; elsewhere it stays unknown.
+    ambiguous: HashSet<String>,
 }
 
 impl RustCtx {
+    /// Names declared in more than one file of a crate (see `parse_rust_crate`).
+    pub(crate) fn ambiguous_names(&self) -> &HashSet<String> {
+        &self.ambiguous
+    }
+
     fn new(arch: &'static ArchConfig) -> Self {
         RustCtx {
             arch,
@@ -97,6 +105,7 @@ impl RustCtx {
             generic_structs: HashSet::new(),
             uses: Vec::new(),
             local_enums: HashMap::new(),
+            ambiguous: HashSet::new(),
         }
     }
 }
@@ -1666,10 +1675,88 @@ fn declared_names(file: &syn::File) -> HashSet<String> {
     names.0
 }
 
+/// One file's own declarations of the names the crate declares more than once.
+#[derive(Default)]
+struct Fragment {
+    consts: HashMap<String, String>,
+    aliases: HashMap<String, Type>,
+    local_types: HashSet<String>,
+    local_structs: HashMap<String, LocalStruct>,
+    generic_structs: HashSet<String>,
+    local_enums: HashMap<String, (usize, u128)>,
+}
+
+impl Fragment {
+    fn of(file: &syn::File, ambiguous: &HashSet<String>, arch: &'static ArchConfig) -> Self {
+        let mut scratch = RustCtx::new(arch);
+        ItemCollector {
+            ctx: &mut scratch,
+            generic_params: Vec::new(),
+        }
+        .visit_file(file);
+        let keep = |n: &String| ambiguous.contains(n);
+        Fragment {
+            consts: scratch
+                .consts
+                .into_iter()
+                .filter(|(n, _)| keep(n))
+                .collect(),
+            aliases: scratch
+                .aliases
+                .into_iter()
+                .filter(|(n, _)| keep(n))
+                .collect(),
+            local_types: scratch.local_types.into_iter().filter(keep).collect(),
+            local_structs: scratch
+                .local_structs
+                .into_iter()
+                .filter(|(n, _)| keep(n))
+                .collect(),
+            generic_structs: scratch.generic_structs.into_iter().filter(keep).collect(),
+            local_enums: scratch
+                .local_enums
+                .into_iter()
+                .filter(|(n, _)| keep(n))
+                .collect(),
+        }
+    }
+
+    fn names(&self) -> impl Iterator<Item = &String> {
+        self.consts
+            .keys()
+            .chain(self.aliases.keys())
+            .chain(self.local_types.iter())
+            .chain(self.local_structs.keys())
+            .chain(self.generic_structs.iter())
+            .chain(self.local_enums.keys())
+    }
+
+    fn install(&self, ctx: &mut RustCtx) {
+        ctx.consts.extend(self.consts.clone());
+        ctx.aliases.extend(self.aliases.clone());
+        ctx.local_types.extend(self.local_types.iter().cloned());
+        ctx.local_structs.extend(self.local_structs.clone());
+        ctx.generic_structs
+            .extend(self.generic_structs.iter().cloned());
+        ctx.local_enums.extend(self.local_enums.clone());
+        ctx.struct_sizes.borrow_mut().clear();
+    }
+
+    fn forget(ctx: &mut RustCtx, n: &str) {
+        ctx.consts.remove(n);
+        ctx.aliases.remove(n);
+        ctx.local_types.remove(n);
+        ctx.local_structs.remove(n);
+        ctx.generic_structs.remove(n);
+        ctx.local_enums.remove(n);
+    }
+}
+
 /// Lay out every file of a crate together: each file sees the structs, enums,
 /// aliases and consts of all the others, so a field typed with a type from
 /// another module is sized. A name declared in more than one file is
-/// ambiguous without a module resolver and stays unknown (and so uncertain).
+/// ambiguous: each file sees only its own declaration of it, and elsewhere it
+/// stays unknown (and so uncertain).
 /// Returns the layouts per input file, in order (empty for unparsable files).
 pub(crate) fn parse_rust_crate(
     files: &[(String, String)],
@@ -1710,19 +1797,32 @@ pub(crate) fn parse_rust_crate(
                 .any(|w| params.iter().any(|p| p == w))
         })
     });
+    // A name declared in several files: remember each file's own declaration,
+    // drop the name crate-wide, and give a file back its own while it is visited.
+    let fragments: Vec<Fragment> = if ambiguous.is_empty() {
+        Vec::new()
+    } else {
+        parsed
+            .iter()
+            .map(|f| match f {
+                Some(f) => Fragment::of(f, &ambiguous, arch),
+                None => Fragment::default(),
+            })
+            .collect()
+    };
     for n in &ambiguous {
-        ctx.consts.remove(n);
-        ctx.aliases.remove(n);
-        ctx.local_types.remove(n);
-        ctx.local_structs.remove(n);
-        ctx.generic_structs.remove(n);
+        Fragment::forget(&mut ctx, n);
     }
+    ctx.struct_sizes.borrow_mut().clear();
     let mut out = Vec::with_capacity(files.len());
-    for ((_, source), file) in files.iter().zip(&parsed) {
+    for (i, ((_, source), file)) in files.iter().zip(&parsed).enumerate() {
         let Some(file) = file else {
             out.push(Vec::new());
             continue;
         };
+        if let Some(fragment) = fragments.get(i) {
+            fragment.install(&mut ctx);
+        }
         let mut visitor = StructVisitor {
             ctx,
             layouts: Vec::new(),
@@ -1733,8 +1833,15 @@ pub(crate) fn parse_rust_crate(
             ctx: back, layouts, ..
         } = visitor;
         ctx = back;
+        if let Some(fragment) = fragments.get(i) {
+            for n in fragment.names() {
+                Fragment::forget(&mut ctx, n);
+            }
+            ctx.struct_sizes.borrow_mut().clear();
+        }
         out.push(layouts);
     }
+    ctx.ambiguous = ambiguous;
     (out, ctx)
 }
 

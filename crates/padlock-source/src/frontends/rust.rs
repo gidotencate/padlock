@@ -53,6 +53,52 @@ pub fn extract_guard_from_attrs(attrs: &[syn::Attribute]) -> Option<String> {
 /// A local struct's fields, `repr(packed(N))`, `repr(align(N))` and whether it is `repr(Rust)`.
 type LocalStruct = (Vec<(String, Type)>, Option<usize>, Option<usize>, bool);
 
+/// A `RustCtx`'s declarations as plain strings: `Send + Sync`, so a crate's
+/// declarations can sit in the process-wide crate cache and seed the context of
+/// every crate that depends on it (syn types cannot cross threads).
+#[derive(Clone, Default)]
+pub(crate) struct CtxSnapshot {
+    consts: HashMap<String, String>,
+    aliases: HashMap<String, String>,
+    local_types: HashSet<String>,
+    #[allow(clippy::type_complexity)]
+    local_structs: HashMap<String, (Vec<(String, String)>, Option<usize>, Option<usize>, bool)>,
+    generic_structs: HashSet<String>,
+    local_enums: HashMap<String, (usize, u128)>,
+    uses: Vec<(String, Vec<String>)>,
+}
+
+impl CtxSnapshot {
+    /// Every name declared in the snapshot with a text of its definition, so
+    /// two snapshots can be told to agree (one crate reached by two paths) or
+    /// not (two crates using the same name for different things).
+    pub(crate) fn definitions(&self) -> HashMap<String, String> {
+        let mut out: HashMap<String, String> = HashMap::new();
+        let mut add = |name: &String, what: String| {
+            out.entry(name.clone()).or_default().push_str(&what);
+        };
+        for (k, v) in &self.consts {
+            add(k, format!("c:{v};"));
+        }
+        for (k, v) in &self.aliases {
+            add(k, format!("a:{v};"));
+        }
+        for k in &self.local_types {
+            add(k, "t;".to_string());
+        }
+        for (k, v) in &self.local_structs {
+            add(k, format!("s:{v:?};"));
+        }
+        for k in &self.generic_structs {
+            add(k, "g;".to_string());
+        }
+        for (k, v) in &self.local_enums {
+            add(k, format!("e:{v:?};"));
+        }
+        out
+    }
+}
+
 /// What a pre-pass over the file learns about its own items, so field types can be
 /// sized without a type checker.
 #[derive(Clone)]
@@ -95,12 +141,79 @@ impl RustCtx {
         &self.ambiguous
     }
 
+    /// This context's declarations as plain strings.
+    pub(crate) fn snapshot(&self) -> CtxSnapshot {
+        use quote::ToTokens;
+        let text = |t: &Type| t.to_token_stream().to_string();
+        CtxSnapshot {
+            consts: self.consts.clone(),
+            aliases: self
+                .aliases
+                .iter()
+                .map(|(k, t)| (k.clone(), text(t)))
+                .collect(),
+            local_types: self.local_types.clone(),
+            local_structs: self
+                .local_structs
+                .iter()
+                .map(|(k, (fields, packed, align, rust))| {
+                    (
+                        k.clone(),
+                        (
+                            fields.iter().map(|(n, t)| (n.clone(), text(t))).collect(),
+                            *packed,
+                            *align,
+                            *rust,
+                        ),
+                    )
+                })
+                .collect(),
+            generic_structs: self.generic_structs.clone(),
+            local_enums: self.local_enums.clone(),
+            uses: self.uses.clone(),
+        }
+    }
+
+    /// Take over the declarations of a dependency crate; declarations made
+    /// afterwards overwrite them.
+    pub(crate) fn absorb(&mut self, other: &CtxSnapshot) {
+        self.consts.extend(other.consts.clone());
+        for (k, t) in &other.aliases {
+            if let Ok(t) = syn::parse_str::<Type>(t) {
+                self.aliases.insert(k.clone(), t);
+            }
+        }
+        self.local_types.extend(other.local_types.iter().cloned());
+        for (k, (fields, packed, align, rust)) in &other.local_structs {
+            let fields: Vec<(String, Type)> = fields
+                .iter()
+                .filter_map(|(n, t)| Some((n.clone(), syn::parse_str::<Type>(t).ok()?)))
+                .collect();
+            self.local_structs
+                .insert(k.clone(), (fields, *packed, *align, *rust));
+        }
+        self.generic_structs
+            .extend(other.generic_structs.iter().cloned());
+        self.local_enums.extend(other.local_enums.clone());
+        for u in &other.uses {
+            if !self.uses.contains(u) {
+                self.uses.push(u.clone());
+            }
+        }
+    }
+
+    /// Forget every declaration of `name` (it means different things in
+    /// different places).
+    pub(crate) fn forget_name(&mut self, name: &str) {
+        Fragment::forget(self, name);
+    }
+
     /// Per file, which file each ambiguous name it uses refers to.
     pub(crate) fn name_bindings(&self) -> &[HashMap<String, usize>] {
         &self.bindings
     }
 
-    fn new(arch: &'static ArchConfig) -> Self {
+    pub(crate) fn new(arch: &'static ArchConfig) -> Self {
         RustCtx {
             arch,
             consts: HashMap::new(),
@@ -1792,7 +1905,7 @@ impl Fragment {
 /// Returns the layouts per input file, in order (empty for unparsable files).
 pub(crate) fn parse_rust_crate(
     files: &[(String, String)],
-    local_count: usize,
+    base: Option<RustCtx>,
     src_root: Option<&std::path::Path>,
     arch: &'static ArchConfig,
 ) -> (Vec<Vec<StructLayout>>, RustCtx) {
@@ -1804,37 +1917,22 @@ pub(crate) fn parse_rust_crate(
             Some(f)
         })
         .collect();
-    // Files from `local_count` on belong to dependencies: their declarations
-    // are visible, but a crate's own type of the same name shadows them.
-    let mut seen_local: HashMap<String, usize> = HashMap::new();
-    let mut seen_external: HashMap<String, usize> = HashMap::new();
-    for (i, f) in parsed.iter().enumerate() {
-        let Some(f) = f else { continue };
-        let seen = if i < local_count {
-            &mut seen_local
-        } else {
-            &mut seen_external
-        };
+    let mut seen_in: HashMap<String, usize> = HashMap::new();
+    for f in parsed.iter().flatten() {
         for n in declared_names(f) {
-            *seen.entry(n).or_default() += 1;
+            *seen_in.entry(n).or_default() += 1;
         }
     }
-    let ambiguous: HashSet<String> = seen_local
-        .iter()
-        .filter(|(_, n)| **n > 1)
-        .map(|(k, _)| k.clone())
-        .chain(
-            seen_external
-                .iter()
-                .filter(|(k, n)| **n > 1 && !seen_local.contains_key(*k))
-                .map(|(k, _)| k.clone()),
-        )
+    let ambiguous: HashSet<String> = seen_in
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(k, _)| k)
         .collect();
-    let mut ctx = RustCtx::new(arch);
+    // Declarations of dependency crates (already collected once, shared) are
+    // the starting point; the crate's own overwrite them.
+    let mut ctx = base.unwrap_or_else(|| RustCtx::new(arch));
     let mut params = Vec::new();
-    // Dependencies first, so the crate's own declarations overwrite theirs.
-    let order = (local_count..parsed.len()).chain(0..local_count.min(parsed.len()));
-    for f in order.filter_map(|i| parsed[i].as_ref()) {
+    for f in parsed.iter().flatten() {
         let mut collector = ItemCollector {
             ctx: &mut ctx,
             generic_params: Vec::new(),
@@ -1868,7 +1966,7 @@ pub(crate) fn parse_rust_crate(
                 .zip(&parsed)
                 .map(|((p, _), f)| (p.clone(), f.as_ref()))
                 .collect();
-            crate::rust_modules::resolve_bindings(&view, local_count, src, &ambiguous)
+            crate::rust_modules::resolve_bindings(&view, view.len(), src, &ambiguous)
         }
         _ => vec![HashMap::new(); files.len()],
     };
@@ -1937,7 +2035,7 @@ mod tests {
                     .to_string(),
             ),
         ];
-        let (out, _) = parse_rust_crate(&files, files.len(), None, &X86_64_SYSV);
+        let (out, _) = parse_rust_crate(&files, None, None, &X86_64_SYSV);
         let mut all: Vec<StructLayout> = out.into_iter().flatten().collect();
         crate::resolve_nested_structs(&mut all);
         let uses = all.iter().find(|l| l.name == "Uses").unwrap();

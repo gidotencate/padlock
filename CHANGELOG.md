@@ -18,6 +18,14 @@ All notable changes to padlock are documented here.
 - **Rust: path dependencies are part of the crate's context.** `dep = { path = "../x" }` (and `dep = { workspace = true }` with a path in `[workspace.dependencies]`) are followed transitively; their types size fields of the analyzed crate, and their files invalidate the parse cache. The crate's own types shadow a dependency's of the same name.
 - **`--follow-deps` / `follow_deps = true`** (`.padlock.toml`, off by default): a path dependency outside the workspace, or inside a nested git repository (submodule, vendored checkout), is followed only when this is set, so third-party repositories never change an analysis unasked.
 
+## [0.79.0] — 2026-10-30
+
+### Changed
+- **Rust: a path dependency is parsed once and shared.** Every crate of a workspace used to re-parse the sources of all crates it depends on, so a core crate was read once per dependent (analyzing padlock's own `crates/` took 0.30 s and 160 MB). Dependencies are now built through the crate cache — keyed by the dependency's directory, so crates of one workspace and checkouts of the same submodule share one parse — and a dependent starts from their declarations and resolved layouts (0.19 s, 98 MB; same results). A crate reached through two paths is no longer counted as a name conflict.
+
+### Fixed
+- **Rust: sibling crates of a workspace without `[workspace.dependencies]` were treated as external** (and so skipped without `--follow-deps`); the workspace root is now found from its `[workspace]` table alone.
+
 ## [0.78.0] — 2026-10-30
 
 ### Added

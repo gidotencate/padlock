@@ -15,7 +15,7 @@ use padlock_core::arch::ArchConfig;
 use padlock_core::findings::SkippedStruct;
 use padlock_core::ir::StructLayout;
 
-use crate::frontends::rust::RustCtx;
+use crate::frontends::rust::{CtxSnapshot, RustCtx};
 
 /// A file of the package at `dir`: under `src/` (the library or a binary), or
 /// an integration test, example, benchmark or `build.rs`, which are crates of
@@ -51,59 +51,71 @@ type Signature = Vec<(PathBuf, Option<SystemTime>, u64)>;
 fn path_dependencies(root: &Path) -> Vec<PathBuf> {
     const MAX_DEPS: usize = 64;
     let mut found: Vec<PathBuf> = Vec::new();
-    // Dependencies outside the workspace (or in a nested git repository) count
-    // as external and are followed only with `follow_dependencies`.
-    let boundary = workspace_dependencies(root)
-        .map(|(w, _)| w)
-        .unwrap_or_else(|| root.to_path_buf());
     let mut queue = vec![root.to_path_buf()];
     while let Some(dir) = queue.pop() {
-        let Some(manifest) = read_manifest(&dir) else {
-            continue;
-        };
-        let workspace = workspace_dependencies(&dir);
-        let mut tables: Vec<&toml::Table> = Vec::new();
-        for key in ["dependencies", "build-dependencies"] {
-            if let Some(t) = manifest.get(key).and_then(|v| v.as_table()) {
-                tables.push(t);
-            }
-        }
-        if let Some(targets) = manifest.get("target").and_then(|v| v.as_table()) {
-            for t in targets.values().filter_map(|v| v.as_table()) {
-                for key in ["dependencies", "build-dependencies"] {
-                    if let Some(t) = t.get(key).and_then(|v| v.as_table()) {
-                        tables.push(t);
-                    }
-                }
-            }
-        }
-        for table in tables {
-            for (name, dep) in table {
-                let Some(dep) = dep.as_table() else { continue };
-                let path = if dep.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
-                    workspace.as_ref().and_then(|(wroot, deps)| {
-                        let p = deps.get(name)?.get("path")?.as_str()?;
-                        Some(wroot.join(p))
-                    })
-                } else {
-                    dep.get("path")
-                        .and_then(|v| v.as_str())
-                        .map(|p| dir.join(p))
-                };
-                let Some(path) = path.and_then(|p| std::fs::canonicalize(p).ok()) else {
-                    continue;
-                };
-                if !crate::follow_dependencies() && crate::is_external(&path, &boundary) {
-                    continue;
-                }
-                if path != root && !found.contains(&path) && path.join("src").is_dir() {
-                    found.push(path.clone());
-                    queue.push(path);
-                }
+        for path in direct_dependencies(&dir) {
+            if path != root && !found.contains(&path) {
+                found.push(path.clone());
+                queue.push(path);
             }
         }
         if found.len() >= MAX_DEPS {
             break;
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The path dependencies `dir`'s manifest names itself (not theirs).
+fn direct_dependencies(dir: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    // Dependencies outside the workspace (or in a nested git repository) count
+    // as external and are followed only with `follow_dependencies`.
+    let boundary = workspace_dependencies(dir)
+        .map(|(w, _)| w)
+        .unwrap_or_else(|| dir.to_path_buf());
+    let Some(manifest) = read_manifest(dir) else {
+        return found;
+    };
+    let workspace = workspace_dependencies(dir);
+    let mut tables: Vec<&toml::Table> = Vec::new();
+    for key in ["dependencies", "build-dependencies"] {
+        if let Some(t) = manifest.get(key).and_then(|v| v.as_table()) {
+            tables.push(t);
+        }
+    }
+    if let Some(targets) = manifest.get("target").and_then(|v| v.as_table()) {
+        for t in targets.values().filter_map(|v| v.as_table()) {
+            for key in ["dependencies", "build-dependencies"] {
+                if let Some(t) = t.get(key).and_then(|v| v.as_table()) {
+                    tables.push(t);
+                }
+            }
+        }
+    }
+    for table in tables {
+        for (name, dep) in table {
+            let Some(dep) = dep.as_table() else { continue };
+            let path = if dep.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
+                workspace.as_ref().and_then(|(wroot, deps)| {
+                    let p = deps.get(name)?.get("path")?.as_str()?;
+                    Some(wroot.join(p))
+                })
+            } else {
+                dep.get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|p| dir.join(p))
+            };
+            let Some(path) = path.and_then(|p| std::fs::canonicalize(p).ok()) else {
+                continue;
+            };
+            if !crate::follow_dependencies() && crate::is_external(&path, &boundary) {
+                continue;
+            }
+            if path != dir && !found.contains(&path) && path.join("src").is_dir() {
+                found.push(path);
+            }
         }
     }
     found.sort();
@@ -125,7 +137,11 @@ fn workspace_dependencies(dir: &Path) -> Option<(PathBuf, toml::Table)> {
         if let Some(m) = read_manifest(cur)
             && let Some(ws) = m.get("workspace").and_then(|v| v.as_table())
         {
-            let deps = ws.get("dependencies")?.as_table()?.clone();
+            let deps = ws
+                .get("dependencies")
+                .and_then(|d| d.as_table())
+                .cloned()
+                .unwrap_or_default();
             return Some((cur.to_path_buf(), deps));
         }
         cur = cur.parent()?;
@@ -165,6 +181,11 @@ pub(crate) fn newest_mtime(root: &Path) -> Option<SystemTime> {
 
 struct Crate {
     signature: Signature,
+    /// The declarations of the crate and (through its dependencies) of
+    /// everything it depends on, ready to seed a dependent's context.
+    ctx: CtxSnapshot,
+    /// Resolved layouts of the crates this one depends on (transitively).
+    external: Vec<StructLayout>,
     /// Layouts per file, resolved crate-wide, `source_file` set.
     layouts: HashMap<PathBuf, Vec<StructLayout>>,
     skipped: HashMap<PathBuf, Vec<SkippedStruct>>,
@@ -187,20 +208,80 @@ fn build(root: &Path, signature: Signature, arch: &'static ArchConfig) -> Crate 
     build_with_ctx(root, signature, arch).0
 }
 
+// Dependency crates are built once and shared by every crate that uses them:
+// the cache is keyed by the dependency's directory, so two crates of a
+// workspace — or two checkouts of the same submodule — share one parse.
+thread_local! {
+    static BUILDING: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Context from the path dependencies of `root`: the merged declarations, and
+/// their resolved layouts (names the crate declares itself excluded later).
+fn dependency_context(
+    root: &Path,
+    arch: &'static ArchConfig,
+) -> (Option<RustCtx>, Vec<StructLayout>) {
+    let deps = direct_dependencies(root);
+    if deps.is_empty() {
+        return (None, Vec::new());
+    }
+    let mut base = RustCtx::new(arch);
+    let mut layouts: Vec<StructLayout> = Vec::new();
+    let mut defined: HashMap<String, String> = HashMap::new();
+    let mut conflicting: std::collections::HashSet<String> = Default::default();
+    for dep in deps {
+        if BUILDING.with(|b| b.borrow().contains(&dep)) {
+            continue;
+        }
+        BUILDING.with(|b| b.borrow_mut().push(dep.clone()));
+        let built = crate_for(&dep, arch);
+        BUILDING.with(|b| {
+            b.borrow_mut().pop();
+        });
+        let Some(c) = built else { continue };
+        // The same crate reached through two dependencies declares the same
+        // things; two crates using one name for different things conflict.
+        for (n, def) in c.ctx.definitions() {
+            if defined.get(&n).is_some_and(|d| *d != def) {
+                conflicting.insert(n.clone());
+            }
+            defined.insert(n, def);
+        }
+        base.absorb(&c.ctx);
+        layouts.extend(c.layouts.values().flatten().cloned());
+        layouts.extend(c.external.iter().cloned());
+    }
+    for n in &conflicting {
+        base.forget_name(n);
+    }
+    // One layout per declaration, however many paths reach it; a name with two
+    // different declarations is dropped.
+    let mut seen = std::collections::HashSet::new();
+    layouts.retain(|l| seen.insert((l.name.clone(), l.source_file.clone(), l.source_line)));
+    let mut by_name: HashMap<&str, usize> = HashMap::new();
+    for l in &layouts {
+        *by_name.entry(l.name.as_str()).or_default() += 1;
+    }
+    let dup: std::collections::HashSet<String> = by_name
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(k, _)| k.to_string())
+        .collect();
+    layouts.retain(|l| !dup.contains(&l.name));
+    (Some(base), layouts)
+}
+
 fn build_with_ctx(
     root: &Path,
     signature: Signature,
     arch: &'static ArchConfig,
 ) -> (Crate, RustCtx) {
-    // The crate's own files come first; files of path dependencies follow and
-    // only supply declarations (laid out, but never reported for this crate).
+    // Only the crate's own files are read here; its path dependencies come
+    // from their own (cached) builds and never appear in this crate's report.
     let own_src = root.join("src");
-    let (own, external): (Vec<_>, Vec<_>) = signature
+    let files: Vec<(String, String)> = signature
         .iter()
-        .partition(|(p, _, _)| p.starts_with(&own_src));
-    let files: Vec<(String, String)> = own
-        .into_iter()
-        .chain(external)
+        .filter(|(p, _, _)| p.starts_with(&own_src))
         .filter_map(|(p, _, len)| {
             // The CLI's generated-file limit: tables, not hand-written types.
             if *len > 500_000 {
@@ -212,14 +293,10 @@ fn build_with_ctx(
             ))
         })
         .collect();
-    let local_count = signature
-        .iter()
-        .filter(|(p, _, _)| p.starts_with(&own_src))
-        .count()
-        .min(files.len());
+    let (base, external) = dependency_context(root, arch);
     let outer = crate::take_skipped();
     let (per_file, ctx) =
-        crate::frontends::rust::parse_rust_crate(&files, local_count, Some(&own_src), arch);
+        crate::frontends::rust::parse_rust_crate(&files, base, Some(&own_src), arch);
     let skipped_all = crate::take_skipped();
     crate::restore_skipped(outer);
     let mut all: Vec<StructLayout> = Vec::new();
@@ -229,27 +306,13 @@ fn build_with_ctx(
         }
         all.extend(layouts);
     }
-    // A dependency's type of the same name as one of this crate's is shadowed.
-    let local_names: std::collections::HashSet<String> = all
-        .iter()
-        .filter(|l| {
-            l.source_file
-                .as_deref()
-                .is_some_and(|f| Path::new(f).starts_with(&own_src))
-        })
-        .map(|l| l.name.clone())
-        .collect();
-    all.retain(|l| {
-        l.source_file
-            .as_deref()
-            .is_some_and(|f| Path::new(f).starts_with(&own_src))
-            || !local_names.contains(&l.name)
-    });
+    let external_all = external.clone();
     let layouts = resolve_per_file(
         all,
         ctx.ambiguous_names(),
         ctx.name_bindings(),
         &files.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+        external,
     );
     // Skip notes are not attributed per file by the crate-wide parse; keep
     // them with the crate's first file so they are reported once.
@@ -260,6 +323,8 @@ fn build_with_ctx(
     (
         Crate {
             signature,
+            ctx: ctx.snapshot(),
+            external: external_all,
             layouts,
             skipped,
         },
@@ -276,10 +341,22 @@ fn resolve_per_file(
     ambiguous: &std::collections::HashSet<String>,
     bindings: &[HashMap<String, usize>],
     paths: &[String],
+    external: Vec<StructLayout>,
 ) -> HashMap<PathBuf, Vec<StructLayout>> {
     let mut layouts: HashMap<PathBuf, Vec<StructLayout>> = HashMap::new();
+    // Dependency types are already sized in their own crates: frozen, and
+    // shadowed by a crate type of the same name.
+    let local: std::collections::HashSet<&str> = all.iter().map(|l| l.name.as_str()).collect();
+    let external: Vec<StructLayout> = external
+        .iter()
+        .filter(|l| !local.contains(l.name.as_str()))
+        .map(freeze)
+        .collect();
     if ambiguous.is_empty() {
+        let n = all.len();
+        all.extend(external);
         crate::resolve_nested_structs(&mut all);
+        all.truncate(n);
         for l in all {
             let key = PathBuf::from(l.source_file.clone().unwrap_or_default());
             layouts.entry(key).or_default().push(l);
@@ -290,12 +367,15 @@ fn resolve_per_file(
         let key = PathBuf::from(l.source_file.clone().unwrap_or_default());
         layouts.entry(key).or_default().push(l);
     }
-    let pool: HashMap<String, StructLayout> = layouts
+    let mut pool: HashMap<String, StructLayout> = layouts
         .values()
         .flatten()
         .filter(|l| !ambiguous.contains(&l.name))
         .map(|l| (l.name.clone(), l.clone()))
         .collect();
+    for l in external {
+        pool.entry(l.name.clone()).or_insert(l);
+    }
     let unresolved = layouts.clone();
     for own in layouts.values_mut() {
         *own = resolve_file(own, &pool, Vec::new());
@@ -795,5 +875,61 @@ mod tests {
             // The library's own struct is not reported for the test file.
             assert!(l.iter().all(|l| l.name != "Shared"), "{sub}");
         }
+    }
+
+    #[test]
+    fn a_dependency_reached_by_two_paths_is_not_a_conflict() {
+        let ws = tempfile::TempDir::new().unwrap();
+        let w = ws.path();
+        for d in ["app", "mid", "base"] {
+            std::fs::create_dir_all(w.join(d).join("src")).unwrap();
+        }
+        std::fs::write(
+            w.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"mid\", \"base\"]\n",
+        )
+        .unwrap();
+        let manifest = |name: &str, deps: &str| {
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[dependencies]\n{deps}")
+        };
+        std::fs::write(w.join("base/Cargo.toml"), manifest("base", "")).unwrap();
+        std::fs::write(
+            w.join("mid/Cargo.toml"),
+            manifest("mid", "base = { path = \"../base\" }\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("app/Cargo.toml"),
+            manifest(
+                "app",
+                "base = { path = \"../base\" }\nmid = { path = \"../mid\" }\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("base/src/lib.rs"),
+            "pub struct Shared { pub a: u64, pub b: u64 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("mid/src/lib.rs"),
+            "use base::Shared;\npub struct Mid { pub s: Shared }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            w.join("app/src/lib.rs"),
+            "use base::Shared;\nuse mid::Mid;\npub struct Uses { pub f: u8, pub s: Shared, pub m: Mid }\n",
+        )
+        .unwrap();
+        let lib = w.join("app/src/lib.rs");
+        let text = std::fs::read_to_string(&lib).unwrap();
+        let l = parse_in_crate(&lib, &text, &X86_64_SYSV).unwrap();
+        let uses = l.iter().find(|l| l.name == "Uses").unwrap();
+        assert_eq!(uses.total_size, 40, "{:?}", uses.fields);
+        assert!(
+            uses.uncertain_fields.is_empty(),
+            "{:?}",
+            uses.uncertain_fields
+        );
     }
 }

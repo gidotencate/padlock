@@ -6,6 +6,7 @@ All notable changes to padlock are documented here.
 
 ### Fixed
 - **`--perf-types`: Go qualified type names and hex offsets not matched.** Go perf output emits fully-qualified type identifiers (`github.com/foo/bar/pkg.TypeName`) and hexadecimal field offsets (`+0x48`). The parser only handled short C-style names and decimal offsets, so no fields were ever marked hot when profiling Go binaries. Now indexes by both full and short (after last `.`) name, and parses `0x…` offsets.
+- **Go: a file opened by a path with mixed separators (`dir\sub/file.go`) on Windows returned no structs** when it belonged to a package; member files are now matched as paths, not strings. Also fixes the Windows CI failure in `a_package_named_like_a_std_one_is_not_given_the_std_size`.
 
 ### Docs
 - **TypeScript (Go port) added to the real-world findings table and examples**: DWARF analysis (2 748 types, 99/100), perf-validated hot fields, and a benchmark showing the two High findings have no measurable effect.

@@ -533,7 +533,11 @@ pub(crate) fn parse_in_package(
             package
                 .layouts
                 .iter()
-                .filter(|l| l.source_file.as_deref() == Some(file.as_str()))
+                .filter(|l| {
+                    l.source_file
+                        .as_deref()
+                        .is_some_and(|s| Path::new(s) == own_path)
+                })
                 .cloned()
                 .collect(),
         );

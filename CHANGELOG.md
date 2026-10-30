@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.72.0] — 2026-10-30
+
+### Fixed
+- **`--perf-types`: Go qualified type names and hex offsets not matched.** Go perf output emits fully-qualified type identifiers (`github.com/foo/bar/pkg.TypeName`) and hexadecimal field offsets (`+0x48`). The parser only handled short C-style names and decimal offsets, so no fields were ever marked hot when profiling Go binaries. Now indexes by both full and short (after last `.`) name, and parses `0x…` offsets.
+
 ## [0.71.0] — 2026-10-30
 
 Found by checking mimalloc (C), typescript-go and microsoft/go against gcc's DWARF (`padlock verify`) and `go test` (`--go-exact`). mimalloc: 57 of 57 structs now match the compiler, up from 39 of 50.

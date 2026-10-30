@@ -20,8 +20,10 @@ Found by checking mimalloc (C), typescript-go and microsoft/go against gcc's DWA
 ### Fixed (continued)
 - **Go: pointers, slices, maps, channels and funcs of package-qualified types** (`[]*ast.Node`, `map[tspath.Path]*Node`) were flagged as uncertain although their size does not depend on the element.
 
+- **Go: types of imported packages are sized from their source.** A field typed `tspath.Path` or `ast.Kind` is read from the package it comes from — packages of the surrounding module(s) (`go.mod`, `go.work`), the standard library (`$GOROOT/src`, or its own tree when analyzing it) — instead of being guessed as one word and flagged. Aliases (`type Kind int16`), structs, interfaces and chains of them are followed, also through generated files too large to parse. Generic types of other packages are still flagged. The parse cache now tracks the sibling files and the imported packages' files, and the Go toolchain version.
+
 ### Measured
-- microsoft/TypeScript (the Go port, 1431 structs, compared with `go test` via `--go-exact`): 845 structs not flagged as uncertain, all 845 match the compiler; 586 flagged uncertain, 189 of those match. The flagged ones mostly hold types of other packages of the same module (`tspath`, `core`, `collections`, `lsproto`), which padlock does not resolve without `--go-exact`.
+- microsoft/TypeScript (the Go port; 1201 non-test structs compared with `go test` via `--go-exact`): 1125 sizes match without `--go-exact`, up from 825. 1090 structs are not flagged uncertain (up from 674) and every one that `go test` can probe matches; 111 remain flagged (generics of other packages such as `collections.Set[T]`).
 
 ## [0.70.0] — 2026-10-25
 

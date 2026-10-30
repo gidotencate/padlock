@@ -333,15 +333,26 @@ fn build_package(
 ) -> Package {
     let (goos, goarch) = go_target(arch);
     let mut files: Vec<(PathBuf, String)> = Vec::new();
+    // `type Kind int16` lines of generated files too large to parse.
+    let mut big_aliases: Vec<(String, String)> = Vec::new();
     for (path, _, len) in &signature {
-        // Generated tables (the CLI's own size limit) hold no struct types a
-        // hand-written file could need, and dominate parse time.
-        if *len > 500_000 || path.to_string_lossy().ends_with("_test.go") {
+        if path.to_string_lossy().ends_with("_test.go") {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
+        // Generated tables (the CLI's own size limit) hold no struct types a
+        // hand-written file could need, and dominate parse time. Their
+        // one-line type declarations (an enum's `type Kind int16`) still count.
+        if *len > 500_000 {
+            if file_is_built(path, &text, goos, goarch)
+                && go::package_clause(&text).as_deref() == Some(name)
+            {
+                big_aliases.extend(go::simple_type_lines(&text));
+            }
+            continue;
+        }
         if !file_is_built(path, &text, goos, goarch)
             || go::package_clause(&text).as_deref() != Some(name)
         {
@@ -363,6 +374,13 @@ fn build_package(
     for (d, _) in decls.iter().flatten().skip(1) {
         ctx.absorb(d);
     }
+    for (alias, target) in big_aliases {
+        ctx.add_alias(alias, target);
+    }
+    ctx.pkg_dir = signature
+        .first()
+        .and_then(|(p, _, _)| p.parent())
+        .map(Path::to_path_buf);
     let parsed = in_parallel(parallel, &files, |i, (path, text)| {
         let outer = crate::take_skipped();
         let own = go::parse_go_in_package(text, arch, &ctx, i + 1, decls[i].as_ref());
@@ -592,6 +610,315 @@ fn against_package(
     Some(own)
 }
 
+// ── types of other packages ────────────────────────────────────────────────────
+
+/// A type declared in an imported package, sized from that package's source.
+pub(crate) struct ForeignType {
+    pub size: usize,
+    pub align: usize,
+    /// The package's own layout of it has uncertain fields.
+    pub uncertain: bool,
+}
+
+/// `(module path, directory)` of the modules around `dir`: the nearest `go.mod`
+/// and every module a `go.work` above it lists. The standard library's own
+/// tree (`module std` / `module cmd`) resolves bare import paths from its root.
+fn module_roots(dir: &Path) -> Arc<Vec<(String, PathBuf)>> {
+    type Roots = Mutex<HashMap<PathBuf, Arc<Vec<(String, PathBuf)>>>>;
+    static ROOTS: LazyLock<Roots> = LazyLock::new(Default::default);
+    if let Some(r) = ROOTS.lock().ok().and_then(|m| m.get(dir).cloned()) {
+        return r;
+    }
+    let mut roots: Vec<(String, PathBuf)> = Vec::new();
+    let module_of = |d: &Path| -> Option<String> {
+        let text = std::fs::read_to_string(d.join("go.mod")).ok()?;
+        text.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix("module")
+                .filter(|r| r.starts_with([' ', '\t']))
+                .map(|r| r.trim().trim_matches('"').to_string())
+        })
+    };
+    let mut seen_mod = false;
+    for anc in dir.ancestors() {
+        if !seen_mod && let Some(m) = module_of(anc) {
+            roots.push((m, anc.to_path_buf()));
+            seen_mod = true;
+        }
+        if let Ok(work) = std::fs::read_to_string(anc.join("go.work")) {
+            let mut in_block = false;
+            for line in work.lines() {
+                let l = line.split("//").next().unwrap_or("").trim();
+                let entry = if in_block {
+                    if l.starts_with(')') {
+                        in_block = false;
+                        continue;
+                    }
+                    Some(l)
+                } else if let Some(rest) = l.strip_prefix("use") {
+                    let rest = rest.trim();
+                    if rest.starts_with('(') {
+                        in_block = true;
+                        None
+                    } else {
+                        Some(rest)
+                    }
+                } else {
+                    None
+                };
+                if let Some(e) = entry.map(|e| e.trim_matches('"')).filter(|e| !e.is_empty()) {
+                    let d = anc.join(e);
+                    if let Some(m) = module_of(&d)
+                        && !roots.iter().any(|(_, r)| *r == d)
+                    {
+                        roots.push((m, d));
+                    }
+                }
+            }
+        }
+    }
+    let roots = Arc::new(roots);
+    if let Ok(mut m) = ROOTS.lock() {
+        m.insert(dir.to_path_buf(), roots.clone());
+    }
+    roots
+}
+
+/// `$GOROOT/src`, asked of the `go` tool once.
+fn goroot_src() -> Option<&'static Path> {
+    static SRC: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+        let out = std::process::Command::new("go")
+            .args(["env", "GOROOT"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let root = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let src = root.join("src");
+        src.is_dir().then_some(src)
+    });
+    SRC.as_deref()
+}
+
+/// Directory of the package imported as `import_path` from a package in
+/// `from`: a package of the surrounding module(s), else the standard library.
+pub(crate) fn resolve_import(from: &Path, import_path: &str) -> Option<PathBuf> {
+    type Cache = Mutex<HashMap<(PathBuf, String), Option<PathBuf>>>;
+    static RESOLVED: LazyLock<Cache> = LazyLock::new(Default::default);
+    let key = (from.to_path_buf(), import_path.to_string());
+    if let Some(r) = RESOLVED.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return r;
+    }
+    let found = (|| {
+        let roots = module_roots(from);
+        // The longest matching module path wins.
+        let mut best: Option<(&str, &PathBuf)> = None;
+        for (m, d) in roots.iter() {
+            let hit = import_path == m
+                || import_path
+                    .strip_prefix(m.as_str())
+                    .is_some_and(|r| r.starts_with('/'));
+            if hit && best.is_none_or(|(bm, _)| m.len() > bm.len()) {
+                best = Some((m, d));
+            }
+        }
+        if let Some((m, d)) = best {
+            let dir = d.join(import_path[m.len()..].trim_start_matches('/'));
+            return dir.is_dir().then_some(dir);
+        }
+        // The standard library's own tree resolves its imports from its root.
+        if let Some((_, d)) = roots.iter().find(|(m, _)| m == "std" || m == "cmd") {
+            let dir = d.join(import_path);
+            if dir.is_dir() {
+                return Some(dir);
+            }
+        }
+        // A bare first element (no dot) is the standard library.
+        if !import_path.split('/').next().unwrap_or("").contains('.') {
+            let dir = goroot_src()?.join(import_path);
+            return dir.is_dir().then_some(dir);
+        }
+        None
+    })();
+    if let Ok(mut m) = RESOLVED.lock() {
+        m.insert(key, found.clone());
+    }
+    found
+}
+
+/// The `package` name of the files of `dir` that build for `arch`.
+fn package_name_in(dir: &Path, arch: &'static ArchConfig) -> Option<String> {
+    type Names = Mutex<HashMap<(PathBuf, &'static str), Option<String>>>;
+    static NAMES: LazyLock<Names> = LazyLock::new(Default::default);
+    let key = (dir.to_path_buf(), arch.name);
+    if let Some(n) = NAMES.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return n;
+    }
+    let (goos, goarch) = go_target(arch);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|e| e == "go") && !p.to_string_lossy().ends_with("_test.go")
+        })
+        .collect();
+    files.sort();
+    let name = files.iter().find_map(|p| {
+        let text = std::fs::read_to_string(p).ok()?;
+        if !file_is_built(p, &text, goos, goarch) {
+            return None;
+        }
+        go::package_clause(&text).filter(|n| n != "documentation")
+    });
+    if let Ok(mut m) = NAMES.lock() {
+        m.insert(key, name.clone());
+    }
+    name
+}
+
+thread_local! {
+    /// How many foreign packages are being built on this thread (a guard
+    /// against pathological import chains).
+    static FOREIGN_DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Size of type `name` of the package imported as `import_path` from a package
+/// in `from`; `None` when the package or the type cannot be found (a generic
+/// type, a type declared in a function, a package outside the module).
+pub(crate) fn foreign_type(
+    from: &Path,
+    import_path: &str,
+    name: &str,
+    arch: &'static ArchConfig,
+) -> Option<ForeignType> {
+    let dir = resolve_import(from, import_path)?;
+    let pkg_name = package_name_in(&dir, arch)?;
+    if FOREIGN_DEPTH.with(|d| d.get()) >= 24 {
+        return None;
+    }
+    FOREIGN_DEPTH.with(|d| d.set(d.get() + 1));
+    let package = package_for(&dir, &pkg_name, arch, true);
+    FOREIGN_DEPTH.with(|d| d.set(d.get() - 1));
+    let package = package?;
+    let ps = arch.pointer_size;
+    let mut name = name.to_string();
+    // `type A B` chains within the package, ending at a struct, an interface
+    // or a type the package's own sizer can evaluate.
+    for _ in 0..8 {
+        if let Some(l) = package.layouts.iter().find(|l| l.name == name) {
+            return Some(ForeignType {
+                size: l.total_size,
+                align: l.align,
+                uncertain: !l.uncertain_fields.is_empty(),
+            });
+        }
+        if package.ctx.interfaces_contains(&name) {
+            return Some(ForeignType {
+                size: ps * 2,
+                align: ps,
+                uncertain: false,
+            });
+        }
+        let target = package.ctx.alias_target(&name)?;
+        let declared_here = |n: &str| {
+            package.layouts.iter().any(|l| l.name == n)
+                || package.ctx.interfaces_contains(n)
+                || package.ctx.alias_target(n).is_some()
+        };
+        if target != name && declared_here(&target) {
+            name = target;
+            continue;
+        }
+        let (size, align, uncertain) = go::size_in_ctx(&target, &package.ctx);
+        return Some(ForeignType {
+            size,
+            align,
+            uncertain,
+        });
+    }
+    None
+}
+
+/// Import paths named by the `import` declarations of Go source text.
+fn import_paths(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        let l = line.trim();
+        if in_block {
+            if l.starts_with(')') {
+                in_block = false;
+            } else if let Some(p) = quoted(l) {
+                out.push(p);
+            }
+        } else if let Some(rest) = l.strip_prefix("import") {
+            let rest = rest.trim_start();
+            if rest.starts_with('(') {
+                in_block = !rest.contains(')');
+                if let Some(p) = quoted(rest) {
+                    out.push(p);
+                }
+            } else if let Some(p) = quoted(rest) {
+                out.push(p);
+            }
+        } else if l.starts_with("func ") || l.starts_with("type ") {
+            break;
+        }
+    }
+    out
+}
+
+fn quoted(s: &str) -> Option<String> {
+    let start = s.find('"')? + 1;
+    let len = s[start..].find('"')?;
+    Some(s[start..start + len].to_string())
+}
+
+/// The `.go` files whose content the layouts of `path` depend on: its package's
+/// files and, transitively, those of the packages of the same module it
+/// imports (the standard library is covered by the toolchain version).
+pub(crate) fn dependencies(path: &Path) -> Vec<PathBuf> {
+    let Some(dir) = path.parent().map(Path::to_path_buf) else {
+        return Vec::new();
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        dir
+    };
+    let goroot = goroot_src();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut queue = vec![dir.clone()];
+    let mut files: Vec<PathBuf> = Vec::new();
+    while let Some(d) = queue.pop() {
+        if !seen.insert(d.clone()) || seen.len() > 400 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "go") {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(&p) {
+                for imp in import_paths(&text) {
+                    if let Some(target) = resolve_import(&d, &imp)
+                        && !goroot.is_some_and(|g| target.starts_with(g))
+                    {
+                        queue.push(target);
+                    }
+                }
+            }
+            if p != path {
+                files.push(p);
+            }
+        }
+    }
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +1006,39 @@ mod tests {
         // Box[Local] = 16 + 8 + 24 = 48; Box[string] = 16 + 8 + 16 = 40.
         assert_eq!(holder.total_size, 88);
         assert!(holder.uncertain_fields.is_empty());
+    }
+
+    #[test]
+    fn types_of_imported_packages_of_the_module_are_sized() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("go.mod"), "module example.com/m\n\ngo 1.24\n").unwrap();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::write(
+            root.join("a/a.go"),
+            "package a\n\ntype ID string\ntype Kind int16\ntype Pt struct{ X, Y int32 }\ntype Shape interface{ Area() float64 }\ntype Id2 ID\n",
+        )
+        .unwrap();
+        let path = root.join("b/b.go");
+        let src = "package b\n\nimport (\n\t\"example.com/m/a\"\n)\n\ntype S struct {\n\tk a.Kind\n\tid a.ID\n\tp a.Pt\n\ts a.Shape\n\tptr *a.Pt\n\tids []a.Id2\n\ti2 a.Id2\n}\n";
+        std::fs::write(&path, src).unwrap();
+        let layouts = parse_in_package(&path, src, &padlock_core::arch::X86_64_SYSV).unwrap();
+        let s = layouts.iter().find(|l| l.name == "S").unwrap();
+        // k 2 (+6) | id 16 | p 8 | s 16 | ptr 8 | ids 24 | i2 16 = 96
+        assert_eq!(s.total_size, 96);
+        assert!(s.uncertain_fields.is_empty(), "{:?}", s.uncertain_fields);
+        // The imported package's files are dependencies for the parse cache.
+        let deps = dependencies(&path);
+        assert!(deps.iter().any(|d| d.ends_with("a/a.go")), "{deps:?}");
+    }
+
+    #[test]
+    fn import_names_default_to_the_last_path_element() {
+        use crate::frontends::go::default_package_name as n;
+        assert_eq!(n("github.com/x/y"), "y");
+        assert_eq!(n("github.com/x/y/v3"), "y");
+        assert_eq!(n("gopkg.in/yaml.v3"), "yaml");
+        assert_eq!(n("github.com/x/go-foo"), "foo");
     }
 }

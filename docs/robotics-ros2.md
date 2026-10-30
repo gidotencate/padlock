@@ -145,7 +145,7 @@ For C/C++ firmware using CMake or Make:
 
 ```yaml
 - name: Analyse firmware struct layouts
-  uses: gidotencate/padlock@v0.12.0
+  uses: gidotencate/padlock@v0.80.0
   with:
     path: firmware/Core/Inc/
     target: thumbv7em-none-eabi

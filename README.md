@@ -914,7 +914,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build
-      - uses: gidotencate/padlock@v0.12.0
+      - uses: gidotencate/padlock@v0.80.0
         with:
           path: target/debug/myapp
           output-format: sarif

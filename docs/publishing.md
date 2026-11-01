@@ -1,318 +1,101 @@
 # Publishing padlock
 
-## License Choice
+How a release is cut. Only the maintainer can do the publishing steps: they need credentials that are not in this repository (a crates.io API token, a VS Code Marketplace publisher account, write access to the GitHub repository). This page documents the process, it does not grant any of it. Anyone is free to fork padlock under the licence and publish their own build under their own name.
 
-padlock is dual-licensed under **MIT OR Apache-2.0** (user's choice). This is the standard for Rust tooling and matches the Rust compiler itself.
+## Licence
+
+padlock is dual-licensed under **MIT OR Apache-2.0** (the user's choice), as the Rust compiler is.
 
 - **MIT** — permissive, short, widely understood.
-- **Apache-2.0** — includes an explicit patent grant, which matters for enterprise users.
+- **Apache-2.0** — adds an explicit patent grant, which matters for enterprise users.
 
-The dual license means users pick whichever suits their project. Both are corporate-friendly and allow unrestricted use, modification, and redistribution.
+## Who can do what
 
-### If You Want Copyleft
+| Action | Needs |
+|---|---|
+| Push a `v*` tag (starts the Release workflow: binaries, `.vsix`, GitHub release) | write access to the repository |
+| `cargo publish` | a crates.io token of an owner of the `padlock-*` crates |
+| Publish the extension | the Marketplace publisher account (and, for Open VSX, its token) |
 
-Use **GPL v3** (not v2). Reasons to prefer v3 over v2:
-- GPL v3 includes patent retaliation clauses (important for software tools)
-- GPL v3 addresses anti-tivoization (hardware lockdown)
-- GPL v2 is from 1991 and has known gaps; v2-only is incompatible with GPL v3
+Keep tokens out of the repository and out of CI logs; the workflows only use the built-in `GITHUB_TOKEN`.
 
-GPL v3 makes sense if you want to ensure that anyone who ships a modified padlock must also release their changes. It doesn't affect users who just run the tool.
+## Version bump checklist
 
----
+Three files change together (the crates inherit the workspace version):
 
-## Publishing to crates.io
+```
+Cargo.toml                       # [workspace.package] version, and the four padlock-* versions in [workspace.dependencies]
+editors/vscode/package.json      # "version"
+editors/vscode/package-lock.json # "version" in two places (top level and packages[""])
+```
 
-### Prerequisites
+After a release, `Formula/padlock.rb` (Homebrew) gets the new `version`, the four download URLs and their `sha256` values, copied from the release assets (`shasum -a 256` of each tarball).
 
-1. Create a crates.io account at [crates.io](https://crates.io)
-2. Generate an API token: Settings → API Tokens
-3. Log in:
-   ```bash
-   cargo login <your-token>
-   ```
-
-### Before First Publish
-
-1. **Fill in `Cargo.toml` fields** in each crate (or inherit from workspace):
-   ```toml
-   # In workspace Cargo.toml:
-   [workspace.package]
-   version     = "0.1.0"
-   edition     = "2024"
-   license     = "MIT"
-   repository  = "https://github.com/YOUR_USERNAME/padlock"
-   description = "Struct memory layout analyzer for C, C++, Rust, Go, and Zig"
-   keywords    = ["performance", "memory", "layout", "analysis", "cache"]
-   categories  = ["development-tools", "development-tools::profiling"]
-   ```
-
-2. **Add `[package]` to each crate Cargo.toml** with `workspace = true` to inherit:
-   ```toml
-   [package]
-   name = "padlock-cli"   # the CLI crate
-   version.workspace    = true
-   edition.workspace    = true
-   license.workspace    = true
-   repository.workspace = true
-   description.workspace = true
-   ```
-
-3. **Check what will be published** (dry run):
-   ```bash
-   cargo publish --dry-run -p padlock-core
-   cargo publish --dry-run -p padlock-cli
-   ```
-
-4. **Verify the README renders correctly** on crates.io. They use CommonMark; the current README is compatible.
-
-### Publish Order
-
-crates.io requires dependencies to be published before dependents. Publish in this order:
+Add a new `## [x.y.z]` section to `CHANGELOG.md` for every version bump; never rename or merge an older one. Then:
 
 ```bash
-cargo publish -p padlock-core
-cargo publish -p padlock-dwarf
-cargo publish -p padlock-source
-cargo publish -p padlock-output
-cargo publish -p padlock-macros   # proc-macro crate; no runtime deps on other crates
-cargo publish -p padlock-cli      # installs the `padlock` and `cargo-padlock` binaries
-cargo publish -p padlock-lsp      # installs the `padlock-lsp` language server binary
-```
-
-Wait ~30 seconds between each to let the registry index propagate. The `cargo-padlock` binary is part of `padlock-cli` and is published alongside it automatically.
-
-### After Publishing
-
-Users can install with:
-```bash
-cargo install padlock-cli
-```
-
----
-
-## Publishing to GitHub
-
-### Recommended Repository Structure
-
-```
-padlock/
-├── .github/
-│   └── workflows/
-│       ├── ci.yml          # build + test on push/PR
-│       └── release.yml     # build binaries on tag push
-├── CLAUDE.md
-├── Cargo.toml
-├── Cargo.lock
-├── LICENSE
-├── README.md
-├── .gitignore
-├── crates/
-└── docs/
-```
-
-### CI Workflow (`.github/workflows/ci.yml`)
-
-```yaml
-name: CI
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test
-      - run: cargo clippy -- -D warnings
-      - run: cargo fmt --check
-
-  layout-check:
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
-      - run: |
-          for f in padlock_samples/rust/*.rs padlock_samples/c/*.c; do
-            ./target/release/padlock analyze "$f" --sarif >> padlock.sarif
-          done
-      - uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: padlock.sarif
-```
-
-### Release Workflow (pre-built binaries)
-
-```yaml
-name: Release
-on:
-  push:
-    tags: ['v*']
-
-jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest;  target: x86_64-unknown-linux-gnu
-          - os: macos-latest;   target: aarch64-apple-darwin
-          - os: windows-latest; target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: ${{ matrix.target }} }
-      - run: cargo build --release --target ${{ matrix.target }}
-      - uses: softprops/action-gh-release@v1
-        with:
-          files: target/${{ matrix.target }}/release/padlock*
-```
-
----
-
-## What Is Still Missing Before a Public Release?
-
-Before you publish to crates.io or announce the tool, consider addressing:
-
-| Item | Priority | Effort | Status |
-|---|---|---|---|
-| Inherit `[workspace.package]` in each crate's `Cargo.toml` | Required for publish | Low | Done |
-| `padlock-macros` in workspace and publish order | Required for publish | Low | Done |
-| `// padlock:ignore` suppression annotation | Medium | Low | Done |
-| `cargo padlock` subcommand | High | Medium | Done |
-| Explicit guard annotation (`#[lock_protected_by]`, `GUARDED_BY()`, etc.) | High | Medium | Done |
-| Watch mode (`padlock watch`) | High | Medium | Done |
-| `#[assert_no_padding]` proc macro | High | Medium | Done |
-| GitHub Actions `action.yml` | High | Low | Done |
-| Rename CLI crate to `padlock-cli` (name conflict on crates.io) | Required | Low | Done |
-| In-place `fix` for all source languages (C, C++, Rust, Go, Zig) | Medium | Medium | Done |
-| Nested struct size resolution | Medium | High | Done |
-| C++ inheritance / vtable padding | Medium | High | Done |
-| Configuration file (`.padlock.toml`) with filter/exclude/sort/severity keys | Low | Medium | Done |
-| `padlock init` — generate annotated `.padlock.toml` | Low | Low | Done |
-| `padlock check` — baseline/ratchet CI mode with drift summary | Medium | Medium | Done |
-| `padlock explain` — CL column showing cache-line per field | Low | Low | Done |
-| Field-level `source_line` in all frontends | Low | Low | Done |
-| Remove `libsource.a` from the repo (binary artifact) | Recommended | Low | Check before publish |
-| Resolve crate name conflict | Required for publish | Low | Done |
-
-The tool is feature-complete for its stated scope. Remaining pre-publish steps:
-1. Check whether any binary artifact (`libsource.a`, `*.o`) is tracked in git and remove it
-2. Run `cargo publish --dry-run -p padlock-cli` to catch metadata issues
-3. Run `cargo publish --dry-run -p padlock-core` through all crates to catch metadata issues
-
----
-
-## Version Bump Checklist
-
-Six files must be updated together when cutting a new version. All crates inherit from the workspace, so only two files need numeric changes:
-
-```
-Cargo.toml                          # [workspace.package] version = "x.y.z"
-                                    # [workspace.dependencies] all four padlock-* versions
-editors/vscode/package.json         # "version": "x.y.z"
-```
-
-Crates use `version.workspace = true` and pick up the change automatically. After editing, run:
-
-```bash
-cargo build          # verify the workspace compiles cleanly at the new version
+cargo build
 cargo fmt --all --check
-cargo clippy --workspace -- -D warnings
-```
-
----
-
-## Publishing the VS Code Extension
-
-### Prerequisites
-
-```bash
-npm install -g @vscode/vsce   # or use npx vsce below — no global install needed
-```
-
-You need a Personal Access Token from the [VS Code Marketplace publisher dashboard](https://marketplace.visualstudio.com/manage).
-
-### Build and package
-
-```bash
-cd editors/vscode
-npm install                  # install dev dependencies (TypeScript, @types/vscode, vsce)
-npm run compile              # tsc -p ./ → compiles src/extension.ts to out/extension.js
-npx vsce package             # produces padlock-x.y.z.vsix
-```
-
-The `.vsix` file can be installed locally for testing:
-
-```bash
-code --install-extension padlock-x.y.z.vsix
-```
-
-### Publish to the VS Code Marketplace
-
-```bash
-npx vsce publish             # prompts for the PAT, then publishes
-# or pass the token directly:
-npx vsce publish --pat <your-pat>
-```
-
-The extension is listed at:
-`https://marketplace.visualstudio.com/items?itemName=gidotencate.padlock`
-
-**PAT-based publishing is currently broken** — the Marketplace's Azure DevOps PAT auth is rejecting valid tokens (an Azure AD issue on Microsoft's side, not ours), and Azure DevOps organization/PAT setup is not available to work around it at the moment. Until that's fixed upstream, `release.yml` builds and attaches the `.vsix` to the GitHub release automatically (see the `build-vscode-extension` job) but does **not** run `vsce publish`. Publish manually instead:
-
-1. Download the `.vsix` from the tagged GitHub release (or build it locally: `cd editors/vscode && npm ci && npm run compile && npx vsce package`).
-2. Go to the [Marketplace publisher dashboard](https://marketplace.visualstudio.com/manage) → padlock → **Update** → upload the `.vsix` file directly through the web UI. This path authenticates via your browser session, not a PAT, so it works even while PAT auth is down.
-
-Re-check whether PAT auth has been fixed before assuming it still needs the manual path — if it has, re-add a `vsce publish --pat ${{ secrets.VSCE_PAT }}` step to the `build-vscode-extension` job.
-
-### Open VSX Registry (optional — for VSCodium / Eclipse Theia users)
-
-```bash
-npx ovsx publish padlock-x.y.z.vsix --pat <open-vsx-token>
-```
-
----
-
-## Full Release Flow
-
-This is the end-to-end sequence for a numbered release (e.g. v0.9.8):
-
-```bash
-# 1. On a feature branch — do the work, update CHANGELOG.md and bump versions
-#    in Cargo.toml and editors/vscode/package.json
-
-# 2. Verify everything is clean
-cargo fmt --all --check
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test
+```
+
+Layout changes also run `python3 tests/conformance/run.py` (and `--cross` when the toolchains are installed).
+
+## Release flow
+
+```bash
+# 1. Work on a branch; update CHANGELOG.md, bump the versions (above).
+
+# 2. Verify
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test
+python3 tests/conformance/run.py
 cd editors/vscode && npm run compile && npx vsce package && cd ../..
 
-# 3. Commit and push the feature branch; open a PR
-git push -u origin feat/your-branch
-# merge via GitHub PR after review
+# 3. Merge to main (PR with real CI, or a local merge by the maintainer), wait for CI to be green.
 
-# 4. After merge, tag main
-git checkout main && git pull
-git tag -a vX.Y.Z -m "vX.Y.Z — <one-line summary>"
+# 4. Tag main. release.yml builds the binaries (padlock, cargo-padlock, padlock-lsp)
+#    for each platform and the .vsix, and attaches them to a GitHub release.
+git tag -a vX.Y.Z -m "vX.Y.Z"
 git push origin vX.Y.Z
-# The release.yml GitHub Action triggers on the tag, builds platform binaries
-# (including padlock-lsp), and builds + attaches the .vsix — it does NOT
-# publish the .vsix to the Marketplace (PAT auth is currently broken there).
 
-# 5. Publish crates (wait ~30s between each for index propagation)
+# 5. Publish the crates, in dependency order, ~30 s apart for the index to catch up.
 cargo publish -p padlock-core
 cargo publish -p padlock-macros
 cargo publish -p padlock-dwarf
 cargo publish -p padlock-source
 cargo publish -p padlock-output
-cargo publish -p padlock-cli
-cargo publish -p padlock-lsp
+cargo publish -p padlock-cli      # installs padlock and cargo-padlock
+cargo publish -p padlock-lsp      # installs padlock-lsp
 
-# 6. Publish VS Code extension — manual while PAT auth is broken:
-# download the .vsix from the GitHub release and upload it through
-# https://marketplace.visualstudio.com/manage (see "Publish to the VS Code
-# Marketplace" above). Once PAT auth works again, this step becomes:
-#   cd editors/vscode && npx vsce publish --pat <your-pat>
+# 6. Update Formula/padlock.rb from the release assets, then publish the extension (below).
+```
+
+`cargo publish --dry-run -p <crate>` checks the metadata first. Users install with `cargo install padlock-cli`.
+
+## VS Code extension
+
+```bash
+cd editors/vscode
+npm ci
+npm run compile          # tsc -p ./
+npx vsce package         # produces padlock-x.y.z.vsix
+code --install-extension padlock-x.y.z.vsix   # local test
+```
+
+Listing: `https://marketplace.visualstudio.com/items?itemName=gidotencate.padlock`
+
+**Publishing with a PAT is currently broken.** The Marketplace's Azure DevOps token auth rejects valid tokens (an Azure AD problem on Microsoft's side), so `release.yml` builds and attaches the `.vsix` but does not run `vsce publish`. Publish by hand instead:
+
+1. Download the `.vsix` from the tagged GitHub release (or build it as above).
+2. Open the [publisher dashboard](https://marketplace.visualstudio.com/manage) → padlock → **Update** → upload the `.vsix`. This authenticates with your browser session, not a PAT.
+
+Re-check whether PAT auth works again; if it does, add a `vsce publish --pat ${{ secrets.VSCE_PAT }}` step to the `build-vscode-extension` job.
+
+### Open VSX (VSCodium, Theia)
+
+```bash
+npx ovsx publish padlock-x.y.z.vsix --pat <open-vsx-token>
 ```

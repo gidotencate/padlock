@@ -2,7 +2,7 @@
   "name": "padlock",
   "displayName": "padlock",
   "description": "The lint pass for struct memory layout — finds padding waste, false sharing, and cache locality problems in C, C++, Rust, Go, and Zig.",
-  "version": "0.80.0",
+  "version": "0.81.0",
   "publisher": "gidotencate",
   "icon": "icon.png",
   "license": "MIT OR Apache-2.0",
@@ -15,18 +15,31 @@
     "node": ">=20.0.0"
   },
   "categories": [
-    "Linters"
+    "Linters",
+    "Programming Languages"
   ],
   "keywords": [
     "rust",
     "c",
     "cpp",
+    "c++",
     "go",
+    "golang",
     "zig",
     "memory",
-    "layout",
+    "memory-layout",
+    "struct",
+    "struct-padding",
     "padding",
-    "performance"
+    "alignment",
+    "false-sharing",
+    "cache",
+    "performance",
+    "lint",
+    "linter",
+    "static-analysis",
+    "sarif",
+    "lsp"
   ],
   "activationEvents": [
     "onLanguage:rust",
@@ -167,5 +180,13 @@
     "js-yaml": ">=4.3.0",
     "fast-uri": ">=3.1.4",
     "brace-expansion": ">=5.0.8"
+  },
+  "homepage": "https://github.com/gidotencate/padlock#readme",
+  "bugs": {
+    "url": "https://github.com/gidotencate/padlock/issues"
+  },
+  "galleryBanner": {
+    "color": "#1f2937",
+    "theme": "dark"
   }
 }

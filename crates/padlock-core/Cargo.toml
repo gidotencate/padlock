@@ -5,6 +5,7 @@ edition.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 description           = "Core IR, analysis passes, and findings for the padlock struct layout analyzer"
+homepage.workspace    = true
 keywords.workspace    = true
 categories.workspace  = true
 readme                = "README.md"

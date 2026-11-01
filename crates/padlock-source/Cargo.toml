@@ -5,6 +5,7 @@ edition.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 description           = "Source analysis backend (C/C++/Rust/Go/Zig) for the padlock struct layout analyzer"
+homepage.workspace    = true
 keywords.workspace    = true
 categories.workspace  = true
 readme                = "README.md"

@@ -2,6 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/padlock-cli.svg)](https://crates.io/crates/padlock-cli)
 [![CI](https://github.com/gidotencate/padlock/actions/workflows/ci.yml/badge.svg)](https://github.com/gidotencate/padlock/actions/workflows/ci.yml)
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/gidotencate.padlock?label=VS%20Code)](https://marketplace.visualstudio.com/items?itemName=gidotencate.padlock)
 [![License](https://img.shields.io/crates/l/padlock-cli.svg)](#license)
 
 **The lint pass for struct memory layout** — catches padding waste, false sharing, and cache locality problems at the source level, before they cost you at runtime.

@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.81.0] — 2026-11-01
+
+### Changed
+- **Discoverability metadata.** crates.io keywords are now `memory-layout`, `struct-padding`, `static-analysis`, `performance`, `false-sharing`; `padlock-cli` is also listed under `command-line-utilities` and `development-tools::cargo-plugins`, `padlock-lsp` under `text-editors`; every crate has a `homepage`. The VS Code extension gains the `Programming Languages` category, more search keywords, a homepage, a bug-tracker URL and a gallery banner. `action.yml` has a descriptive name and lists Zig. The README shows the Marketplace version badge.
+
 ## [0.80.0] — 2026-10-30
 
 ### Fixed

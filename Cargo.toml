@@ -11,21 +11,22 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version       = "0.80.0"
+version       = "0.81.0"
 edition       = "2024"
 rust-version  = "1.88"
 license     = "MIT OR Apache-2.0"
 repository  = "https://github.com/gidotencate/padlock"
+homepage    = "https://github.com/gidotencate/padlock"
 description = "Struct memory layout analyzer for C, C++, Rust, Go, and Zig"
-keywords    = ["performance", "memory", "layout", "analysis", "cache"]
+keywords    = ["memory-layout", "struct-padding", "static-analysis", "performance", "false-sharing"]
 categories  = ["development-tools", "development-tools::profiling"]
 readme      = "README.md"
 
 [workspace.dependencies]
-padlock-core   = { path = "crates/padlock-core",   version = "0.80.0" }
-padlock-dwarf  = { path = "crates/padlock-dwarf",  version = "0.80.0" }
-padlock-source = { path = "crates/padlock-source", version = "0.80.0" }
-padlock-output = { path = "crates/padlock-output", version = "0.80.0" }
+padlock-core   = { path = "crates/padlock-core",   version = "0.81.0" }
+padlock-dwarf  = { path = "crates/padlock-dwarf",  version = "0.81.0" }
+padlock-source = { path = "crates/padlock-source", version = "0.81.0" }
+padlock-output = { path = "crates/padlock-output", version = "0.81.0" }
 rayon          = "1"
 
 [profile.release]

@@ -5,6 +5,7 @@ edition.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 description           = "Compile-time struct layout assertions for padlock"
+homepage.workspace    = true
 keywords.workspace    = true
 categories.workspace  = true
 readme                = "README.md"

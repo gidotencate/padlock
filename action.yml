@@ -1,5 +1,5 @@
-name: 'padlock-action'
-description: 'Detect padding waste, false sharing, and cache locality problems in C, C++, Rust, and Go structs.'
+name: 'padlock: struct layout analysis'
+description: 'Detect padding waste, false sharing, and cache locality problems in C, C++, Rust, Go, and Zig structs; SARIF output for code scanning.'
 
 author: 'gidotencate'
 

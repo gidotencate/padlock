@@ -5,8 +5,9 @@ edition.workspace     = true
 license.workspace     = true
 repository.workspace  = true
 description           = "Language server exposing padlock's struct-layout findings as LSP diagnostics/hover"
+homepage.workspace    = true
 keywords.workspace    = true
-categories.workspace  = true
+categories             = ["development-tools", "development-tools::profiling", "text-editors"]
 readme                 = "README.md"
 
 [[bin]]

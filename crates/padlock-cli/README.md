@@ -4,6 +4,8 @@
 
 Supports C, C++, Rust, Go, and Zig. CLI-first and CI-ready.
 
+![padlock analyzing and fixing a padded struct](https://raw.githubusercontent.com/gidotencate/padlock/main/docs/images/demo-terminal.gif)
+
 ## Install
 
 ```bash

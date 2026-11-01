@@ -2,6 +2,11 @@
 
 All notable changes to padlock are documented here.
 
+## [0.82.0] — 2026-11-01
+
+### Changed
+- The `padlock-cli` crate README (the crates.io page) shows the terminal demo GIF.
+
 ## [0.81.0] — 2026-11-01
 
 ### Changed

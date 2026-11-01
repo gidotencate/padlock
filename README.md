@@ -9,6 +9,8 @@
 
 Supports C, C++, Rust, Go, and Zig. Ranks findings by impact, generates reorder suggestions, flags concurrency risks. CLI-first and CI-ready.
 
+![padlock analyzing and fixing a padded struct](https://raw.githubusercontent.com/gidotencate/padlock/main/docs/images/demo-terminal.gif)
+
 **Accuracy:** checked against the compilers on real code with default settings (Go standard library, glibc, Python, OpenSSL and libuv headers, Rust crates; amd64, arm64, i386, riscv64): 83–100% of struct sizes exact, the rest flagged as uncertain, **none silently wrong**. See [How exact is it?](#how-exact-is-it).
 
 ```

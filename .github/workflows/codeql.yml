@@ -28,6 +28,9 @@ jobs:
           # The workflows and action.yml themselves (script injection, unsafe triggers).
           - language: actions
             build-mode: none
+          # Formula/padlock.rb, the Homebrew formula.
+          - language: ruby
+            build-mode: none
     steps:
       - uses: actions/checkout@v7
 

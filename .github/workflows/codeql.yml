@@ -25,6 +25,9 @@ jobs:
             build-mode: none
           - language: javascript-typescript
             build-mode: none
+          # The workflows and action.yml themselves (script injection, unsafe triggers).
+          - language: actions
+            build-mode: none
     steps:
       - uses: actions/checkout@v7
 

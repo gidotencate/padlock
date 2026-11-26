@@ -32,7 +32,7 @@ clap           = { version = "4", features = ["derive"] }
 owo-colors     = "4"
 comfy-table    = "8"
 toml           = "1"
-notify         = { version = "8", features = ["macos_fsevent"] }
+notify         = { version = "9", features = ["macos_fsevent"] }
 rayon          = { workspace = true }
 
 [dev-dependencies]
